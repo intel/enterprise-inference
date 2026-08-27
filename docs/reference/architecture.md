@@ -77,7 +77,7 @@ The core installer clones this repo to `ext/enterprise.ai-inference/` — the br
 set in the solutions repo's `config/repos.yaml` — and wires it in automatically:
 
 ```
-applications.ai.enterprise.ai-solutions/
+enterprise-ai-solutions/
 ├── es_auto_installer.sh          # main entry point
 ├── model-manager                 # thin wrapper → ext/.../model_manager/model-manager
 ├── config/repos.yaml             # declares this repo, and which branch to clone
