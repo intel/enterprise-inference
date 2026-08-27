@@ -1,7 +1,7 @@
 # Intel® AI for Enterprise Inference
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-[![Component of: Intel AI for Enterprise Solutions](https://img.shields.io/badge/Component%20of-Intel%20AI%20for%20Enterprise%20Solutions-0068B5)](https://github.com/intel/enterprise-ai-solutions)
+[![Component of: Intel® AI for Enterprise Solutions](https://img.shields.io/badge/Component%20of-Intel%C2%AE%20AI%20for%20Enterprise%20Solutions-0068B5)](https://github.com/intel/enterprise-ai-solutions)
 [![Platform: Intel Xeon](https://img.shields.io/badge/Platform-Intel%C2%AE%20Xeon%C2%AE-0068B5)](https://www.intel.com/xeon)
 [![Serving: KServe](https://img.shields.io/badge/Serving-KServe-326CE5)](https://kserve.github.io/website/)
 [![Runtimes: vLLM · OVMS](https://img.shields.io/badge/Runtimes-vLLM%20%C2%B7%20OVMS-purple)](https://vllm.ai)
