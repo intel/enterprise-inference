@@ -1,0 +1,69 @@
+---
+name: ShellCheck
+
+# Actions are pinned to full commit SHAs (the trailing `# vX.Y.Z` is the tag
+# that SHA corresponded to) and every tool to an exact version -- no floating
+# tags. Version bumps are therefore explicit, reviewable changes to this file.
+#
+# Only GitHub-hosted runners and public actions are used.
+#
+# Soft-fail for the initial rollout: findings publish to Security -> Code
+# scanning instead of blocking the branch. Tighten the `exit-code` /
+# `--soft-fail` / `continue-on-error` switches once the backlog is triaged.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - release-1.0
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shellcheck:
+    name: ShellCheck (shell scripts)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Harden the runner (audit all outbound calls)
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Installed from the pinned upstream release and checksum-verified rather
+      # than via apt, whose version drifts with the runner image.
+      - name: Install ShellCheck
+        env:
+          SHELLCHECK_VERSION: v0.11.0
+          SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          base="https://github.com/koalaman/shellcheck/releases/download"
+          file="shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          curl -fsSL "${base}/${SHELLCHECK_VERSION}/${file}" -o shellcheck.tar.xz
+          echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum --check --strict
+          tar -xJf shellcheck.tar.xz
+          sudo install -m 0755 \
+            "shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: Run ShellCheck
+        continue-on-error: true
+        run: |
+          mapfile -t files < <(git ls-files '*.sh')
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No shell scripts found."; exit 0
+          fi
+          printf 'Scanning %s script(s)\n' "${#files[@]}"
+          shellcheck --severity=warning --format=gcc "${files[@]}"
