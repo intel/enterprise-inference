@@ -58,12 +58,81 @@ jobs:
             "shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
           shellcheck --version
 
+      # A `*.sh` glob missed the largest script in either tree
+      # (model_manager/model-manager, 1429 lines, no suffix), so discovery
+      # reads shebangs as well as suffixes.
+      #
+      # Entry points are linted with -x so the helper scripts they source are
+      # followed. The --source-path list is required because the source
+      # statements are built from a variable ("$MM_LIB/config.sh") that
+      # ShellCheck cannot resolve unaided -- without it, 7 globals that the
+      # helpers do set and the entry point does read looked unused.
+      #
+      # Helper scripts are then linted on their own. ShellCheck sees one file at
+      # a time, so a global a helper sets for its caller reads as unused: 26 of
+      # the 31 SC2034 hits were that. Turning SC2034 off for them was too blunt
+      # -- it also hid four globals that really are written and never read
+      # anywhere (RUNTIME_DEVICE, NRI_ADVANCED_MODE, NRI_HIDE_HT,
+      # NRI_TARGET_NODE). So each hit is checked individually instead, and
+      # suppressed only when some other file demonstrably reads that variable.
+      # The check applies to SHOUTY_CASE names of 3+ characters only: those are
+      # the cross-file globals by convention, and a short lowercase name like a
+      # loop's `i` collides textually with unrelated files.
       - name: Run ShellCheck
         continue-on-error: true
         run: |
-          mapfile -t files < <(git ls-files '*.sh')
+          mapfile -t files < <(
+            git ls-files | while read -r f; do
+              [ -f "$f" ] || continue
+              case "$f" in *.sh) echo "$f"; continue ;; esac
+              head -1 "$f" | grep -qE '^#!.*(bash|/sh|dash|ksh)' && echo "$f"
+            done
+          )
           if [ ${#files[@]} -eq 0 ]; then
             echo "No shell scripts found."; exit 0
           fi
-          printf 'Scanning %s script(s)\n' "${#files[@]}"
-          shellcheck --severity=warning --format=gcc "${files[@]}"
+
+          helpers=() entry=()
+          for f in "${files[@]}"; do
+            b=$(basename "$f")
+            sourcers=$(grep -lE \
+              "(^|[[:space:]])(\.|source)[[:space:]]+[^|;&]*${b//./\\.}" \
+              "${files[@]}" 2>/dev/null | grep -vxF "$f" || true)
+            if [ -n "$sourcers" ]; then helpers+=("$f"); else entry+=("$f"); fi
+          done
+
+          mapfile -t dirs < <(printf '%s\n' "${files[@]}" | xargs -n1 dirname | sort -u)
+          sp=()
+          for d in "${dirs[@]}"; do sp+=(--source-path="$d"); done
+
+          printf 'Scanning %s script(s): %s entry point(s), %s sourced helper(s)\n' \
+            "${#files[@]}" "${#entry[@]}" "${#helpers[@]}"
+          rc=0
+
+          if [ ${#entry[@]} -gt 0 ]; then
+            shellcheck -x "${sp[@]}" --severity=warning --format=gcc "${entry[@]}" || rc=1
+          fi
+
+          if [ ${#helpers[@]} -gt 0 ]; then
+            raw=$(shellcheck --severity=warning --format=gcc "${helpers[@]}" 2>&1 || true)
+            kept=""
+            while IFS= read -r line; do
+              [ -n "$line" ] || continue
+              var=$(printf '%s\n' "$line" | sed -nE \
+                's/.*warning: ([A-Z][A-Z0-9_]{2,}) appears unused.*\[SC2034\]$/\1/p')
+              if [ -n "$var" ]; then
+                src=${line%%:*}
+                readers=$(
+                  printf '%s\n' "${files[@]}" | grep -vxF "$src" | tr '\n' '\0' \
+                    | xargs -0 -r grep -lE "\\\$\{?${var}\b" 2>/dev/null || true
+                  git ls-files -z | xargs -0 -r grep -lF "{{${var}}}" 2>/dev/null \
+                    | grep -vxF "$src" || true
+                )
+                [ -n "$readers" ] && continue
+              fi
+              kept+="$line"$'\n'
+            done <<< "$raw"
+            if [ -n "$kept" ]; then printf '%s' "$kept"; rc=1; fi
+          fi
+
+          exit "$rc"

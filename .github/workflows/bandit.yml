@@ -58,12 +58,21 @@ jobs:
           pip install --disable-pip-version-check
           "bandit[sarif,toml]==1.9.4"
 
-      # B101 (assert) and B601 (shell markers) are noisy in Ansible/test code.
+      # Skipped tests, and why each one cannot be true here:
+      #   B101 assert_used                  -- asserts in test code
+      #   B601 paramiko_calls               -- paramiko is not a dependency
+      #   B404 import_subprocess            -- importing subprocess is not a defect
+      #   B603 subprocess_without_shell     -- fires on the *recommended* argv-list
+      #        form and cannot judge whether the input is trusted; the genuinely
+      #        dangerous variants (B602/B604/B605/B609, shell=True and friends)
+      #        stay enabled.
+      # Severity is deliberately not filtered: several real tests (e.g. B105
+      # hardcoded password) report LOW, so raising the floor would hide them.
       - name: Run Bandit
         run: |
-          bandit -r . -x ./venv,./.venv,./tests -s B101,B601 \
+          bandit -r . -x ./venv,./.venv,./tests -s B101,B404,B601,B603 \
             -f sarif -o bandit-results.sarif --exit-zero
-          bandit -r . -x ./venv,./.venv,./tests -s B101,B601 -f txt --exit-zero
+          bandit -r . -x ./venv,./.venv,./tests -s B101,B404,B601,B603 -f txt --exit-zero
 
       - name: Upload Bandit SARIF
         uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9

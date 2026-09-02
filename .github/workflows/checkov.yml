@@ -59,9 +59,12 @@ jobs:
       # `helm` is deliberately not in --framework: Checkov renders charts into a
       # random temp dir and reports paths relative to it, so every finding points
       # at a file that does not exist in the repo -- unanchorable in the Security
-      # tab, and re-reported as new on every run. Trivy's misconfig scanner covers
-      # chart misconfiguration with correct paths. charts/ is vendored upstream
-      # (Istio, LiteLLM, valkey), so its defaults are not ours to fix here.
+      # tab, and re-reported as new on every run.
+      #
+      # charts/ is skipped for the same reason the Trivy workflow skips it: it
+      # is vendored upstream (Istio, LiteLLM, valkey) and its defaults are not
+      # ours to change here. Neither tool reports on it, deliberately -- a
+      # decision to revisit if the charts are ever forked rather than vendored.
       - name: Run Checkov
         continue-on-error: true
         run: |
