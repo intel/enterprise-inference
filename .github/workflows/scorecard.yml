@@ -19,6 +19,8 @@ on:
     branches:
       - main
   schedule:
+    # Like every `schedule` trigger, this only fires once the workflow is
+    # present on the default branch; it is dormant on any other branch.
     - cron: '45 23 * * 5'
 
 permissions: read-all

@@ -21,6 +21,10 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   schedule:
     # Weekly re-scan so new findings surface without a code change.
+    # NOTE: GitHub only fires `schedule` on the repository's default
+    # branch, so this trigger stays dormant until these workflows are
+    # also merged to `main`. The push and pull_request triggers above
+    # work on every listed branch regardless.
     - cron: '20 4 * * 1'
 
 permissions:
@@ -68,11 +72,19 @@ jobs:
       #        stay enabled.
       # Severity is deliberately not filtered: several real tests (e.g. B105
       # hardcoded password) report LOW, so raising the floor would hide them.
+      # Scanned once. The readable summary below is rendered from the SARIF
+      # that scan produced rather than by scanning the tree a second time.
       - name: Run Bandit
         run: |
           bandit -r . -x ./venv,./.venv,./tests -s B101,B404,B601,B603 \
             -f sarif -o bandit-results.sarif --exit-zero
-          bandit -r . -x ./venv,./.venv,./tests -s B101,B404,B601,B603 -f txt --exit-zero
+          jq -r '"Bandit: \(.runs[0].results | length) finding(s)",
+            (.runs[0].results[]
+              | "  \(.level)\t\(.ruleId)\t"
+                + "\(.locations[0].physicalLocation.artifactLocation.uri)"
+                + ":\(.locations[0].physicalLocation.region.startLine)\t"
+                + "\(.message.text | split("\n")[0])")' \
+            bandit-results.sarif
 
       - name: Upload Bandit SARIF
         uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9

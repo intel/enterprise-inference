@@ -21,6 +21,10 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   schedule:
     # Weekly re-scan so new findings surface without a code change.
+    # NOTE: GitHub only fires `schedule` on the repository's default
+    # branch, so this trigger stays dormant until these workflows are
+    # also merged to `main`. The push and pull_request triggers above
+    # work on every listed branch regardless.
     - cron: '0 4 * * 1'
 
 permissions:
