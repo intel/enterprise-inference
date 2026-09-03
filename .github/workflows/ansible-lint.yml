@@ -50,8 +50,8 @@ jobs:
       - name: Install ansible-lint
         run: pip install --disable-pip-version-check "ansible-lint==26.8.0"
 
-      # Style-only rule families are skipped: unfiltered they produced 499
-      # findings here, of which 4 were substantive. name[casing] alone
+      # Style-only rule families are skipped: unfiltered they produced 501
+      # findings here, of which 6 were substantive. name[casing] alone
       # accounted for 350 of them, fighting this repo's deliberate
       # `role | action | desc` naming convention. What is left is correctness
       # and command-shell risk.
