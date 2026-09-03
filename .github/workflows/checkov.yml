@@ -1,0 +1,87 @@
+---
+name: Checkov
+
+# Actions are pinned to full commit SHAs (the trailing `# vX.Y.Z` is the tag
+# that SHA corresponded to) and every tool to an exact version -- no floating
+# tags. Version bumps are therefore explicit, reviewable changes to this file.
+#
+# Only GitHub-hosted runners and public actions are used.
+#
+# Soft-fail for the initial rollout: findings publish to Security -> Code
+# scanning instead of blocking the branch. Tighten the `exit-code` /
+# `--soft-fail` / `continue-on-error` switches once the backlog is triaged.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - release-1.0
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    # Weekly re-scan so new findings surface without a code change.
+    # NOTE: GitHub only fires `schedule` on the repository's default
+    # branch, so this trigger stays dormant until these workflows are
+    # also merged to `main`. The push and pull_request triggers above
+    # work on every listed branch regardless.
+    - cron: '40 4 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checkov:
+    name: Checkov (Kubernetes / Actions / secrets)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Harden the runner (audit all outbound calls)
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.14'
+
+      - name: Install Checkov
+        run: pip install --disable-pip-version-check "checkov==3.3.16"
+
+      # `helm` is deliberately not in --framework: Checkov renders charts into a
+      # random temp dir and reports paths relative to it, so every finding points
+      # at a file that does not exist in the repo -- unanchorable in the Security
+      # tab, and re-reported as new on every run.
+      #
+      # charts/ is skipped for the same reason the Trivy workflow skips it: it
+      # is vendored upstream (Istio, LiteLLM, valkey) and its defaults are not
+      # ours to change here. Neither tool reports on it, deliberately -- a
+      # decision to revisit if the charts are ever forked rather than vendored.
+      - name: Run Checkov
+        continue-on-error: true
+        run: |
+          checkov -d . \
+            --framework kubernetes github_actions secrets \
+            --skip-path 'charts/' \
+            --soft-fail --compact --quiet \
+            -o sarif --output-file-path console,. || true
+          ls -la results.sarif 2>/dev/null || echo "no results.sarif produced"
+
+      - name: Upload Checkov SARIF
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        if: always() && hashFiles('results.sarif') != ''
+        with:
+          sarif_file: results.sarif
+          category: checkov

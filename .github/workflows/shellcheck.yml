@@ -1,0 +1,138 @@
+---
+name: ShellCheck
+
+# Actions are pinned to full commit SHAs (the trailing `# vX.Y.Z` is the tag
+# that SHA corresponded to) and every tool to an exact version -- no floating
+# tags. Version bumps are therefore explicit, reviewable changes to this file.
+#
+# Only GitHub-hosted runners and public actions are used.
+#
+# Soft-fail for the initial rollout: findings publish to Security -> Code
+# scanning instead of blocking the branch. Tighten the `exit-code` /
+# `--soft-fail` / `continue-on-error` switches once the backlog is triaged.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - release-1.0
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shellcheck:
+    name: ShellCheck (shell scripts)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Harden the runner (audit all outbound calls)
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Installed from the pinned upstream release and checksum-verified rather
+      # than via apt, whose version drifts with the runner image.
+      - name: Install ShellCheck
+        env:
+          SHELLCHECK_VERSION: v0.11.0
+          SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          base="https://github.com/koalaman/shellcheck/releases/download"
+          file="shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          curl -fsSL "${base}/${SHELLCHECK_VERSION}/${file}" -o shellcheck.tar.xz
+          echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum --check --strict
+          tar -xJf shellcheck.tar.xz
+          sudo install -m 0755 \
+            "shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      # A `*.sh` glob missed the largest script in either tree
+      # (model_manager/model-manager, 1429 lines, no suffix), so discovery
+      # reads shebangs as well as suffixes.
+      #
+      # Entry points are linted with -x so the helper scripts they source are
+      # followed. The --source-path list is required because the source
+      # statements are built from a variable ("$MM_LIB/config.sh") that
+      # ShellCheck cannot resolve unaided -- without it, 7 globals that the
+      # helpers do set and the entry point does read looked unused.
+      #
+      # Helper scripts are then linted on their own. ShellCheck sees one file at
+      # a time, so a global a helper sets for its caller reads as unused: 26 of
+      # the 31 SC2034 hits were that. Turning SC2034 off for them was too blunt
+      # -- it also hid four globals that really are written and never read
+      # anywhere (RUNTIME_DEVICE, NRI_ADVANCED_MODE, NRI_HIDE_HT,
+      # NRI_TARGET_NODE). So each hit is checked individually instead, and
+      # suppressed only when some other file demonstrably reads that variable.
+      # The check applies to SHOUTY_CASE names of 3+ characters only: those are
+      # the cross-file globals by convention, and a short lowercase name like a
+      # loop's `i` collides textually with unrelated files.
+      - name: Run ShellCheck
+        continue-on-error: true
+        run: |
+          mapfile -t files < <(
+            git ls-files | while read -r f; do
+              [ -f "$f" ] || continue
+              case "$f" in *.sh) echo "$f"; continue ;; esac
+              head -1 "$f" | grep -qE '^#!.*(bash|/sh|dash|ksh)' && echo "$f"
+            done
+          )
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No shell scripts found."; exit 0
+          fi
+
+          helpers=() entry=()
+          for f in "${files[@]}"; do
+            b=$(basename "$f")
+            sourcers=$(grep -lE \
+              "(^|[[:space:]])(\.|source)[[:space:]]+[^|;&]*${b//./\\.}" \
+              "${files[@]}" 2>/dev/null | grep -vxF "$f" || true)
+            if [ -n "$sourcers" ]; then helpers+=("$f"); else entry+=("$f"); fi
+          done
+
+          mapfile -t dirs < <(printf '%s\n' "${files[@]}" | xargs -n1 dirname | sort -u)
+          sp=()
+          for d in "${dirs[@]}"; do sp+=(--source-path="$d"); done
+
+          printf 'Scanning %s script(s): %s entry point(s), %s sourced helper(s)\n' \
+            "${#files[@]}" "${#entry[@]}" "${#helpers[@]}"
+          rc=0
+
+          if [ ${#entry[@]} -gt 0 ]; then
+            shellcheck -x "${sp[@]}" --severity=warning --format=gcc "${entry[@]}" || rc=1
+          fi
+
+          if [ ${#helpers[@]} -gt 0 ]; then
+            raw=$(shellcheck --severity=warning --format=gcc "${helpers[@]}" 2>&1 || true)
+            kept=""
+            while IFS= read -r line; do
+              [ -n "$line" ] || continue
+              var=$(printf '%s\n' "$line" | sed -nE \
+                's/.*warning: ([A-Z][A-Z0-9_]{2,}) appears unused.*\[SC2034\]$/\1/p')
+              if [ -n "$var" ]; then
+                src=${line%%:*}
+                readers=$(
+                  printf '%s\n' "${files[@]}" | grep -vxF "$src" | tr '\n' '\0' \
+                    | xargs -0 -r grep -lE "\\\$\{?${var}\b" 2>/dev/null || true
+                  git ls-files -z | xargs -0 -r grep -lF "{{${var}}}" 2>/dev/null \
+                    | grep -vxF "$src" || true
+                )
+                [ -n "$readers" ] && continue
+              fi
+              kept+="$line"$'\n'
+            done <<< "$raw"
+            if [ -n "$kept" ]; then printf '%s' "$kept"; rc=1; fi
+          fi
+
+          exit "$rc"
