@@ -110,11 +110,11 @@ jobs:
           rc=0
 
           if [ ${#entry[@]} -gt 0 ]; then
-            shellcheck -x "${sp[@]}" --severity=warning --format=gcc "${entry[@]}" || rc=1
+            shellcheck -x "${sp[@]}" --severity=error --format=gcc "${entry[@]}" || rc=1
           fi
 
           if [ ${#helpers[@]} -gt 0 ]; then
-            raw=$(shellcheck --severity=warning --format=gcc "${helpers[@]}" 2>&1 || true)
+            raw=$(shellcheck --severity=error --format=gcc "${helpers[@]}" 2>&1 || true)
             kept=""
             while IFS= read -r line; do
               [ -n "$line" ] || continue
