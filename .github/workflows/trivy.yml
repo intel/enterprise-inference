@@ -1,0 +1,120 @@
+---
+name: Trivy
+
+# Actions are pinned to full commit SHAs (the trailing `# vX.Y.Z` is the tag
+# that SHA corresponded to) and every tool to an exact version -- no floating
+# tags. Version bumps are therefore explicit, reviewable changes to this file.
+#
+# Only GitHub-hosted runners and public actions are used.
+#
+# Soft-fail for the initial rollout: findings publish to Security -> Code
+# scanning instead of blocking the branch. Tighten the `exit-code` /
+# `--soft-fail` / `continue-on-error` switches once the backlog is triaged.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - release-1.0
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    # Weekly re-scan so new findings surface without a code change.
+    # NOTE: GitHub only fires `schedule` on the repository's default
+    # branch, so this trigger stays dormant until these workflows are
+    # also merged to `main`. The push and pull_request triggers above
+    # work on every listed branch regardless.
+    - cron: '0 4 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  trivy:
+    name: Trivy (vuln, secret, misconfig, license)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Harden the runner (audit all outbound calls)
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Two scans, because one severity threshold cannot serve both halves.
+      # CVEs, secrets and licences are triaged at CRITICAL,HIGH. Trivy rates
+      # nearly every Kubernetes misconfiguration check LOW or MEDIUM, so the
+      # same threshold would silence that scanner entirely; it instead runs at
+      # every severity and is scoped away from vendored charts.
+      #
+      # `limit-severities-for-sarif` must be set: it defaults to false, and
+      # with it unset the action drops --severity for the SARIF run only. The
+      # table said 0 findings while the uploaded SARIF carried 17 LOW/MEDIUM
+      # ones -- the Security tab silently ignored the declared threshold.
+      #
+      # NOTE: the Trivy binary is pinned, but its vulnerability database is
+      # fetched fresh each run -- a scanner pinned to stale CVE data is worse
+      # than useless.
+      - name: Trivy vuln / secret / licence scan (SARIF)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.74.0
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,license
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          format: sarif
+          output: trivy-vuln.sarif
+          exit-code: '0'
+
+      - name: Upload Trivy vuln SARIF
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        if: always() && hashFiles('trivy-vuln.sarif') != ''
+        with:
+          sarif_file: trivy-vuln.sarif
+          category: trivy-vuln
+
+      # charts/ is vendored upstream (Istio, LiteLLM, valkey); its defaults are
+      # not ours to change, and left in it contributed 16 of 17 findings. This
+      # is the same scoping rule the Checkov workflow applies.
+      - name: Trivy misconfiguration scan (SARIF)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.74.0
+          scan-type: fs
+          scan-ref: .
+          scanners: misconfig
+          skip-dirs: charts
+          format: sarif
+          output: trivy-misconfig.sarif
+          exit-code: '0'
+
+      - name: Upload Trivy misconfiguration SARIF
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        if: always() && hashFiles('trivy-misconfig.sarif') != ''
+        with:
+          sarif_file: trivy-misconfig.sarif
+          category: trivy-misconfig
+
+      - name: Trivy summary (table)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.74.0
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig,license
+          skip-dirs: charts
+          format: table
+          exit-code: '0'

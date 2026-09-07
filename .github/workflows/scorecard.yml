@@ -1,0 +1,66 @@
+---
+name: Scorecard supply-chain security
+
+# Actions are pinned to full commit SHAs (the trailing `# vX.Y.Z` is the tag
+# that SHA corresponded to) and every tool to an exact version -- no floating
+# tags. Version bumps are therefore explicit, reviewable changes to this file.
+#
+# Only GitHub-hosted runners and public actions are used.
+#
+# OpenSSF Scorecard rates repository security posture (branch protection,
+# pinned dependencies, token permissions, ...). Results publish to Security ->
+# Code scanning. Runs on the default branch and on a schedule -- Scorecard
+# grades the repository, not an individual pull request.
+
+on:
+  workflow_dispatch:
+  branch_protection_rule:
+  push:
+    branches:
+      - main
+  schedule:
+    # Like every `schedule` trigger, this only fires once the workflow is
+    # present on the default branch; it is dormant on any other branch.
+    - cron: '45 23 * * 5'
+
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+    steps:
+      - name: Harden the runner (audit all outbound calls)
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: scorecard-results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: scorecard-results
+          path: scorecard-results.sarif
+          retention-days: 5
+
+      - name: Upload Scorecard SARIF
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        if: always() && hashFiles('scorecard-results.sarif') != ''
+        with:
+          sarif_file: scorecard-results.sarif
+          category: scorecard
