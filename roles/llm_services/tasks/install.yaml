@@ -52,13 +52,24 @@
         labels:
           app.kubernetes.io/name: "{{ llm_services_model_store_pvc }}"
           app.kubernetes.io/managed-by: ansible
-      spec:
-        accessModes:
-          - "{{ llm_services_model_store_access_mode }}"
-        resources:
-          requests:
-            storage: "{{ llm_services_model_store_size }}"
-        storageClassName: "{{ llm_services_model_store_storage_class }}"
+      spec: "{{ _llm_model_store_spec }}"
+  vars:
+    _llm_model_store_spec_base:
+      accessModes:
+        - "{{ llm_services_model_store_access_mode }}"
+      resources:
+        requests:
+          storage: "{{ llm_services_model_store_size }}"
+    # An empty storage class must render as *no* storageClassName key, so the PVC
+    # binds to the cluster default StorageClass. storageClassName: "" means the
+    # opposite - dynamic provisioning disabled - and the PVC stays Pending.
+    # _llm_sc_requested is the null/whitespace-tolerant form of
+    # llm_services_model_store_storage_class (defaults/main.yaml).
+    _llm_model_store_spec: >-
+      {{ _llm_model_store_spec_base
+         | combine({'storageClassName': _llm_sc_requested})
+         if _llm_sc_requested | length > 0
+         else _llm_model_store_spec_base }}
 
 # -- CRD readiness gates (fail fast if KServe isn't installed) --
 
