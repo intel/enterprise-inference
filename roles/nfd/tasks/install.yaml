@@ -69,6 +69,24 @@
                     cpu: "200m"
                     memory: "128Mi"
 
+    # NFD worker mounts hostPath (/sys, /etc/kubernetes/node-feature-discovery,
+    # /usr/src) and typically uses hostNetwork; namespace-level PSS applies to
+    # every pod in the namespace, so master/gc must sit at the same floor the
+    # worker requires — "privileged".
+    - name: "nfd | Label namespace — PSS"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ nfd_namespace }}"
+            labels:
+              pod-security.kubernetes.io/enforce: "privileged"
+              pod-security.kubernetes.io/audit: "privileged"
+              pod-security.kubernetes.io/warn: "privileged"
+      when: enforce_pss | default(false) | bool
+
     # Wait for NFD worker pods to be running on all nodes so labels are applied
     - name: "nfd | Wait for worker DaemonSet ready"
       kubernetes.core.k8s_info:

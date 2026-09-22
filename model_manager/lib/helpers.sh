@@ -235,6 +235,37 @@ pod_progress() {
     esac
 }
 
+# wait_pods_gone — block until no pods for a model remain in the namespace.
+#
+# Deleting the serving CR (LLMInferenceService/InferenceService) returns as soon
+# as the CR object itself is gone, but the KServe-owned Deployment → ReplicaSet →
+# Pods are torn down asynchronously by the garbage collector and honour their
+# graceful-termination period. Those pods stay in phase Running (Terminating)
+# and keep their pinned CPUs / NRI balloon until they are truly removed — which
+# is why an immediate cpu-collisions-check still lists them. This waits for that
+# tail so `undeploy --wait` only returns once the CPUs are actually reclaimed.
+#
+# Bounded by the timeout so a pod wedged by a finalizer or stuck termination
+# never blocks the CLI forever. Returns 0 once the pods are gone, 1 on timeout.
+wait_pods_gone() {
+    local namespace="$1" name="$2" timeout="${3:-900}"
+    local selector="app.kubernetes.io/name=$name"
+    local start=$SECONDS end=$((SECONDS + timeout))
+    local last_beat=0 remaining
+    while (( SECONDS < end )); do
+        remaining=$(kubectl get pods -n "$namespace" -l "$selector" \
+            -o name 2>/dev/null | wc -l)
+        remaining=${remaining//[[:space:]]/}
+        (( remaining == 0 )) && return 0
+        if (( SECONDS - last_beat >= 15 )); then
+            info "  ${DIM}[$(fmt_duration $((SECONDS - start)))] waiting for ${remaining} pod(s) to terminate...${RESET}"
+            last_beat=$SECONDS
+        fi
+        sleep 3
+    done
+    return 1
+}
+
 
 patch_pool_status() {
     local name="$1" namespace="$2"

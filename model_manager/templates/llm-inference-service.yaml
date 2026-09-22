@@ -5,7 +5,7 @@ metadata:
   namespace: {{NAMESPACE}}
   labels:
     app.kubernetes.io/name: {{MODEL_NAME}}
-    app.kubernetes.io/managed-by: model-manager
+    app.kubernetes.io/managed-by: model-manager{{EXTRA_LABELS}}
 spec:
 {{NRI_ANNOTATIONS}}  model:
     uri: {{MODEL_URI}}

@@ -34,11 +34,17 @@ source "$MM_LIB/cpu_policy.sh"
 # ── Global option state ──────────────────────────────────────────────────────
 DRY_RUN=false
 WAIT=false
-WAIT_TIMEOUT=900
+WAIT_TIMEOUT=900            # deploy default; large because model load + warmup is slow
+WAIT_TIMEOUT_SET=false      # true once --wait-timeout is given explicitly
+UNDEPLOY_WAIT_TIMEOUT=180   # undeploy default: pod graceful shutdown is quick (3 min ceiling)
 DOWNLOAD_TIMEOUT=7200
 
 EXTRA_ARGS=()
 EXTRA_ENV=()
+# Extra metadata labels for the serving CR. Lets a caller stamp its own
+# ownership marker: the built-in managed-by=model-manager is shared by every
+# caller, so it cannot distinguish who deployed a model.
+EXTRA_LABELS=()
 
 # Per-model / per-version override JSON, set during resolution. Safe defaults
 # here so build_env_block / build_args_block never see an unset var (a brace
@@ -63,6 +69,19 @@ POSITIONAL=()
 
 require_int() {
     [[ "$2" =~ ^[0-9]+$ ]] || abort "--$1 requires a positive integer, got: $2"
+}
+
+# Validate a --label argument up front: a malformed key or value would otherwise
+# only surface as a rejected apply, long after the weights download.
+require_label() {
+    [[ "$1" == *=* ]] || abort "--label requires KEY=VALUE, got: $1"
+    local key="${1%%=*}" value="${1#*=}"
+    [[ -n "$key" ]] || abort "--label key must not be empty: $1"
+    # Optional DNS-subdomain prefix, then a name; value may be empty (k8s allows it).
+    [[ "$key" =~ ^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[a-zA-Z0-9]([-_.a-zA-Z0-9]*[a-zA-Z0-9])?$ ]] \
+        || abort "--label key is not a valid Kubernetes label key: $key"
+    [[ -z "$value" || "$value" =~ ^[a-zA-Z0-9]([-_.a-zA-Z0-9]*[a-zA-Z0-9])?$ ]] \
+        || abort "--label value is not a valid Kubernetes label value: $value"
 }
 
 # ── Usage ────────────────────────────────────────────────────────────────────
@@ -92,8 +111,11 @@ ${BOLD}${CYAN}Deploy Options:${RESET}
   ${GREEN}--node${RESET} <name>        Pin deployment to a specific node
   ${GREEN}--env${RESET} KEY=VAL        Add/override env var (repeatable)
   ${GREEN}--arg${RESET} "--flag=val"   Append a runtime arg (repeatable)
-  ${GREEN}--wait${RESET}               Block until model is Ready
-  ${GREEN}--wait-timeout${RESET} N     Seconds to wait (default: 900)
+  ${GREEN}--label${RESET} KEY=VAL      Add a metadata label to the serving CR (repeatable);
+                            use it to mark ownership — managed-by=model-manager
+                            is set for every caller and cannot distinguish them
+  ${GREEN}--wait${RESET}               deploy: block until model is Ready; undeploy: block until pods terminate
+  ${GREEN}--wait-timeout${RESET} N     Seconds to wait (default: deploy 900, undeploy 180)
   ${GREEN}--dry-run${RESET}            Print manifest without applying
 
 ${BOLD}${CYAN}Examples:${RESET}
@@ -101,6 +123,7 @@ ${BOLD}${CYAN}Examples:${RESET}
   ./model-manager deploy llama3-8b-awq --server-version 0.19.1 --wait
   ./model-manager deploy --id meta-llama/Llama-3.2-1B-Instruct --cpu 8 --memory 16Gi
   ./model-manager undeploy llama3-8b-awq
+  ./model-manager undeploy llama3-8b-awq --wait        # block until pods terminate + CPUs are freed
 
 ${BOLD}${CYAN}For status / scale / logs, use kubectl:${RESET}
   kubectl get llminferenceservices,inferenceservices -n llm-inference
@@ -135,7 +158,7 @@ parse_args() {
         case "$1" in
             --dry-run)      DRY_RUN=true;                      shift ;;
             --wait)         WAIT=true;                         shift ;;
-            --wait-timeout) require_int wait-timeout "$2"; WAIT_TIMEOUT="$2"; shift 2 ;;
+            --wait-timeout) require_int wait-timeout "$2"; WAIT_TIMEOUT="$2"; WAIT_TIMEOUT_SET=true; shift 2 ;;
             --id)           OPT_ID="$2";                       shift 2 ;;
             --name)         OPT_NAME="$2";                     shift 2 ;;
             --server)       OPT_SERVER="$2";                   shift 2 ;;
@@ -152,6 +175,7 @@ parse_args() {
             --node)         OPT_NODE="$2";                     shift 2 ;;
             --env)          EXTRA_ENV+=("$2");                 shift 2 ;;
             --arg)          EXTRA_ARGS+=("$2");                shift 2 ;;
+            --label)        require_label "$2"; EXTRA_LABELS+=("$2"); shift 2 ;;
             -h|--help)      usage; exit 0 ;;
             -v|--version)   echo "model-manager $MM_VERSION"; exit 0 ;;
             --)             shift; POSITIONAL+=("$@"); break ;;
@@ -470,40 +494,29 @@ build_chat_template_blocks() {
 "
 }
 
-# Args block. vLLM applies repeated flags last-wins, so we simply append in
-# ascending precedence and let the engine resolve duplicates:
+# Args block. Precedence (lowest → highest), deduped by flag name so a higher
+# layer REPLACES rather than appends — the emitted list matches vLLM's
+# last-wins runtime semantics but the CRD carries only one occurrence:
 #   category defaults → version args delta → models.yaml per-model args
 #   → --served-model-name / --chat-template → --arg CLI
 build_args_block() {
     local rj
     rj=$(runtime_json "$MODEL_RUNTIME")
-    local out="" arg
 
     # NB: OVMS args come entirely from the ClusterServingRuntime (--config_path);
     # the InferenceService adds none. The model is pre-exported to IR by the prep
     # job, so no --source_model here.
 
-    while IFS= read -r arg; do
-        [[ -n "$arg" ]] && out+="        - \"$arg\"
-"
-    done < <(jq -r --arg c "$MODEL_CATEGORY" '.categories[$c].args // [] | .[]' <<< "$rj" 2>/dev/null)
-
-    # Per-version args delta (from the selected version). Always initialized upstream.
-    while IFS= read -r arg; do
-        [[ -n "$arg" ]] && out+="        - \"$arg\"
-"
-    done < <(jq -r '.[]' <<< "$RUNTIME_VERSION_ARGS_JSON" 2>/dev/null)
-
-    # Per-model args from models.yaml — central, reusable override.
-    while IFS= read -r arg; do
-        [[ -n "$arg" ]] && out+="        - \"$arg\"
-"
-    done < <(jq -r '.[]' <<< "$MODEL_ARGS_JSON" 2>/dev/null)
+    # Concatenate every source into one JSON array, low-precedence first.
+    local all_json
+    all_json=$(jq -cn \
+        --argjson cat "$(jq -c --arg c "$MODEL_CATEGORY" '.categories[$c].args // []' <<< "$rj")" \
+        --argjson ver "$RUNTIME_VERSION_ARGS_JSON" \
+        --argjson model "$MODEL_ARGS_JSON" \
+        '$cat + $ver + $model')
 
     if [[ "$MODEL_KIND" == "LLMInferenceService" ]]; then
-        out+="        - \"--served-model-name\"
-        - \"$MODEL_NAME\"
-"
+        all_json=$(jq -c --arg n "$MODEL_NAME" '. + ["--served-model-name", $n]' <<< "$all_json")
         # Optional per-model chat template (models.yaml: chat_template).
         # Either form resolves to a PATH here, never to inline Jinja: an absolute
         # path is passed through untouched, while inline Jinja is written to a
@@ -513,20 +526,73 @@ build_args_block() {
         # apply_chat_template_cm). Placed before EXTRA_ARGS so a user
         # --arg "--chat-template=..." still wins.
         if [[ -n "${MODEL_CHAT_TEMPLATE:-}" ]]; then
-            out+="        - \"--chat-template\"
-        - $(yaml_quote "$(chat_template_path)")
-"
+            all_json=$(jq -c --arg t "$(chat_template_path)" \
+                '. + ["--chat-template", $t]' <<< "$all_json")
         fi
     fi
 
-    for arg in "${EXTRA_ARGS[@]}"; do
-        out+="        - \"$arg\"
+    # EXTRA_ARGS from --arg CLI — highest precedence.
+    if (( ${#EXTRA_ARGS[@]} > 0 )); then
+        local extra_json
+        extra_json=$(printf '%s\n' "${EXTRA_ARGS[@]}" | jq -Rc '[inputs]')
+        all_json=$(jq -c --argjson e "$extra_json" '. + $e' <<< "$all_json")
+    fi
+
+    # Dedupe by flag name, keeping the LAST occurrence. Recognizes three forms
+    # per entry: "--flag=value" (inline), "--flag" "value" (paired, two slots),
+    # "--flag" (boolean). Non-flag tokens (no leading --) are kept in place and
+    # deduped by their literal value.
+    local deduped_json
+    deduped_json=$(jq -c '
+        . as $a
+        | [range(0; $a | length)]
+        | reduce .[] as $i ({out: [], skip: false};
+            if .skip then .skip = false
+            elif ($a[$i] | test("^--[^=]+=")) then
+              .out += [{key: ($a[$i] | capture("^(?<k>--[^=]+)=") | .k), tokens: [$a[$i]]}]
+            elif ($a[$i] | test("^--")) then
+              if ($i + 1 < ($a | length)) and (($a[$i+1] | test("^--")) | not) then
+                (.out += [{key: $a[$i], tokens: [$a[$i], $a[$i+1]]}]) | .skip = true
+              else
+                .out += [{key: $a[$i], tokens: [$a[$i]]}]
+              end
+            else
+              .out += [{key: $a[$i], tokens: [$a[$i]]}]
+            end
+          )
+        | .out
+        | reverse
+        | reduce .[] as $e ({seen: {}, out: []};
+            if .seen[$e.key] then . else (.seen[$e.key] = true | .out += [$e]) end
+          )
+        | .out
+        | reverse
+        | map(.tokens[])
+    ' <<< "$all_json")
+
+    # Emit YAML list items. yaml_quote uses jq @json so values with special
+    # characters (spaces, quotes, backslashes) render as valid YAML scalars.
+    local out="" arg
+    while IFS= read -r arg; do
+        out+="        - $(yaml_quote "$arg")
 "
-    done
+    done < <(jq -r '.[]' <<< "$deduped_json")
 
     # Leading newline before list items, or inline `[]` when empty — mirrors
     # build_env_block so `args:` is never rendered as null.
     if [[ -z "$out" ]]; then printf '[]'; else printf '\n%s' "${out%$'\n'}"; fi
+}
+
+# Extra metadata.labels entries from --label, appended under the built-in labels.
+# Leading newline per entry and none trailing — same idiom as build_args_block,
+# because `$(...)` strips trailing newlines but not leading ones. The templates
+# therefore put {{EXTRA_LABELS}} at the end of the last built-in label line.
+build_labels_block() {
+    local out="" pair
+    for pair in "${EXTRA_LABELS[@]}"; do
+        out+=$'\n'"    ${pair%%=*}: $(yaml_quote "${pair#*=}")"
+    done
+    printf '%s' "$out"
 }
 
 # Optional nodeAffinity block.
@@ -667,10 +733,11 @@ nri_preflight_gate() {
 }
 
 render_manifest() {
-    local env_block args_block affinity_block
+    local env_block args_block affinity_block labels_block
     resolve_tp_size                      # mutates EXTRA_ARGS; sets TP_SIZE
     env_block=$(build_env_block)
     args_block=$(build_args_block)
+    labels_block=$(build_labels_block)
     # NB: ordering is deliberately unchanged from the NRI-only version —
     # build_affinity_block runs BEFORE the policy block, so the hard max-tp
     # nodeAffinity that build_cpu_policy_annotations would set via
@@ -694,7 +761,8 @@ render_manifest() {
                 "GATEWAY_NAMESPACE=${MM_INFERENCE_GATEWAY_NS:-llm-inference}" \
                 "CHAT_TEMPLATE_MOUNT=$CHAT_TEMPLATE_MOUNT" \
                 "CHAT_TEMPLATE_VOLUME=$CHAT_TEMPLATE_VOLUME" \
-                "AFFINITY=$affinity_block"
+                "AFFINITY=$affinity_block" \
+                "EXTRA_LABELS=$labels_block"
             ;;
         InferenceService)
             local template="$MM_TEMPLATES/inference-service.yaml"
@@ -707,7 +775,8 @@ render_manifest() {
                 "RUNTIME_NAME=${RUNTIME_NAME:-$MODEL_RUNTIME-runtime}" \
                 "CPU=$MODEL_CPU" "MEMORY=$MODEL_MEMORY" "REPLICAS=$MODEL_REPLICAS" \
                 "ARGS=$args_block" "ENV=$env_block" "AFFINITY=$affinity_block" \
-                "NRI_ANNOTATIONS=$CPU_POLICY_ANNOTATIONS"
+                "NRI_ANNOTATIONS=$CPU_POLICY_ANNOTATIONS" \
+                "EXTRA_LABELS=$labels_block"
             ;;
         *) abort "Unknown model kind: $MODEL_KIND" ;;
     esac
@@ -1315,7 +1384,28 @@ cmd_undeploy() {
         --ignore-not-found >/dev/null 2>&1 || true
     aigateway_deregister "$MODEL_NAME" "$MODEL_NAMESPACE" "$MODEL_KIND" "$MODEL_ROUTING"
     litellm_deregister "$MODEL_NAME"
-    ok "$MODEL_NAME undeployed"
+
+    # Deleting the CR above is asynchronous: the serving pods enter Terminating
+    # and keep their pinned CPUs / NRI balloon until the graceful shutdown
+    # completes. With --wait, block until they are actually gone so callers (and
+    # a follow-up cpu-collisions-check) see the CPUs reclaimed. Bounded by
+    # --wait-timeout so a stuck termination can't hang the CLI indefinitely.
+    if [[ "$WAIT" == true ]]; then
+        # Undeploy uses a short default (pod shutdown is quick); an explicit
+        # --wait-timeout always wins. The wait returns the instant the pods are
+        # gone, so this value is only a ceiling, not a fixed delay.
+        local timeout="$UNDEPLOY_WAIT_TIMEOUT"
+        [[ "$WAIT_TIMEOUT_SET" == true ]] && timeout="$WAIT_TIMEOUT"
+        info "Waiting for $MODEL_NAME pods to terminate (timeout: ${timeout}s)..."
+        if wait_pods_gone "$MODEL_NAMESPACE" "$MODEL_NAME" "$timeout"; then
+            ok "$MODEL_NAME undeployed (all pods terminated, CPUs released)"
+        else
+            warn "$MODEL_NAME undeployed, but pods are still terminating after ${timeout}s — CPUs/balloons may not be reclaimed yet"
+            warn "  Check: kubectl get pods -n $MODEL_NAMESPACE -l app.kubernetes.io/name=$MODEL_NAME"
+        fi
+    else
+        ok "$MODEL_NAME undeployed"
+    fi
 }
 
 # Discover a live deployment by name when it has no catalog entry (e.g. an

@@ -38,14 +38,36 @@ llm_services_namespace: "llm-inference"
 # =============================================================================
 llm_services_model_store_pvc: "model-store"
 llm_services_model_store_size: "100Gi"
+
+# Set storage_backend in env/<env>/global_config.yaml, not this. The core storage
+# role publishes _resolved_storage_backend in preflight, already trimmed and
+# lowercased; the fallback keeps this role working without core's preflight.
+_llm_storage_backend: >-
+  {{ _resolved_storage_backend | default(storage_backend | default('local-path'))
+     | string | trim | lower }}
+
+# model-store is one PVC mounted by every predictor pod, so it needs
+# ReadWriteMany as soon as pods can land on more than one node. Only local-path
+# cannot provide it (node-local directories); nfs, CephFS and ontap-nas all can.
 llm_services_model_store_access_mode: >-
-  {{ 'ReadWriteOnce' if storage_backend | default('local-path') == 'local-path'
-     else 'ReadWriteMany' }}
+  {{ 'ReadWriteOnce' if _llm_storage_backend == 'local-path' else 'ReadWriteMany' }}
+
+# StorageClass for model-store. Named only for the backends whose *default*
+# StorageClass is not the right one for a shared model cache (ceph defaults to
+# ceph-block, which is RWO). Empty means "omit storageClassName" so the PVC binds
+# to the cluster default, which core asserts is exactly one - that is the
+# netapp-trident path. Never fall back to 'local-path': it only exists when the
+# backend IS local-path, so that fallback pointed model-store at a StorageClass
+# that does not exist and the PVC stayed Pending forever.
 llm_services_model_store_storage_class: >-
-  {{ 'local-path' if storage_backend | default('local-path') == 'local-path'
-     else 'nfs-client' if storage_backend == 'nfs'
-     else 'ceph-fs' if storage_backend == 'ceph'
-     else 'local-path' }}
+  {{ 'local-path' if _llm_storage_backend == 'local-path'
+     else 'nfs-client' if _llm_storage_backend == 'nfs'
+     else 'ceph-fs' if _llm_storage_backend == 'ceph'
+     else '' }}
+
+# Tolerates null, which `| length` would crash on.
+_llm_sc_requested: >-
+  {{ llm_services_model_store_storage_class | default('', true) | string | trim }}
 
 # Deploy files/runtimes/*.yaml as namespace-scoped ServingRuntimes.
 # Needed for InferenceService CRs; LLMInferenceService CRs ignore these.
