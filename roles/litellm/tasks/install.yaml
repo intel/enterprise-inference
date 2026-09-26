@@ -382,6 +382,20 @@
 
 # ── Gateway integration (runs even on re-runs to stay idempotent) ─────────────
 
+# HSTS on the public LiteLLM host: browsers/SDKs must never send the UI login
+# password or a virtual key over plaintext :80 before the 301 to HTTPS. Built
+# as a fact so disabling it re-renders the route with no filter (self-healing).
+- name: "litellm | Build HTTPRoute response filters (HSTS)"
+  ansible.builtin.set_fact:
+    _litellm_route_filters: >-
+      {{
+        [{'type': 'ResponseHeaderModifier',
+          'responseHeaderModifier': {'set': [{
+            'name': 'Strict-Transport-Security',
+            'value': 'max-age=' ~ (litellm_hsts_max_age | int) ~ '; includeSubDomains'}]}}]
+        if litellm_hsts_enabled | default(true) | bool else []
+      }}
+
 - name: "litellm | Create HTTPRoute"
   when: gateway_create | bool
   kubernetes.core.k8s:
@@ -404,6 +418,7 @@
               - path:
                   type: PathPrefix
                   value: /
+            filters: "{{ _litellm_route_filters }}"
             backendRefs:
               - name: litellm
                 port: 4000
@@ -423,6 +438,49 @@
           - group: gateway.networking.k8s.io
             kind: HTTPRoute
             name: litellm
+
+# ── Edge rate limit ───────────────────────────────────────────────────────────
+# Local (per-gateway) rate limit — no external ratelimit service or Redis. A
+# Distinct match on the client-IP header gives each source IP its own counter,
+# blunting brute-force against the internet-facing UI login/admin API and capping
+# runaway abuse. Coarse by design; per-identity limits come with the auth work.
+- name: "litellm | Create edge rate-limit BackendTrafficPolicy"
+  when: gateway_create | bool and litellm_rate_limit_enabled | default(true) | bool
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: gateway.envoyproxy.io/v1alpha1
+      kind: BackendTrafficPolicy
+      metadata:
+        name: litellm-rate-limit
+        namespace: "{{ litellm_namespace }}"
+      spec:
+        targetRefs:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute
+            name: litellm
+        rateLimit:
+          type: Local
+          local:
+            rules:
+              - clientSelectors:
+                  - headers:
+                      - name: "{{ litellm_rate_limit_client_header | default('x-forwarded-for') }}"
+                        type: Distinct
+                limit:
+                  requests: "{{ litellm_rate_limit_requests | int }}"
+                  unit: "{{ litellm_rate_limit_unit | default('Minute') }}"
+
+# Remove the policy if rate limiting is turned off on a re-run (drift cleanup).
+- name: "litellm | Remove edge rate-limit BackendTrafficPolicy when disabled"
+  when: gateway_create | bool and not (litellm_rate_limit_enabled | default(true) | bool)
+  kubernetes.core.k8s:
+    state: absent
+    api_version: gateway.envoyproxy.io/v1alpha1
+    kind: BackendTrafficPolicy
+    name: litellm-rate-limit
+    namespace: "{{ litellm_namespace }}"
+  failed_when: false
 
 # ── Print credentials ─────────────────────────────────────────────────────────
 
@@ -450,4 +508,4 @@
       - "UI: https://{{ litellm_hostname }}"
       - "Admin username: admin"
       - "Master key: kubectl get secret litellm-master-key -n {{ litellm_namespace }} -o jsonpath='{.data.master_key}' | base64 -d"
-      - "Auth mode: extAuth via /key/verify (virtual keys required for all inference requests)"
+      - "Auth mode: LiteLLM virtual keys (Bearer <key>); LiteLLM is the sole auth boundary"

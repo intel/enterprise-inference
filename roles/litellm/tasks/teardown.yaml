@@ -29,6 +29,15 @@
     namespace: "{{ litellm_namespace }}"
   failed_when: false
 
+- name: "litellm | teardown | Remove rate-limit BackendTrafficPolicy"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: gateway.envoyproxy.io/v1alpha1
+    kind: BackendTrafficPolicy
+    name: litellm-rate-limit
+    namespace: "{{ litellm_namespace }}"
+  failed_when: false
+
 - name: "litellm | teardown | Remove ConfigMaps"
   kubernetes.core.k8s:
     state: absent
