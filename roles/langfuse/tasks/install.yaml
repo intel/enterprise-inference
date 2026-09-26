@@ -2,7 +2,7 @@
 # =============================================================================
 # Langfuse — Install via Helm
 # =============================================================================
-# Uses existing platform PostgreSQL and MinIO.
+# Uses existing platform PostgreSQL and object store (S3).
 # Redis (Valkey) and ClickHouse deployed by Helm subcharts.
 # Single-node: 1 replica, minimal resources.
 # Multi-node:  2 replicas, HPA enabled.
@@ -85,59 +85,36 @@
         _langfuse_db_pass: "{{ _langfuse_db_secret.resources[0].data.password | b64decode }}"
       no_log: true
 
-    # ── MinIO S3 credentials ──────────────────────────────────────────────────
+    # ── Object store (S3) credentials ─────────────────────────────────────────
+    # Langfuse is an object_store consumer: the active backend role (SeaweedFS)
+    # creates the `langfuse` bucket + a scoped S3 user and writes the shared
+    # credentials Secret. We read the langfuse key pair from it — no bucket
+    # creation here (the backend already made it, and the scoped user has no
+    # permission to create buckets).
 
-    - name: "langfuse | Load MinIO credentials"
+    - name: "langfuse | Load object store credentials"
       kubernetes.core.k8s_info:
         api_version: v1
         kind: Secret
-        name: minio-credentials
-        namespace: "{{ minio_namespace | default('minio') }}"
-      register: _langfuse_minio_secret
+        name: "{{ object_store_credentials_secret }}"
+        namespace: "{{ object_store_namespace }}"
+      register: _langfuse_os_secret
       failed_when: false
 
-    - name: "langfuse | Extract MinIO credentials"
+    - name: "langfuse | Extract object store S3 credentials"
       ansible.builtin.set_fact:
-        _langfuse_s3_endpoint: "{{ _langfuse_minio_secret.resources[0].data.endpoint | b64decode }}"
-        _langfuse_s3_access_key: "{{ _langfuse_minio_secret.resources[0].data.rootUser | b64decode }}"
-        _langfuse_s3_secret_key: "{{ _langfuse_minio_secret.resources[0].data.rootPassword | b64decode }}"
+        _langfuse_s3_endpoint: "{{ _langfuse_os_secret.resources[0].data.endpoint | b64decode }}"
+        _langfuse_s3_access_key: "{{ _langfuse_os_secret.resources[0].data.langfuseAccessKey | b64decode }}"
+        _langfuse_s3_secret_key: "{{ _langfuse_os_secret.resources[0].data.langfuseSecretKey | b64decode }}"
       no_log: true
-      when: _langfuse_minio_secret.resources | default([]) | length > 0
+      when: _langfuse_os_secret.resources | default([]) | length > 0
 
-    - name: "langfuse | Fallback S3 to empty (MinIO not available)"
+    - name: "langfuse | Fallback S3 to empty (object store not available)"
       ansible.builtin.set_fact:
         _langfuse_s3_endpoint: ""
         _langfuse_s3_access_key: ""
         _langfuse_s3_secret_key: ""
-      when: _langfuse_minio_secret.resources | default([]) | length == 0
-
-    # ── Create MinIO bucket for Langfuse ─────────────────────────────────────
-
-    - name: "langfuse | Create MinIO bucket"
-      when: _langfuse_s3_endpoint | length > 0
-      kubernetes.core.k8s:
-        state: present
-        definition:
-          apiVersion: batch/v1
-          kind: Job
-          metadata:
-            name: langfuse-create-bucket
-            namespace: "{{ langfuse_namespace }}"
-          spec:
-            ttlSecondsAfterFinished: 60
-            template:
-              spec:
-                restartPolicy: OnFailure
-                containers:
-                  - name: mc
-                    image: minio/mc:RELEASE.2025-07-21T05-28-08Z
-                    command:
-                      - /bin/sh
-                      - -c
-                      - |
-                        mc alias set minio {{ _langfuse_s3_endpoint }} {{ _langfuse_s3_access_key }} {{ _langfuse_s3_secret_key }} &&
-                        mc mb --ignore-existing minio/{{ langfuse_s3_bucket }}
-      failed_when: false
+      when: _langfuse_os_secret.resources | default([]) | length == 0
 
     # ── Langfuse secrets (stable across restarts — generated once) ───────────
 
@@ -261,6 +238,23 @@
                 secretKeyRef:
                   name: langfuse-secrets
                   key: nextauth_secret
+
+            # PSS restricted — chart v1.5.x reads these shared web+worker keys,
+            # not the web/worker subkeys below. Image runs as uid 1001 (nextjs).
+            podSecurityContext:
+              runAsNonRoot: true
+              runAsUser: 1001
+              fsGroup: 1001
+              seccompProfile:
+                type: RuntimeDefault
+            securityContext:
+              allowPrivilegeEscalation: false
+              runAsNonRoot: true
+              runAsUser: 1001
+              capabilities:
+                drop: ["ALL"]
+              seccompProfile:
+                type: RuntimeDefault
 
             # Web UI sizing
             web:
@@ -411,7 +405,7 @@
                 capabilities:
                   drop: ["ALL"]
 
-          # ── S3/MinIO — use our existing MinIO ─────────────────────────────
+          # ── S3 — use the platform object store (SeaweedFS via object_store) ─
           s3:
             deploy: false
             bucket: "{{ langfuse_s3_bucket }}"

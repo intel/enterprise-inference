@@ -7,9 +7,9 @@
 # routed through LiteLLM.
 #
 # Architecture:
-#   LiteLLM → Langfuse (OTEL/HTTP callback) → PostgreSQL + Redis + MinIO(S3)
+#   LiteLLM → Langfuse (OTEL/HTTP callback) → PostgreSQL + Redis + object store (S3)
 #
-# We reuse the existing PostgreSQL and MinIO from the platform layer.
+# We reuse the existing PostgreSQL and object store from the platform layer.
 # A lightweight Redis (Valkey) is deployed inside the Langfuse namespace.
 #
 # Single-node:  1 replica each, minimal resources
@@ -36,9 +36,13 @@ langfuse_admin_password: "{{ lookup('password', '/dev/null length=24 chars=ascii
 langfuse_db_name: "langfuse"
 langfuse_db_user: "langfuse"
 
-# MinIO — reuse platform MinIO for blob storage (traces, media)
+# Object store (S3) — reuse the platform object store via the backend-agnostic
+# object_store interface (SeaweedFS by default). Langfuse is registered as an
+# object_store consumer, so the active backend role creates its bucket and a
+# scoped S3 user, and writes the shared credentials Secret we read at install.
 langfuse_s3_bucket: "langfuse"
-minio_namespace: "minio"
+object_store_namespace: "monitoring"
+object_store_credentials_secret: "object-store-credentials"  # checkov:skip=CKV_SECRET_6: Secret name, not a value
 
 
 # ClickHouse — deployed by Helm subchart (bitnami/clickhouse)
