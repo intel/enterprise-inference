@@ -104,6 +104,22 @@
         name: "{{ litellm_namespace }}"
         state: present
 
+    # baseline (not restricted): the prisma-engine-seed initContainer must run as
+    # root to read the engines baked into /root at image build time (see below).
+    - name: "litellm | Label namespace — PSS"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ litellm_namespace }}"
+            labels:
+              pod-security.kubernetes.io/enforce: "baseline"
+              pod-security.kubernetes.io/audit: "restricted"
+              pod-security.kubernetes.io/warn: "restricted"
+      when: enforce_pss | default(false) | bool
+
     # ReferenceGrant allows Envoy Gateway SecurityPolicy (in gateway namespace)
     # to reference the LiteLLM service (in litellm namespace) for extAuth.
     # Must be created after namespace exists — moved here from envoy_gateway role.
