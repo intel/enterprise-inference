@@ -279,9 +279,16 @@
   when: ai_gateway_create | bool
 
 # ── External ingress: eg-gateway → ai-gateway HTTPRoute ──────────────────────
-# Single HTTPRoute on eg-gateway that forwards all inference traffic to
-# ai-gateway. Per-model AIGatewayRoutes/HTTPRoutes on ai-gateway handle
-# model dispatch. Hostname: inference.<base_domain_name>.
+# Single HTTPRoute on eg-gateway that forwards all inference traffic straight to
+# ai-gateway. Per-model AIGatewayRoutes/HTTPRoutes on ai-gateway handle model
+# dispatch. Hostname: inference.<base_domain_name>.
+#
+# Keycloak mode only. This route is the direct-to-ai-gateway path the gateway
+# JWT policy guards. In litellm mode all inference must go through LiteLLM
+# (litellm.<domain>) so it can validate the virtual key and apply budgets, rate
+# limits and Langfuse logging; LiteLLM reaches ai-gateway over its own internal
+# ClusterIP service, not this route. Publishing inference.<domain> in litellm
+# mode would expose an unauthenticated bypass around LiteLLM.
 
 - name: "envoy_ai_gateway | Create external inference HTTPRoute (eg-gateway → ai-gateway)"
   kubernetes.core.k8s:
@@ -310,4 +317,22 @@
               - name: "{{ ai_gateway_service_name }}"
                 namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
                 port: 80
-  when: ai_gateway_create | bool
+  when:
+    - ai_gateway_create | bool
+    - auth_provider | default('keycloak') == 'keycloak'
+
+# Remove the external route if the cluster was reconfigured from keycloak to
+# litellm/none: leaving inference.<domain> published would keep an unauthenticated
+# path to ai-gateway open once the gateway JWT policy is gone.
+- name: "envoy_ai_gateway | Remove external inference HTTPRoute when not keycloak"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: gateway.networking.k8s.io/v1
+    kind: HTTPRoute
+    name: inference-external
+    namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
+  # Absent on any install that was never in keycloak mode — not an error.
+  failed_when: false
+  when:
+    - ai_gateway_create | bool
+    - auth_provider | default('keycloak') != 'keycloak'

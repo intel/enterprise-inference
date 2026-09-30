@@ -6,12 +6,13 @@
 # spend tracking, rate limiting, and model routing on top of inference backends.
 #
 # When auth_provider=litellm:
-#   - Envoy Gateway uses LiteLLM's /key/verify as extAuth (replaces Keycloak JWT)
+#   - The gateway does TLS + routing only; LiteLLM is the sole auth boundary
+#     and validates its own virtual keys (no gateway JWT, no extAuth)
 #   - Keycloak is disabled (not deployed)
 #   - Virtual keys are the auth mechanism (Bearer <litellm-virtual-key>)
 #
 # LiteLLM sits in front of KServe inference endpoints:
-#   Client → Envoy Gateway (extAuth→LiteLLM) → LiteLLM proxy → KServe
+#   Client → Envoy Gateway (TLS+routing) → LiteLLM proxy (auth) → KServe
 # =============================================================================
 
 litellm_version: "v1.83.14-stable.patch.2"     # Docker image tag to deploy
@@ -21,6 +22,18 @@ litellm_valkey_tag: "8.0-alpine"                # valkey/valkey (official upstre
 # Gateway integration
 gateway_create: "{{ envoy_gateway_enabled | default(false) }}"
 litellm_hostname: "litellm.{{ base_domain_name | default('inference-example.com') }}"
+
+# Edge protection on the public LiteLLM route (litellm.<domain>).
+# HSTS forces HTTPS so the UI login password / virtual key is never sent on :80.
+litellm_hsts_enabled: true
+litellm_hsts_max_age: 31536000                    # 1 year (seconds)
+# Local per-client-IP rate limit (no Redis). Generous enough for legitimate
+# inference, low enough to blunt automated brute-force; tune per deployment.
+# Note: clients behind a shared NAT/egress IP share one counter.
+litellm_rate_limit_enabled: true
+litellm_rate_limit_requests: 600                  # requests per unit, per client IP
+litellm_rate_limit_unit: "Minute"                 # Second | Minute | Hour | Day
+litellm_rate_limit_client_header: "x-forwarded-for"
 
 # PostgreSQL — stores virtual keys, spend logs, team/org data
 litellm_db_name: "litellm"
