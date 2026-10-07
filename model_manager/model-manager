@@ -1045,6 +1045,7 @@ discover_inference_config() {
 #   litellm  → litellm.<domain> (litellm_hostname), LiteLLM's own route. The
 #              inference host has no route bound in this mode and answers 404,
 #              so it must not be printed as the endpoint.
+# routing_mode: path → <domain>/<litellm|inference> (one host, path prefix).
 # Precedence: MM_INFERENCE_HOSTNAME env
 #   litellm  → litellm_hostname (config.inference.yaml → global_config.yaml)
 #              → litellm.<gateway_domain|base_domain_name>
@@ -1055,23 +1056,28 @@ resolve_inference_hostname() {
     local gc cfg h domain prefix=""
     gc=$(discover_global_config)
 
-    if [[ "$(auth_provider)" == "litellm" ]]; then
+    if [[ "$(auth_provider)" == "litellm" ]] && \
+       [[ -z "$gc" || "$(yq e '.routing_mode // "subdomain"' "$gc" 2>/dev/null)" != "path" ]]; then
         for cfg in "$(discover_inference_config 2>/dev/null)" "$gc"; do
             [[ -n "$cfg" && -f "$cfg" ]] || continue
             h=$(yq e '.litellm_hostname // ""' "$cfg" 2>/dev/null)
             [[ -n "$h" ]] && { echo "$h"; return; }
         done
-        prefix="litellm"
     fi
+    [[ "$(auth_provider)" == "litellm" ]] && prefix="litellm"
 
     if [[ -n "$gc" && -f "$gc" ]]; then
+        domain=$(yq e '.gateway_domain // .base_domain_name // ""' "$gc" 2>/dev/null)
+        # Path routing: one host, the service under /<prefix> (registry paths).
+        if [[ "$(yq e '.routing_mode // "subdomain"' "$gc" 2>/dev/null)" == "path" && -n "$domain" ]]; then
+            echo "${domain}/${prefix:-inference}"; return
+        fi
         # inference_hostname/_prefix name the Keycloak-mode route only.
         if [[ -z "$prefix" ]]; then
             h=$(yq e '.inference_hostname // ""' "$gc" 2>/dev/null)
             [[ -n "$h" ]] && { echo "$h"; return; }
             prefix=$(yq e '.inference_prefix // "inference"' "$gc" 2>/dev/null)
         fi
-        domain=$(yq e '.gateway_domain // .base_domain_name // ""' "$gc" 2>/dev/null)
         [[ -n "$domain" ]] && { echo "${prefix}.${domain}"; return; }
     fi
 
@@ -1114,6 +1120,7 @@ build_sample_body() {
 print_endpoints() {
     local host gw_ip endpoint auth unified token_hint body sep
     host=$(resolve_inference_hostname)
+    host="${host%%/*}"
     gw_ip=$(gateway_ip)
     endpoint=$(build_endpoint_url)
     auth=$(auth_provider)
@@ -1145,7 +1152,7 @@ print_endpoints() {
     else
         echo -e "\n  ${BOLD}1. Get a Keycloak token:${RESET}"
         echo -e "  ${DIM}source $SCRIPT_DIR/scripts/get-keycloak-token.sh${RESET}"
-        echo -e "  ${DIM}# exports TOKEN, GATEWAY_IP, GATEWAY_DOMAIN${RESET}"
+        echo -e "  ${DIM}# exports TOKEN, GATEWAY_IP, GATEWAY_DOMAIN, GATEWAY_URL${RESET}"
     fi
 
     # Step 2 — call the model with that credential.
