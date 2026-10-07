@@ -1,6 +1,6 @@
 # Local (per-gateway) rate limit — no external ratelimit service or Redis. A
 # Distinct match on the client-IP header gives each source IP its own counter,
-# blunting key brute-force and capping runaway abuse.
+# blunting key brute-force and capping runaway abuse on both hosts.
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: BackendTrafficPolicy
 metadata:
@@ -8,9 +8,11 @@ metadata:
   namespace: {{ litellm_namespace }}
 spec:
   targetRefs:
+{% for route in ['litellm'] + (['litellm-admin'] if litellm_ui_enabled | bool else []) %}
     - group: gateway.networking.k8s.io
       kind: HTTPRoute
-      name: litellm
+      name: {{ route }}
+{% endfor %}
   rateLimit:
     type: Local
     local:

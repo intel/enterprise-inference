@@ -6,6 +6,16 @@
 # Multi-node:  2 replicas, HPA enabled (scales to 2x).
 # =============================================================================
 
+- name: "litellm | Validate admin login mode"
+  ansible.builtin.assert:
+    that:
+      - litellm_admin_login in ['app', 'gateway']
+      - litellm_admin_login == 'gateway' or not (litellm_ui_enabled | bool and gateway_create | bool)
+        or litellm_ui_sso_enabled | bool
+    fail_msg: >-
+      litellm_admin_login must be 'app' or 'gateway'; 'app' needs litellm_ui_sso_enabled
+      (otherwise the admin UI would be public with password login only).
+
 # ── Idempotency check ─────────────────────────────────────────────────────────
 
 - name: "litellm | Check for existing Helm release"
@@ -17,8 +27,29 @@
 
 - name: "litellm | Already installed — skipping"
   ansible.builtin.debug:
-    msg: "LiteLLM already deployed in {{ litellm_namespace }} — skipping install."
+    msg: >-
+      LiteLLM already deployed in {{ litellm_namespace }} — skipping install.
+      Env ({{ (litellm_admin_env | combine(_litellm_sso_env)).keys() | join(', ') }}) applies on fresh installs
+      only; after changing routing_mode, reinstall the release.
   when: _litellm_release.status is defined and _litellm_release.status is not none
+
+# Before the release: LiteLLM's SSO env needs the client secret and issuer.
+# Re-run every time so redirect URIs follow routing changes. Callbacks: the
+# gateway's OIDC filter ('gateway' mode) and LiteLLM's own UI SSO.
+- name: "litellm | Provision Keycloak client for the admin host"
+  when: gateway_create | bool and litellm_ui_enabled | bool
+  ansible.builtin.include_role:
+    name: keycloak
+    tasks_from: client.yaml
+  vars:
+    kc_client:
+      client_id: "{{ litellm_admin_oidc_client_id }}"
+      frontend_url: "{{ litellm_admin_route.frontend_url }}"
+      redirect_uris: >-
+        {{ ([litellm_admin_route.frontend_url ~ '/oauth2/callback'] if litellm_admin_login == 'gateway' else [])
+           + ([litellm_admin_route.frontend_url ~ '/sso/callback'] if _litellm_ui_sso | bool else []) }}
+      secret_namespace: "{{ litellm_namespace }}"
+      groups: "{{ litellm_admin_groups }}"
 
 - name: "litellm | Install"
   when: _litellm_release.status is not defined or _litellm_release.status is none
@@ -198,6 +229,12 @@
                 key: password
           - name: LANGFUSE_HOST
             value: "{{ 'http://langfuse-web.' + (langfuse_namespace | default('langfuse')) + '.svc.cluster.local:3000' if (langfuse_enabled | default(false) | bool or litellm_enabled | default(false) | bool or (auth_provider | default('keycloak')) == 'litellm') else '' }}"
+        # Client secret by reference, never in Helm values.
+        _litellm_sso_secret_env: >-
+          {{ [{'name': 'GENERIC_CLIENT_SECRET',
+               'valueFrom': {'secretKeyRef': {'name': litellm_admin_oidc_client_id ~ '-oidc',
+                                              'key': 'client-secret'}}}]
+             if _litellm_ui_sso | bool else [] }}
       kubernetes.core.helm:
         name: litellm
         chart_ref: "{{ role_path }}/../../charts/litellm-helm"
@@ -228,10 +265,10 @@
           environmentSecrets:
             - litellm-master-key
           # Proxy vars merged in when the cluster is behind a corporate proxy.
-          envVars: "{{ {'UI_USERNAME': 'admin'} | combine(_litellm_proxy_env) }}"
-          extraEnvVars: "{{ _litellm_extra_env }}"
+          envVars: "{{ {'UI_USERNAME': 'admin'} | combine(litellm_admin_env, _litellm_sso_env, _litellm_proxy_env) }}"
+          extraEnvVars: "{{ _litellm_extra_env + _litellm_sso_secret_env }}"
           # LiteLLM trips its Redis circuit breaker if it starts before the cache
-          # answers, so wait for an authenticated PING.
+          # answers (SSO keeps PKCE state there), so wait for an authenticated PING.
           extraInitContainers: >-
             {{ [{'name': 'wait-for-cache',
                  'image': 'valkey/valkey:' ~ litellm_valkey_tag,
@@ -259,7 +296,10 @@
             general_settings:
               master_key: "os.environ/PROXY_MASTER_KEY"
               store_model_in_db: true
-              ui_access_mode: "admin_only"
+              ui_access_mode: "{{ _litellm_ui_access_mode }}"
+              # SSO only: no shared env or per-user passwords; break-glass is the
+              # master key over the API.
+              disable_password_login_when_sso_enabled: "{{ _litellm_ui_sso | bool }}"
             litellm_settings:
               drop_params: true
               set_verbose: false
@@ -385,10 +425,28 @@
 
 # ── Gateway integration (runs even on re-runs to stay idempotent) ─────────────
 
-# In path mode the route mounts on the shared apex listener, which admits routes
+# Referenced by the admin route, so it exists before the routes.
+- name: "litellm | Create 404 filter for blocked admin paths"
+  when: gateway_create | bool and litellm_ui_enabled | bool
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: gateway.envoyproxy.io/v1alpha1
+      kind: HTTPRouteFilter
+      metadata:
+        name: litellm-not-found
+        namespace: "{{ litellm_namespace }}"
+      spec:
+        directResponse:
+          statusCode: 404
+
+# In path mode the routes mount on the shared apex listener, which admits routes
 # only from labelled namespaces (gateway_apex_route_label_*, envoy_gateway role).
 - name: "litellm | Label namespace — allow apex-listener routes (path mode)"
-  when: gateway_create | bool and litellm_route.section_name == 'https-apex'
+  when: >-
+    gateway_create | bool and
+    'https-apex' in [litellm_route.section_name]
+                    + ([litellm_admin_route.section_name] if litellm_ui_enabled | bool else [])
   kubernetes.core.k8s:
     state: present
     definition:
@@ -411,6 +469,24 @@
            gateway_name=gateway_name | default('eg-gateway'),
            gateway_namespace=gateway_namespace | default('envoy-gateway-system')) }}
 
+# Admin: UI + admin API; blocked paths (and password login under SSO) 404.
+- name: "litellm | Create admin HTTPRoute"
+  when: gateway_create | bool and litellm_ui_enabled | bool
+  kubernetes.core.k8s:
+    state: present
+    definition: >-
+      {{ litellm_admin_route | gateway_httproute('litellm-admin',
+           rules=([{'prefix': _litellm_admin_blocked,
+                    'filters': [{'type': 'ExtensionRef',
+                                 'extensionRef': {'group': 'gateway.envoyproxy.io',
+                                                  'kind': 'HTTPRouteFilter',
+                                                  'name': 'litellm-not-found'}}],
+                    'backend': false}] if _litellm_admin_blocked else [])
+                 + [{'prefix': ['/']}],
+           headers=litellm_admin_response_headers,
+           gateway_name=gateway_name | default('eg-gateway'),
+           gateway_namespace=gateway_namespace | default('envoy-gateway-system')) }}
+
 # Programs authenticate with LiteLLM virtual keys, so the gateway's Keycloak
 # JWT default is overridden on the API route only.
 - name: "litellm | Create no-auth SecurityPolicy (LiteLLM checks virtual keys)"
@@ -428,6 +504,108 @@
           - group: gateway.networking.k8s.io
             kind: HTTPRoute
             name: litellm
+
+# ── Admin host: UI + admin API behind Keycloak ────────────────────────────────
+
+- name: "litellm | Protect admin host (gateway login)"
+  when: gateway_create | bool and litellm_ui_enabled | bool and litellm_admin_login == 'gateway'
+  block:
+    # Envoy runs the OIDC login, then checks the ID token (cookie) and admits
+    # only litellm_admin_groups. Token cookies stay encrypted in the browser;
+    # the oauth2 filter decrypts them before the JWT filter on this route.
+    # Token/JWKS calls use the in-cluster Keycloak service.
+    - name: "litellm | Create admin SecurityPolicy (Keycloak OIDC + group check)"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: gateway.envoyproxy.io/v1alpha1
+          kind: SecurityPolicy
+          metadata:
+            name: litellm-admin-sso
+            namespace: "{{ litellm_namespace }}"
+          spec:
+            targetRefs:
+              - group: gateway.networking.k8s.io
+                kind: HTTPRoute
+                name: litellm-admin
+            oidc:
+              provider:
+                issuer: "{{ _kcc_issuer_url }}"
+                authorizationEndpoint: "{{ _kcc_issuer_url }}/protocol/openid-connect/auth"
+                tokenEndpoint: "{{ _kcc_internal_realm_url }}/protocol/openid-connect/token"
+                endSessionEndpoint: "{{ _kcc_issuer_url }}/protocol/openid-connect/logout"
+              clientID: "{{ litellm_admin_oidc_client_id }}"
+              clientSecret:
+                name: "{{ litellm_admin_oidc_client_id }}-oidc"
+              redirectURL: "{{ litellm_admin_route.frontend_url }}/oauth2/callback"
+              logoutPath: "{{ _litellm_admin_prefix }}/oauth2/logout"
+              refreshToken: true
+              cookieNames:
+                idToken: litellm-admin-id
+                accessToken: litellm-admin-at
+            jwt:
+              providers:
+                - name: keycloak
+                  issuer: "{{ _kcc_issuer_url }}"
+                  audiences: ["{{ litellm_admin_oidc_client_id }}"]
+                  remoteJWKS:
+                    uri: "{{ _kcc_internal_realm_url }}/protocol/openid-connect/certs"
+                  extractFrom:
+                    cookies: [litellm-admin-id]
+            authorization:
+              defaultAction: Deny
+              rules:
+                - name: admin-groups
+                  action: Allow
+                  principal: >-
+                    {{ {'jwt': {'provider': 'keycloak',
+                                'claims': [{'name': 'groups', 'valueType': 'StringArray',
+                                            'values': litellm_admin_groups}]}}
+                       | combine({'clientCIDRs': litellm_admin_allowed_cidrs} if litellm_admin_allowed_cidrs else {}) }}
+
+# 'app' mode: LiteLLM runs the login (SSO, group-restricted), so the route only
+# overrides the gateway JWT default, optionally limited to source CIDRs.
+- name: "litellm | Create admin SecurityPolicy (LiteLLM login)"
+  when: gateway_create | bool and litellm_ui_enabled | bool and litellm_admin_login == 'app'
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: gateway.envoyproxy.io/v1alpha1
+      kind: SecurityPolicy
+      metadata:
+        name: litellm-admin-no-auth
+        namespace: "{{ litellm_namespace }}"
+      spec: >-
+        {{ {'targetRefs': [{'group': 'gateway.networking.k8s.io', 'kind': 'HTTPRoute', 'name': 'litellm-admin'}]}
+           | combine({'authorization': {'defaultAction': 'Deny',
+                                        'rules': [{'name': 'admin-cidrs', 'action': 'Allow',
+                                                   'principal': {'clientCIDRs': litellm_admin_allowed_cidrs}}]}}
+                     if litellm_admin_allowed_cidrs else {}) }}
+
+- name: "litellm | Remove the other admin login policy"
+  when: gateway_create | bool and litellm_ui_enabled | bool
+  kubernetes.core.k8s:
+    state: absent
+    api_version: gateway.envoyproxy.io/v1alpha1
+    kind: SecurityPolicy
+    name: "{{ 'litellm-admin-sso' if litellm_admin_login == 'app' else 'litellm-admin-no-auth' }}"
+    namespace: "{{ litellm_namespace }}"
+
+- name: "litellm | Remove admin host when the UI is disabled"
+  when: gateway_create | bool and not (litellm_ui_enabled | bool)
+  kubernetes.core.k8s:
+    state: absent
+    api_version: "{{ item.api }}"
+    kind: "{{ item.kind }}"
+    name: "{{ item.name }}"
+    namespace: "{{ litellm_namespace }}"
+  loop:
+    - { api: gateway.envoyproxy.io/v1alpha1, kind: SecurityPolicy, name: litellm-admin-sso }
+    - { api: gateway.envoyproxy.io/v1alpha1, kind: SecurityPolicy, name: litellm-admin-no-auth }
+    - { api: gateway.networking.k8s.io/v1, kind: HTTPRoute, name: litellm-admin }
+    - { api: gateway.envoyproxy.io/v1alpha1, kind: HTTPRouteFilter, name: litellm-not-found }
+  loop_control:
+    label: "{{ item.kind }}/{{ item.name }}"
 
 # Older releases granted the gateway a ReferenceGrant into this namespace; no
 # longer needed (routes and backends live here).
@@ -505,8 +683,11 @@
       data:
         hostname: "{{ litellm_hostname }}"
         api_url: "{{ litellm_url }}/v1"
+        ui_url: "{{ litellm_admin_route.frontend_url if litellm_ui_enabled | bool else '' }}"
+        admin_username: "admin"
         note: >-
-          The admin UI and admin API are not published. Master key (break-glass) is in secret
+          Admin host needs a Keycloak user in {{ litellm_admin_groups | join(', ') }}; the UI password
+          is in secret litellm-ui-auth (key: password). Master key (break-glass) is in secret
           litellm-master-key (key: master_key).
 
 - name: "litellm | Install complete"
@@ -515,5 +696,11 @@
       - "LiteLLM deployed in namespace '{{ litellm_namespace }}'"
       - "API: {{ litellm_url }}/v1 (Bearer <virtual key>; paths: {{ litellm_public_paths | join(', ') }})"
       - >-
-        Admin API: not published; break-glass with the master key over
-        kubectl -n {{ litellm_namespace }} port-forward svc/litellm 4000 (Secret litellm-master-key)
+        Admin UI: {{ litellm_admin_route.frontend_url }}/ui
+        ({{ 'LiteLLM SSO via Keycloak' if litellm_admin_login == 'app' else 'Keycloak at the gateway, then LiteLLM SSO' }};
+        group {{ litellm_admin_groups | join(', ') }})
+      - >-
+        {{ ('Break-glass: master key over the API (kubectl -n ' ~ litellm_namespace ~ ' port-forward svc/litellm 4000;'
+            ~ ' key in Secret litellm-master-key)') if _litellm_ui_sso | bool
+           else ('UI user admin; password: kubectl get secret litellm-ui-auth -n ' ~ litellm_namespace
+                 ~ " -o jsonpath='{.data.password}' | base64 -d") }}

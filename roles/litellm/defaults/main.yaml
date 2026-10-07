@@ -5,10 +5,13 @@
 # LiteLLM is an OpenAI-compatible proxy that adds virtual key management,
 # spend tracking, rate limiting, and model routing on top of inference backends.
 #
-# When auth_provider=litellm, the API is published for programs:
-#   litellm.<domain> (<domain>/litellm in path mode). Only litellm_public_paths
-#   are routed; LiteLLM validates the virtual key. The admin UI and admin API
-#   are not published.
+# When auth_provider=litellm, two hosts are published:
+#   litellm.<domain>        API for programs (<domain>/litellm in path mode).
+#                           Only litellm_public_paths are routed; LiteLLM
+#                           validates the virtual key.
+#   litellm-admin.<domain>  UI + admin API for people (<domain>/litellm-admin in
+#                           path mode). Keycloak OIDC at the gateway,
+#                           platform-admins only.
 #   Client → Envoy Gateway (TLS, path allowlist) → LiteLLM (key check) → KServe
 # =============================================================================
 
@@ -21,15 +24,21 @@ litellm_valkey_tag: "8.0-alpine"                # valkey/valkey (official upstre
 # Gateway integration
 gateway_create: "{{ envoy_gateway_enabled | default(false) }}"
 # Routing from the solutions service_routes registry (configs/service_routes.yaml)
-# via the shared service_route filter; follows routing_mode:
-# litellm.<domain>, or <domain>/litellm (prefix stripped).
+# via the shared service_route filter; both follow routing_mode:
+# litellm[-admin].<domain>, or <domain>/litellm (stripped) and <domain>/litellm-admin.
 litellm_route: >-
   {{ 'litellm' | service_route(routing_mode | default('subdomain'),
                                base_domain_name | default('inference-example.com'),
                                service_routes | default({}),
                                service_route_overrides | default({})) }}
+litellm_admin_route: >-
+  {{ 'litellm-admin' | service_route(routing_mode | default('subdomain'),
+                                     base_domain_name | default('inference-example.com'),
+                                     service_routes | default({}),
+                                     service_route_overrides | default({})) }}
 litellm_hostname: "{{ litellm_route.host }}"
 litellm_url: "{{ litellm_route.frontend_url }}"          # API base URL clients use (+ /v1)
+litellm_admin_hostname: "{{ litellm_admin_route.host }}"
 
 # Exact paths published on the API route (under the /litellm prefix in path
 # mode); anything else never reaches LiteLLM.
@@ -40,13 +49,91 @@ litellm_public_paths:
   - /v1/models
   - /health/liveliness
 
+# Admin host: Keycloak OIDC client and the groups allowed through.
+litellm_admin_oidc_client_id: "litellm-admin"
+litellm_admin_groups:
+  - platform-admins
+# Path prefixes never served, even to admins (under the prefix in path mode).
+litellm_admin_blocked_paths:
+  - /mcp
+  - /sso/debug
+_litellm_admin_prefix: "{{ '' if litellm_admin_route.relative_path == '/' else litellm_admin_route.relative_path }}"
+# Admin UI session (the 'token' cookie holds an admin key; default 24h).
+litellm_ui_session_duration: "3h"
+# PROXY_BASE_URL is the public origin: LiteLLM marks cookies Secure from it
+# (TLS ends at the gateway) and builds SSO/UI links on it. In path mode the UI
+# serves under SERVER_ROOT_PATH, rewritten into a writable copy (/tmp emptyDir).
+litellm_admin_env: >-
+  {{ {'PROXY_BASE_URL': 'https://' ~ litellm_admin_route.host,
+      'LITELLM_UI_SESSION_DURATION': litellm_ui_session_duration}
+     | combine({'SERVER_ROOT_PATH': _litellm_admin_prefix, 'LITELLM_UI_PATH': '/tmp/litellm-ui'}
+               if _litellm_admin_prefix else {}) }}
+# Admin UI sign-in. Both modes use LiteLLM's native SSO (OIDC + PKCE) on the
+# litellm-admin Keycloak client; the UI redirects straight to Keycloak and
+# password login is off.
+#   app      LiteLLM runs the login; it admits only litellm_admin_groups[0],
+#            checked before a user is created (Headlamp style).
+#   gateway  Keycloak first at the gateway (group check), then LiteLLM signs in
+#            silently on the same Keycloak session.
+# LiteLLM OSS allows SSO for up to 5 users; beyond that set LITELLM_LICENSE.
+litellm_admin_login: "app"
+litellm_ui_sso_enabled: true           # false: password login (user 'admin'), 'gateway' only
+# Optional source allowlist on the admin route (empty = any client).
+litellm_admin_allowed_cidrs: []
+# LiteLLM role per Keycloak group (highest wins); anyone else gets the default.
+litellm_ui_sso_role_mappings:
+  proxy_admin: "{{ litellm_admin_groups }}"
+litellm_ui_sso_default_role: internal_user_viewer
+# Refused by LiteLLM under SSO; also 404 at the gateway (break-glass: master key).
+litellm_password_login_paths:
+  - /login
+  - /v2/login
+  - /v3/login
+
+_litellm_ui_sso: "{{ litellm_ui_sso_enabled | bool and litellm_ui_enabled | bool and gateway_create | bool }}"
+_litellm_admin_blocked: >-
+  {{ litellm_admin_blocked_paths + (litellm_password_login_paths if _litellm_ui_sso | bool else []) }}
+# Only members of the first admin group pass the SSO callback; else proxy admins only.
+_litellm_ui_access_mode: >-
+  {{ {'type': 'restricted_sso_group',
+      'restricted_sso_group': litellm_admin_groups | first,
+      'sso_group_jwt_field': 'groups'}
+     if _litellm_ui_sso | bool else 'admin_only' }}
+# Logout ends the Keycloak session too, else auto-redirect signs straight back in.
+_litellm_logout_url: >-
+  {{ (litellm_admin_route.frontend_url ~ '/oauth2/logout') if litellm_admin_login == 'gateway'
+     else (_kcc_issuer_url ~ '/protocol/openid-connect/logout?'
+           ~ {'client_id': litellm_admin_oidc_client_id,
+              'post_logout_redirect_uri': litellm_admin_route.frontend_url ~ '/ui/'} | urlencode) }}
+# Needs the _kcc_* facts from the Keycloak client task. Authorize and logout are
+# browser-facing (via the gateway); token and userinfo stay in-cluster.
+_litellm_sso_env: >-
+  {{ {'GENERIC_CLIENT_ID': litellm_admin_oidc_client_id,
+      'GENERIC_AUTHORIZATION_ENDPOINT': _kcc_issuer_url ~ '/protocol/openid-connect/auth',
+      'GENERIC_TOKEN_ENDPOINT': _kcc_internal_realm_url ~ '/protocol/openid-connect/token',
+      'GENERIC_USERINFO_ENDPOINT': _kcc_internal_realm_url ~ '/protocol/openid-connect/userinfo',
+      'GENERIC_SCOPE': 'openid email profile',
+      'GENERIC_CLIENT_USE_PKCE': 'true',
+      'GENERIC_USER_ID_ATTRIBUTE': 'sub',
+      'GENERIC_USER_DISPLAY_NAME_ATTRIBUTE': 'preferred_username',
+      'GENERIC_ROLE_MAPPINGS_GROUP_CLAIM': 'groups',
+      'GENERIC_ROLE_MAPPINGS_ROLES': litellm_ui_sso_role_mappings | to_json,
+      'GENERIC_ROLE_MAPPINGS_DEFAULT_ROLE': litellm_ui_sso_default_role,
+      'AUTO_REDIRECT_UI_LOGIN_TO_SSO': 'true',
+      'PROXY_LOGOUT_URL': _litellm_logout_url}
+     if _litellm_ui_sso | bool else {} }}
+# The UI does not frame itself; same-origin framing grants nothing extra.
+litellm_admin_response_headers:
+  Content-Security-Policy: "frame-ancestors 'self'"
+  X-Frame-Options: SAMEORIGIN
+
 # Namespaces allowed to open connections to LiteLLM (Istio L4 policy): the
 # gateway, and litellm itself (model-manager registers models from a pod there).
 litellm_allowed_namespaces:
   - "{{ gateway_namespace | default('envoy-gateway-system') }}"
   - "{{ litellm_namespace }}"
 
-# Edge protection on the LiteLLM API route (HSTS etc. come from the shared builder).
+# Edge protection on both LiteLLM routes (HSTS etc. come from the shared builder).
 # Local per-client-IP rate limit (no Redis). Generous enough for legitimate
 # inference, low enough to blunt automated brute-force; tune per deployment.
 # Note: clients behind a shared NAT/egress IP share one counter.
@@ -70,6 +157,9 @@ litellm_salt_key: "{{ lookup('password', '/dev/null length=32 chars=ascii_letter
 # the master key.
 litellm_ui_password: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
 litellm_redis_password: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+
+# LiteLLM UI, published on the litellm-admin route
+litellm_ui_enabled: true
 
 # Model routing — models are managed via LiteLLM UI/API (store_model_in_db: true)
 # KServe gateway URL used when adding models via the UI
