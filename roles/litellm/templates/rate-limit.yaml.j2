@@ -1,0 +1,24 @@
+# Local (per-gateway) rate limit — no external ratelimit service or Redis. A
+# Distinct match on the client-IP header gives each source IP its own counter,
+# blunting key brute-force and capping runaway abuse.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: litellm-rate-limit
+  namespace: {{ litellm_namespace }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: litellm
+  rateLimit:
+    type: Local
+    local:
+      rules:
+        - clientSelectors:
+            - headers:
+                - name: {{ litellm_rate_limit_client_header | default('x-forwarded-for') }}
+                  type: Distinct
+          limit:
+            requests: {{ litellm_rate_limit_requests | int }}
+            unit: {{ litellm_rate_limit_unit | default('Minute') }}

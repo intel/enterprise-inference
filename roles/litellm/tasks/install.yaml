@@ -40,15 +40,12 @@
         msg: "LiteLLM sizing: {{ 'multi-node (' + (_litellm_replicas | string) + ' replicas, HPA enabled)' if _litellm_is_multinode | bool else 'single-node (1 replica)' }}"
 
     # ── Proxy env for the pod ─────────────────────────────────────────────────
-    # prisma cannot read the CLI baked into the image (see the seed script below)
-    # so it re-fetches it with `npm install prisma` on every start. Behind a
-    # corporate proxy that fetch dies with ECONNRESET, `prisma migrate deploy`
-    # times out, the server never binds :4000 and the pod crash-loops.
-    # Both the Deployment and the migration Job render .Values.envVars.
-    # no_proxy must keep .svc/.cluster.local + pod/service CIDRs so DB traffic
-    # stays direct.
+    # Outbound calls (external model providers, the model cost map) go through
+    # the corporate proxy. Both the Deployment and the migration Job render
+    # .Values.envVars. no_proxy must keep .svc/.cluster.local + pod/service CIDRs
+    # so DB traffic stays direct.
 
-    - name: "litellm | Build proxy env (prisma CLI bootstrap needs egress)"
+    - name: "litellm | Build proxy env"
       ansible.builtin.set_fact:
         _litellm_proxy_env: >-
           {{
@@ -68,34 +65,6 @@
       ansible.builtin.debug:
         msg: "LiteLLM pod proxy: {{ 'enabled — ' + (https_proxy | default(http_proxy | default(''))) if _litellm_proxy_env else 'not set (direct egress)' }}"
 
-    # ── prisma query engine seed ──────────────────────────────────────────────
-    # Assembled here rather than in defaults/ because the seed script is loaded
-    # from this role's files/ directory, which needs role_path. The script itself
-    # documents why the seeding is necessary.
-
-    - name: "litellm | Build prisma engine seed initContainer"
-      ansible.builtin.set_fact:
-        _litellm_prisma_seed_containers:
-          - name: prisma-engine-seed
-            image: "ghcr.io/berriai/litellm-database:main-{{ litellm_version }}"
-            imagePullPolicy: IfNotPresent
-            # Root, so it can read the baked engines under /root — but with no
-            # capabilities, so the script cannot chown, only chmod.
-            securityContext:
-              runAsUser: 0
-              runAsNonRoot: false
-              allowPrivilegeEscalation: false
-              readOnlyRootFilesystem: true
-              capabilities:
-                drop: ["ALL"]
-            command:
-              - sh
-              - -c
-              - "{{ lookup('file', role_path + '/files/prisma-engine-seed.sh') }}"
-            volumeMounts:
-              - name: prisma-root
-                mountPath: /rootvol
-
     # ── Namespace ─────────────────────────────────────────────────────────────
 
     - name: "litellm | Create namespace"
@@ -104,8 +73,6 @@
         name: "{{ litellm_namespace }}"
         state: present
 
-    # baseline (not restricted): the prisma-engine-seed initContainer must run as
-    # root to read the engines baked into /root at image build time (see below).
     - name: "litellm | Label namespace — PSS"
       kubernetes.core.k8s:
         state: present
@@ -115,33 +82,10 @@
           metadata:
             name: "{{ litellm_namespace }}"
             labels:
-              pod-security.kubernetes.io/enforce: "baseline"
+              pod-security.kubernetes.io/enforce: "restricted"
               pod-security.kubernetes.io/audit: "restricted"
               pod-security.kubernetes.io/warn: "restricted"
       when: enforce_pss | default(false) | bool
-
-    # ReferenceGrant allows Envoy Gateway SecurityPolicy (in gateway namespace)
-    # to reference the LiteLLM service (in litellm namespace) for extAuth.
-    # Must be created after namespace exists — moved here from envoy_gateway role.
-    - name: "litellm | Create ReferenceGrant for Envoy Gateway extAuth"
-      when: auth_provider | default('keycloak') == 'litellm' and gateway_create | bool
-      kubernetes.core.k8s:
-        state: present
-        definition:
-          apiVersion: gateway.networking.k8s.io/v1beta1
-          kind: ReferenceGrant
-          metadata:
-            name: envoy-to-litellm
-            namespace: "{{ litellm_namespace }}"
-          spec:
-            from:
-              - group: gateway.envoyproxy.io
-                kind: SecurityPolicy
-                namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
-            to:
-              - group: ""
-                kind: Service
-                name: litellm
 
     # ── PostgreSQL credentials ────────────────────────────────────────────────
     # The postgresql role creates the DB and copies credentials as
@@ -204,6 +148,35 @@
           stringData:
             master_key: "sk-{{ litellm_master_key }}"
             salt_key: "{{ litellm_salt_key }}"
+      no_log: true
+
+    # ── UI and Valkey passwords (generated once, kept across re-installs) ─────
+
+    - name: "litellm | Check for existing UI / Valkey password secrets"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: "{{ item }}"
+        namespace: "{{ litellm_namespace }}"
+      loop: [litellm-ui-auth, litellm-redis-auth]
+      register: _litellm_pw_existing
+
+    - name: "litellm | Create missing UI / Valkey password secrets"
+      when: item.resources | length == 0
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ item.item }}"
+            namespace: "{{ litellm_namespace }}"
+          stringData:
+            password: "{{ litellm_ui_password if item.item == 'litellm-ui-auth' else litellm_redis_password }}"
+      loop: "{{ _litellm_pw_existing.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      no_log: true
 
     # ── Helm install ──────────────────────────────────────────────────────────
     # Chart is vendored at charts/litellm-helm (no internet required at install).
@@ -211,6 +184,20 @@
     # To upgrade: download new chart version, replace the directory, commit.
 
     - name: "litellm | Install via Helm"
+      vars:
+        _litellm_extra_env:
+          - name: LITELLM_SALT_KEY
+            valueFrom:
+              secretKeyRef:
+                name: litellm-master-key
+                key: salt_key
+          - name: UI_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: litellm-ui-auth
+                key: password
+          - name: LANGFUSE_HOST
+            value: "{{ 'http://langfuse-web.' + (langfuse_namespace | default('langfuse')) + '.svc.cluster.local:3000' if (langfuse_enabled | default(false) | bool or litellm_enabled | default(false) | bool or (auth_provider | default('keycloak')) == 'litellm') else '' }}"
       kubernetes.core.helm:
         name: litellm
         chart_ref: "{{ role_path }}/../../charts/litellm-helm"
@@ -225,7 +212,7 @@
           replicaCount: "{{ _litellm_replicas }}"
           image:
             repository: ghcr.io/berriai/litellm-database
-            tag: "main-{{ litellm_version }}"
+            tag: "{{ litellm_version }}"
           # DB — use our existing PostgreSQL via db-secret pattern
           db:
             useExisting: true
@@ -240,30 +227,23 @@
           masterkeySecretKey: master_key
           environmentSecrets:
             - litellm-master-key
-          # Proxy vars merged in when the cluster is behind a corporate proxy —
-          # required for the prisma CLI bootstrap (see set_fact above).
+          # Proxy vars merged in when the cluster is behind a corporate proxy.
           envVars: "{{ {'UI_USERNAME': 'admin'} | combine(_litellm_proxy_env) }}"
-          extraEnvVars:
-            - name: LITELLM_SALT_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: litellm-master-key
-                  key: salt_key
-            - name: UI_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: litellm-master-key
-                  key: master_key
-            - name: LANGFUSE_HOST
-              value: "{{ 'http://langfuse-web.' + (langfuse_namespace | default('langfuse')) + '.svc.cluster.local:3000' if (langfuse_enabled | default(false) | bool or litellm_enabled | default(false) | bool or (auth_provider | default('keycloak')) == 'litellm') else '' }}"
-          # ── prisma query engine seed ──────────────────────────────────────
-          # The prisma engines are baked into the image under /root, which uid
-          # 1000 cannot read, so the proxy cannot reach them. An emptyDir over
-          # /root, seeded from the image by an initContainer, fixes it — see
-          # files/prisma-engine-seed.sh for the full explanation.
-          extraInitContainers: "{{ _litellm_prisma_seed_containers }}"
-          volumes: "{{ litellm_prisma_root_volumes }}"
-          volumeMounts: "{{ litellm_prisma_root_volume_mounts }}"
+          extraEnvVars: "{{ _litellm_extra_env }}"
+          # LiteLLM trips its Redis circuit breaker if it starts before the cache
+          # answers, so wait for an authenticated PING.
+          extraInitContainers: >-
+            {{ [{'name': 'wait-for-cache',
+                 'image': 'valkey/valkey:' ~ litellm_valkey_tag,
+                 'command': ['sh', '-c',
+                             'until [ "$(valkey-cli -h litellm-redis-primary -p 6379 ping)" = PONG ]; do sleep 2; done'],
+                 'env': [{'name': 'REDISCLI_AUTH',
+                          'valueFrom': {'secretKeyRef': {'name': 'litellm-redis-auth', 'key': 'password'}}}],
+                 'securityContext': {'allowPrivilegeEscalation': false, 'readOnlyRootFilesystem': true,
+                                     'capabilities': {'drop': ['ALL']}},
+                 'resources': {'requests': {'cpu': '10m', 'memory': '16Mi'},
+                               'limits': {'cpu': '100m', 'memory': '64Mi'}}}]
+               if litellm_cache_enabled | default(true) | bool else [] }}
           # ── Schema migration Job ──────────────────────────────────────────
           # The chart's default 512Mi limit is far below what
           # `python litellm/proxy/prisma_migration.py` actually needs (~2.1Gi
@@ -279,7 +259,7 @@
             general_settings:
               master_key: "os.environ/PROXY_MASTER_KEY"
               store_model_in_db: true
-              ui_access_mode: "all"
+              ui_access_mode: "admin_only"
             litellm_settings:
               drop_params: true
               set_verbose: false
@@ -288,6 +268,7 @@
                 type: redis
                 host: "litellm-redis-primary.{{ litellm_namespace }}.svc.cluster.local"
                 port: 6379
+                password: "os.environ/REDIS_PASSWORD"
                 ttl: "{{ litellm_cache_ttl | default(600) }}"
               success_callback: "{{ ['langfuse'] if (langfuse_enabled | default(false) | bool or litellm_enabled | default(false) | bool or (auth_provider | default('keycloak')) == 'litellm') else [] }}"
               failure_callback: "{{ ['langfuse'] if (langfuse_enabled | default(false) | bool or litellm_enabled | default(false) | bool or (auth_provider | default('keycloak')) == 'litellm') else [] }}"
@@ -298,7 +279,9 @@
           # name, wait logic) but runs the official upstream valkey/valkey image
           # instead of the deprecated bitnamilegacy/valkey. The Bitnami
           # entrypoint/probe scripts are bypassed: valkey-server starts directly
-          # with cache-only flags and probes fall back to a TCP check.
+          # with cache-only flags and probes fall back to a TCP check. The cache
+          # holds prompts and responses, so it requires a password; the chart
+          # exposes it as VALKEY_PASSWORD here and REDIS_PASSWORD in LiteLLM.
           redis:
             enabled: "{{ litellm_cache_enabled | default(true) | bool }}"
             architecture: standalone
@@ -306,12 +289,16 @@
               repository: valkey/valkey
               tag: "{{ litellm_valkey_tag }}"
             auth:
-              enabled: false
+              enabled: true
+              existingSecret: litellm-redis-auth
+              existingSecretPasswordKey: password
             networkPolicy:
               enabled: false
             primary:
               command: ["valkey-server"]
               args:
+                - "--requirepass"
+                - "$(VALKEY_PASSWORD)"
                 - "--maxmemory-policy"
                 - "allkeys-lru"
                 - "--protected-mode"
@@ -398,49 +385,36 @@
 
 # ── Gateway integration (runs even on re-runs to stay idempotent) ─────────────
 
-# HSTS on the public LiteLLM host: browsers/SDKs must never send the UI login
-# password or a virtual key over plaintext :80 before the 301 to HTTPS. Built
-# as a fact so disabling it re-renders the route with no filter (self-healing).
-- name: "litellm | Build HTTPRoute response filters (HSTS)"
-  ansible.builtin.set_fact:
-    _litellm_route_filters: >-
-      {{
-        [{'type': 'ResponseHeaderModifier',
-          'responseHeaderModifier': {'set': [{
-            'name': 'Strict-Transport-Security',
-            'value': 'max-age=' ~ (litellm_hsts_max_age | int) ~ '; includeSubDomains'}]}}]
-        if litellm_hsts_enabled | default(true) | bool else []
-      }}
-
-- name: "litellm | Create HTTPRoute"
-  when: gateway_create | bool
+# In path mode the route mounts on the shared apex listener, which admits routes
+# only from labelled namespaces (gateway_apex_route_label_*, envoy_gateway role).
+- name: "litellm | Label namespace — allow apex-listener routes (path mode)"
+  when: gateway_create | bool and litellm_route.section_name == 'https-apex'
   kubernetes.core.k8s:
     state: present
     definition:
-      apiVersion: gateway.networking.k8s.io/v1
-      kind: HTTPRoute
+      apiVersion: v1
+      kind: Namespace
       metadata:
-        name: litellm
-        namespace: "{{ litellm_namespace }}"
-      spec:
-        parentRefs:
-          - name: "{{ gateway_name | default('eg-gateway') }}"
-            namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
-            sectionName: https
-        hostnames:
-          - "{{ litellm_hostname }}"
-        rules:
-          - matches:
-              - path:
-                  type: PathPrefix
-                  value: /
-            filters: "{{ _litellm_route_filters }}"
-            backendRefs:
-              - name: litellm
-                port: 4000
+        name: "{{ litellm_namespace }}"
+        labels: >-
+          {{ {(gateway_apex_route_label_key | default('gateway-apex-routes')):
+              (gateway_apex_route_label_value | default('allowed'))} }}
 
-- name: "litellm | Create no-auth SecurityPolicy (LiteLLM handles its own auth)"
-  when: gateway_create | bool and auth_provider | default('none') == 'litellm'
+# API: only the exact inference paths reach LiteLLM (prefix stripped in path mode).
+- name: "litellm | Create API HTTPRoute"
+  when: gateway_create | bool
+  kubernetes.core.k8s:
+    state: present
+    definition: >-
+      {{ litellm_route | gateway_httproute('litellm',
+           rules=[{'exact': litellm_public_paths}],
+           gateway_name=gateway_name | default('eg-gateway'),
+           gateway_namespace=gateway_namespace | default('envoy-gateway-system')) }}
+
+# Programs authenticate with LiteLLM virtual keys, so the gateway's Keycloak
+# JWT default is overridden on the API route only.
+- name: "litellm | Create no-auth SecurityPolicy (LiteLLM checks virtual keys)"
+  when: gateway_create | bool
   kubernetes.core.k8s:
     state: present
     definition:
@@ -455,37 +429,23 @@
             kind: HTTPRoute
             name: litellm
 
+# Older releases granted the gateway a ReferenceGrant into this namespace; no
+# longer needed (routes and backends live here).
+- name: "litellm | Remove stale ReferenceGrant"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: gateway.networking.k8s.io/v1beta1
+    kind: ReferenceGrant
+    name: envoy-to-litellm
+    namespace: "{{ litellm_namespace }}"
+  failed_when: false
+
 # ── Edge rate limit ───────────────────────────────────────────────────────────
-# Local (per-gateway) rate limit — no external ratelimit service or Redis. A
-# Distinct match on the client-IP header gives each source IP its own counter,
-# blunting brute-force against the internet-facing UI login/admin API and capping
-# runaway abuse. Coarse by design; per-identity limits come with the auth work.
 - name: "litellm | Create edge rate-limit BackendTrafficPolicy"
   when: gateway_create | bool and litellm_rate_limit_enabled | default(true) | bool
   kubernetes.core.k8s:
     state: present
-    definition:
-      apiVersion: gateway.envoyproxy.io/v1alpha1
-      kind: BackendTrafficPolicy
-      metadata:
-        name: litellm-rate-limit
-        namespace: "{{ litellm_namespace }}"
-      spec:
-        targetRefs:
-          - group: gateway.networking.k8s.io
-            kind: HTTPRoute
-            name: litellm
-        rateLimit:
-          type: Local
-          local:
-            rules:
-              - clientSelectors:
-                  - headers:
-                      - name: "{{ litellm_rate_limit_client_header | default('x-forwarded-for') }}"
-                        type: Distinct
-                limit:
-                  requests: "{{ litellm_rate_limit_requests | int }}"
-                  unit: "{{ litellm_rate_limit_unit | default('Minute') }}"
+    template: rate-limit.yaml.j2
 
 # Remove the policy if rate limiting is turned off on a re-run (drift cleanup).
 - name: "litellm | Remove edge rate-limit BackendTrafficPolicy when disabled"
@@ -497,6 +457,37 @@
     name: litellm-rate-limit
     namespace: "{{ litellm_namespace }}"
   failed_when: false
+
+# ── In-cluster lockdown (Istio ambient, L4) ───────────────────────────────────
+# Mesh mTLS gives every caller an identity; only the allowed namespaces may
+# reach LiteLLM, and only LiteLLM may reach the cache.
+- name: "litellm | Restrict in-cluster access (AuthorizationPolicy)"
+  when: istio_enabled | default(false) | bool
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: security.istio.io/v1
+      kind: AuthorizationPolicy
+      metadata:
+        name: "{{ item.name }}"
+        namespace: "{{ litellm_namespace }}"
+      spec:
+        selector:
+          matchLabels:
+            app.kubernetes.io/name: "{{ item.app }}"
+        action: ALLOW
+        rules:
+          - from:
+              - source:
+                  namespaces: "{{ item.from }}"
+            to:
+              - operation:
+                  ports: ["{{ item.port }}"]
+  loop:
+    - { name: litellm-ingress, app: litellm, from: "{{ litellm_allowed_namespaces }}", port: "4000" }
+    - { name: litellm-redis, app: redis, from: ["{{ litellm_namespace }}"], port: "6379" }   # valkey subchart, aliased redis
+  loop_control:
+    label: "{{ item.name }}"
 
 # ── Print credentials ─────────────────────────────────────────────────────────
 
@@ -513,15 +504,16 @@
           app.kubernetes.io/managed-by: ansible
       data:
         hostname: "{{ litellm_hostname }}"
-        ui_url: "https://{{ litellm_hostname }}"
-        admin_username: "admin"
-        note: "Master key is in secret litellm-master-key (key: master_key)"
+        api_url: "{{ litellm_url }}/v1"
+        note: >-
+          The admin UI and admin API are not published. Master key (break-glass) is in secret
+          litellm-master-key (key: master_key).
 
 - name: "litellm | Install complete"
   ansible.builtin.debug:
     msg:
       - "LiteLLM deployed in namespace '{{ litellm_namespace }}'"
-      - "UI: https://{{ litellm_hostname }}"
-      - "Admin username: admin"
-      - "Master key: kubectl get secret litellm-master-key -n {{ litellm_namespace }} -o jsonpath='{.data.master_key}' | base64 -d"
-      - "Auth mode: LiteLLM virtual keys (Bearer <key>); LiteLLM is the sole auth boundary"
+      - "API: {{ litellm_url }}/v1 (Bearer <virtual key>; paths: {{ litellm_public_paths | join(', ') }})"
+      - >-
+        Admin API: not published; break-glass with the master key over
+        kubectl -n {{ litellm_namespace }} port-forward svc/litellm 4000 (Secret litellm-master-key)

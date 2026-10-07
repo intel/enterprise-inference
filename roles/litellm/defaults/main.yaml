@@ -5,28 +5,48 @@
 # LiteLLM is an OpenAI-compatible proxy that adds virtual key management,
 # spend tracking, rate limiting, and model routing on top of inference backends.
 #
-# When auth_provider=litellm:
-#   - The gateway does TLS + routing only; LiteLLM is the sole auth boundary
-#     and validates its own virtual keys (no gateway JWT, no extAuth)
-#   - Keycloak is disabled (not deployed)
-#   - Virtual keys are the auth mechanism (Bearer <litellm-virtual-key>)
-#
-# LiteLLM sits in front of KServe inference endpoints:
-#   Client → Envoy Gateway (TLS+routing) → LiteLLM proxy (auth) → KServe
+# When auth_provider=litellm, the API is published for programs:
+#   litellm.<domain> (<domain>/litellm in path mode). Only litellm_public_paths
+#   are routed; LiteLLM validates the virtual key. The admin UI and admin API
+#   are not published.
+#   Client → Envoy Gateway (TLS, path allowlist) → LiteLLM (key check) → KServe
 # =============================================================================
 
-litellm_version: "v1.83.14-stable.patch.2"     # Docker image tag to deploy
+# Image tag. >= v1.103.1 for GHSA-7hp6-4w63-5g45; >= v1.85.0 for the 2026
+# Host-header, MCP OAuth and /sso/debug advisories.
+litellm_version: "v1.103.3"
 litellm_namespace: "litellm"
 litellm_valkey_tag: "8.0-alpine"                # valkey/valkey (official upstream image, Alpine for smaller footprint)
 
 # Gateway integration
 gateway_create: "{{ envoy_gateway_enabled | default(false) }}"
-litellm_hostname: "litellm.{{ base_domain_name | default('inference-example.com') }}"
+# Routing from the solutions service_routes registry (configs/service_routes.yaml)
+# via the shared service_route filter; follows routing_mode:
+# litellm.<domain>, or <domain>/litellm (prefix stripped).
+litellm_route: >-
+  {{ 'litellm' | service_route(routing_mode | default('subdomain'),
+                               base_domain_name | default('inference-example.com'),
+                               service_routes | default({}),
+                               service_route_overrides | default({})) }}
+litellm_hostname: "{{ litellm_route.host }}"
+litellm_url: "{{ litellm_route.frontend_url }}"          # API base URL clients use (+ /v1)
 
-# Edge protection on the public LiteLLM route (litellm.<domain>).
-# HSTS forces HTTPS so the UI login password / virtual key is never sent on :80.
-litellm_hsts_enabled: true
-litellm_hsts_max_age: 31536000                    # 1 year (seconds)
+# Exact paths published on the API route (under the /litellm prefix in path
+# mode); anything else never reaches LiteLLM.
+litellm_public_paths:
+  - /v1/chat/completions
+  - /v1/completions
+  - /v1/embeddings
+  - /v1/models
+  - /health/liveliness
+
+# Namespaces allowed to open connections to LiteLLM (Istio L4 policy): the
+# gateway, and litellm itself (model-manager registers models from a pod there).
+litellm_allowed_namespaces:
+  - "{{ gateway_namespace | default('envoy-gateway-system') }}"
+  - "{{ litellm_namespace }}"
+
+# Edge protection on the LiteLLM API route (HSTS etc. come from the shared builder).
 # Local per-client-IP rate limit (no Redis). Generous enough for legitimate
 # inference, low enough to blunt automated brute-force; tune per deployment.
 # Note: clients behind a shared NAT/egress IP share one counter.
@@ -39,15 +59,17 @@ litellm_rate_limit_client_header: "x-forwarded-for"
 litellm_db_name: "litellm"
 litellm_db_user: "litellm"
 
-# Master key — used by admin to create virtual keys
-# Set via LITELLM_MASTER_KEY env var or auto-generated at install
+# Master key — break-glass only; admins work through the UI. Generated once at
+# install and kept in Secret litellm-master-key.
 litellm_master_key: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
 
 # Salt for hashing stored keys (keep stable across restarts)
 litellm_salt_key: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
 
-# LiteLLM UI
-litellm_ui_enabled: true
+# UI login password (user "admin") and Valkey password; generated once, never
+# the master key.
+litellm_ui_password: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+litellm_redis_password: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
 
 # Model routing — models are managed via LiteLLM UI/API (store_model_in_db: true)
 # KServe gateway URL used when adding models via the UI
@@ -77,20 +99,6 @@ litellm_single_node_resources:
     cpu: "4"
     memory: "4Gi"
 
-# prisma query engine access under a hardened securityContext.
-# The engines are baked into the image under /root, which the uid 1000 the proxy
-# runs as cannot read, so they are seeded into this emptyDir by an initContainer
-# instead. See roles/litellm/files/prisma-engine-seed.sh for the full rationale.
-# The chart applies these to both the Deployment and the migration Job.
-litellm_prisma_root_size: "256Mi"
-litellm_prisma_root_volumes:
-  - name: prisma-root
-    emptyDir:
-      sizeLimit: "{{ litellm_prisma_root_size }}"
-litellm_prisma_root_volume_mounts:
-  - name: prisma-root
-    mountPath: /root
-
 # Schema migration Job — the chart's 512Mi limit is far too small and the Job was
 # cgroup-OOM-killed on every attempt until BackoffLimitExceeded (exit 137 reported
 # as "Error", with no log output at all because python's stdout was still buffered
@@ -117,4 +125,3 @@ litellm_multi_node_resources:
   limits:
     cpu: "4"
     memory: "4Gi"
-
