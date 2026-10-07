@@ -14,5 +14,16 @@ ai_gateway_namespace: "{{ kserve_llmisvc_namespace | default('llm-inference') }}
 # Internal consumers can reach it at: <name>.<ai_gateway_namespace>.svc.cluster.local:80
 ai_gateway_service_name: "ai-gateway"
 
-# External inference hostname (eg-gateway TLS listener → ai-gateway)
-inference_hostname: "inference.{{ base_domain_name | default('inference-example.com') }}"
+# External inference route (eg-gateway TLS listener → ai-gateway), from the
+# service_routes registry: inference.<domain>, or <domain>/inference (prefix stripped).
+inference_route: >-
+  {{ 'inference' | service_route(routing_mode | default('subdomain'),
+                                 base_domain_name | default('inference-example.com'),
+                                 service_routes | default({}),
+                                 service_route_overrides | default({})) }}
+# Read-only: the gateway serves registry hosts only. To rename, set
+# service_route_overrides: {inference: {subdomain: <name>}}.
+inference_hostname: "{{ inference_route.host }}"
+_inference_route_effective: >-
+  {{ inference_route | combine({'backend': ai_gateway_service_name,
+                                'namespace': envoy_gateway_namespace | default('envoy-gateway-system')}) }}

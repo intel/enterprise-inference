@@ -77,10 +77,9 @@
                   directAccessGrantsEnabled: false
                   standardFlowEnabled: false
                   secret: "{{ _kcc_client_secret }}"
-                  redirectUris:
-                    - "https://{{ keycloak_hostname }}/*"
-                  webOrigins:
-                    - "https://{{ keycloak_hostname }}"
+                  # client_credentials only: no browser flow, so no redirect URIs or origins.
+                  redirectUris: []
+                  webOrigins: []
                   attributes:
                     access.token.lifespan: "{{ keycloak_token_lifespan | string }}"
                   protocolMappers:
@@ -170,11 +169,13 @@
         pod: "{{ keycloak_pod_name }}"
         command: >-
           /opt/keycloak/bin/kcadm.sh config credentials
-          --server http://localhost:8080 --realm master
+          --server {{ keycloak_admin_server_url }} --realm master
           --user {{ _kcc_admin_sec.resources[0].data.username | b64decode }}
           --password {{ _kcc_admin_sec.resources[0].data.password | b64decode }}
       no_log: "{{ secure_logs | default(true) }}"
 
+    # Right after a fresh import the server can answer 403 until it sees the
+    # new realm's admin roles; retry instead of failing the run.
     - name: "keycloak_config | kcadm — resolve client UUID"
       kubernetes.core.k8s_exec:
         namespace: "{{ keycloak_namespace }}"
@@ -184,7 +185,15 @@
           -q clientId={{ keycloak_client_id }} --fields id --format csv --noquotes
       register: _kcc_client_uuid
       changed_when: false
-      failed_when: (_kcc_client_uuid.stdout | trim) == ""
+      failed_when: false
+      until: (_kcc_client_uuid.stdout | default('') | trim) != ""
+      retries: 10
+      delay: 6
+
+    - name: "keycloak_config | Check client UUID"
+      ansible.builtin.assert:
+        that: (_kcc_client_uuid.stdout | default('') | trim) != ""
+        fail_msg: "Client {{ keycloak_client_id }} not found in realm {{ keycloak_realm }}: {{ _kcc_client_uuid.stderr | default('') }}"
 
     - name: "keycloak_config | kcadm — set client secret to our generated value"
       kubernetes.core.k8s_exec:

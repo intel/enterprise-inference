@@ -8,7 +8,13 @@
 # =============================================================================
 
 keycloak_namespace: "keycloak"
-keycloak_hostname: "keycloak.{{ base_domain_name | default('inference-example.com') }}"
+# In-pod admin URL: Keycloak serves under its route prefix in path mode.
+_kcc_relative_path: >-
+  {{ ('keycloak' | service_route(routing_mode | default('subdomain'),
+                                 base_domain_name | default('inference-example.com'),
+                                 service_routes | default({}),
+                                 service_route_overrides | default({}))).relative_path }}
+keycloak_admin_server_url: "http://localhost:8080{{ '' if _kcc_relative_path == '/' else _kcc_relative_path }}"
 
 # Realm & client owned by this solution
 keycloak_realm: "inference"
