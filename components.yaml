@@ -18,9 +18,10 @@ components:
     enabled: "{{ nfd_enabled | default(true) | bool }}"
     depends_on: []
 
+  # Both auth modes: the gateway's deny-by-default JWT trusts this realm.
   - name: keycloak_config
     layer: inference
-    enabled: "{{ keycloak_enabled | default(auth_provider | default('keycloak') != 'litellm') | bool }}"
+    enabled: "{{ keycloak_enabled | default(true) | bool }}"
     depends_on: []
 
   - name: envoy_ai_gateway
