@@ -225,7 +225,8 @@
             nodeEnv: production
             features:
               telemetryEnabled: false
-              signUpDisabled: false
+              # Admin is seeded via LANGFUSE_INIT_*; no self-registration.
+              signUpDisabled: true
             salt:
               value: "{{ _langfuse_salt }}"
             encryptionKey:
@@ -233,7 +234,7 @@
 
             # NextAuth — nested under langfuse in chart v1.5.x
             nextauth:
-              url: "https://{{ langfuse_hostname }}"
+              url: "{{ langfuse_url }}"
               secret:
                 secretKeyRef:
                   name: langfuse-secrets
@@ -532,33 +533,17 @@
 # ── Gateway integration ───────────────────────────────────────────────────────
 
 - name: "langfuse | Create HTTPRoute"
-  when: gateway_create | bool
+  when: gateway_create | bool and langfuse_route.published
   kubernetes.core.k8s:
     state: present
-    definition:
-      apiVersion: gateway.networking.k8s.io/v1
-      kind: HTTPRoute
-      metadata:
-        name: langfuse
-        namespace: "{{ langfuse_namespace }}"
-      spec:
-        parentRefs:
-          - name: "{{ gateway_name | default('eg-gateway') }}"
-            namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
-            sectionName: https
-        hostnames:
-          - "{{ langfuse_hostname }}"
-        rules:
-          - matches:
-              - path:
-                  type: PathPrefix
-                  value: /
-            backendRefs:
-              - name: langfuse-web
-                port: 3000
+    definition: >-
+      {{ langfuse_route | combine({'host': langfuse_hostname})
+         | gateway_httproute('langfuse',
+             gateway_name=gateway_name | default('eg-gateway'),
+             gateway_namespace=gateway_namespace | default('envoy-gateway-system')) }}
 
 - name: "langfuse | Create no-auth SecurityPolicy (Langfuse has its own login)"
-  when: gateway_create | bool and auth_provider | default('none') in ['keycloak', 'litellm']
+  when: gateway_create | bool and langfuse_route.published and auth_provider | default('none') in ['keycloak', 'litellm']
   kubernetes.core.k8s:
     state: present
     definition:
@@ -573,54 +558,21 @@
             kind: HTTPRoute
             name: langfuse
 
-# ── Wire LiteLLM → Langfuse callback ─────────────────────────────────────────
-
-- name: "langfuse | Configure LiteLLM to send traces to Langfuse"
-  when: litellm_enabled | default(false) | bool or (auth_provider | default('keycloak')) == 'litellm'
-  block:
-    - name: "langfuse | Get Langfuse public key from API"
-      ansible.builtin.uri:
-        url: "http://langfuse-web.{{ langfuse_namespace }}.svc.cluster.local:3000/api/auth/login"
-        method: GET
-        status_code: [200, 405]
-        timeout: 10
-      register: _langfuse_api_check
-      failed_when: false
-
-    - name: "langfuse | Inject Langfuse API keys into LiteLLM (no manual step needed)"
-      kubernetes.core.k8s:
-        state: present
-        definition:
-          apiVersion: v1
-          kind: Secret
-          metadata:
-            name: langfuse-api-keys
-            namespace: "{{ litellm_namespace | default('litellm') }}"
-            labels:
-              app.kubernetes.io/managed-by: ansible
-          stringData:
-            LANGFUSE_HOST: "http://langfuse-web.{{ langfuse_namespace }}.svc.cluster.local:3000"
-            LANGFUSE_PUBLIC_KEY: "{{ _langfuse_public_key }}"
-            LANGFUSE_SECRET_KEY: "{{ _langfuse_secret_key }}"
-      failed_when: false
-
-    - name: "langfuse | Patch LiteLLM deployment to use Langfuse API keys"
-      kubernetes.core.k8s:
-        state: patched
-        api_version: apps/v1
-        kind: Deployment
-        name: litellm
-        namespace: "{{ litellm_namespace | default('litellm') }}"
-        definition:
-          spec:
-            template:
-              spec:
-                containers:
-                  - name: litellm
-                    envFrom:
-                      - secretRef:
-                          name: langfuse-api-keys
-      failed_when: false
+# Not publishable in this mode (path): drop any route left from subdomain mode.
+- name: "langfuse | Remove HTTPRoute when not published"
+  when: gateway_create | bool and not langfuse_route.published
+  kubernetes.core.k8s:
+    state: absent
+    api_version: "{{ item.api }}"
+    kind: "{{ item.kind }}"
+    name: "{{ item.name }}"
+    namespace: "{{ langfuse_namespace }}"
+  loop:
+    - { api: gateway.envoyproxy.io/v1alpha1, kind: SecurityPolicy, name: langfuse-no-auth }
+    - { api: gateway.networking.k8s.io/v1, kind: HTTPRoute, name: langfuse }
+  loop_control:
+    label: "{{ item.kind }}/{{ item.name }}"
+  failed_when: false
 
 # ── Store credentials ─────────────────────────────────────────────────────────
 
@@ -636,8 +588,8 @@
         labels:
           app.kubernetes.io/managed-by: ansible
       data:
-        hostname: "{{ langfuse_hostname }}"
-        ui_url: "https://{{ langfuse_hostname }}"
+        hostname: "{{ langfuse_hostname if langfuse_route.published else '' }}"
+        ui_url: "{{ langfuse_url }}"
         admin_email_hint: "kubectl get secret langfuse-secrets -n {{ langfuse_namespace }} -o jsonpath='{.data.admin_email}' | base64 -d"
         admin_password_hint: "kubectl get secret langfuse-secrets -n {{ langfuse_namespace }} -o jsonpath='{.data.admin_password}' | base64 -d"
         internal_url: "http://langfuse-web.{{ langfuse_namespace }}.svc.cluster.local:3000"
@@ -646,7 +598,9 @@
   ansible.builtin.debug:
     msg:
       - "Langfuse deployed in namespace '{{ langfuse_namespace }}'"
-      - "UI: https://{{ langfuse_hostname }}"
+      - >-
+        UI: {{ langfuse_url }}{{ '' if langfuse_route.published
+        else '  (internal: kubectl -n ' ~ langfuse_namespace ~ ' port-forward svc/langfuse-web 3000)' }}
       - "Admin email: kubectl get secret langfuse-secrets -n {{ langfuse_namespace }} -o jsonpath='{.data.admin_email}' | base64 -d"
       - "Admin password: kubectl get secret langfuse-secrets -n {{ langfuse_namespace }} -o jsonpath='{.data.admin_password}' | base64 -d"
       - "LiteLLM integration: auto-configured (Langfuse API keys injected into LiteLLM)"

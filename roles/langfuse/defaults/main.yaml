@@ -23,8 +23,17 @@ langfuse_helm_repo: "https://langfuse.github.io/langfuse-k8s"
 langfuse_helm_repo_name: "langfuse"
 langfuse_helm_chart: "langfuse/langfuse"
 
-# Hostname for the Langfuse UI (overridable in global_config.yaml)
-langfuse_hostname: "langfuse.{{ base_domain_name | default('inference-example.com') }}"
+# Routing from the service_routes registry. Langfuse cannot serve under a path
+# prefix (build-time basePath), so in path mode it is not published; reach it
+# with: kubectl -n <ns> port-forward svc/langfuse-web 3000
+langfuse_route: >-
+  {{ 'langfuse' | service_route(routing_mode | default('subdomain'),
+                                base_domain_name | default('inference-example.com'),
+                                service_routes | default({}),
+                                service_route_overrides | default({})) }}
+# Hostname for the Langfuse UI (overridable in global_config.yaml, subdomain mode)
+langfuse_hostname: "{{ langfuse_route.host }}"
+langfuse_url: "{{ ('https://' ~ langfuse_hostname) if langfuse_route.published else 'http://localhost:3000' }}"
 
 # Default admin account — seeded on first startup via LANGFUSE_INIT_* env vars
 # Email defaults to admin@<base_domain_name>
