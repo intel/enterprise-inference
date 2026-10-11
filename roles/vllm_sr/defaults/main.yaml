@@ -82,5 +82,6 @@ vllm_sr_dashboard_enabled: false
 vllm_sr_dashboard_hostname: "vllm-sr.{{ base_domain_name | default('solutions.ai') }}"
 vllm_sr_dashboard_admin_email: "admin@{{ base_domain_name | default('solutions.ai') }}"
 vllm_sr_dashboard_admin_name: "admin"
+# checkov:skip=CKV_SECRET_6: Kubernetes Secret name, not a secret value
 vllm_sr_dashboard_secret: "vllm-sr-dashboard"
 vllm_sr_dashboard_storage_size: "1Gi"

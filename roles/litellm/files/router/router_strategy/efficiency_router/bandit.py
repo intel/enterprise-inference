@@ -148,8 +148,8 @@ class EpsilonGreedy(MABAlgorithm):
         for i in range(self.n_arms):
             if self.counts[i] == 0:
                 return i
-        if random.random() < self.epsilon:
-            return random.randrange(self.n_arms)
+        if random.random() < self.epsilon:  # nosec B311 - exploration sampling, not security
+            return random.randrange(self.n_arms)  # nosec B311
         best_idx = 0
         best_mu = -math.inf
         for i in range(self.n_arms):
