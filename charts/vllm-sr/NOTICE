@@ -1,0 +1,6 @@
+This chart is vendored from vllm-project/semantic-router
+(https://github.com/vllm-project/semantic-router, deploy/helm/semantic-router,
+commit d69f4d7d), licensed under the Apache License 2.0 (see LICENSE).
+
+Modifications: bundled subchart dependencies (redis, milvus, jaeger,
+prometheus, grafana) removed; appVersion pinned to v0.3.0.
