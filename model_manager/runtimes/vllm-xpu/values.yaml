@@ -1,0 +1,11 @@
+# Requires the Intel GPU device plugin on the cluster (ai-solutions
+# kubernetes_accelerator: xpu → intel_gpu_plugin component).
+device: xpu
+kind: LLMInferenceService
+routing: epp
+xpu:
+  resource: gpu.intel.com/xe
+  # Groups owning /dev/dri render/card nodes (render, video) on the host.
+  supplemental_groups: [990, 44]
+  # Host GPU user-space libraries (Level Zero / OpenCL) mounted into the pod.
+  host_lib_dir: /usr/lib/x86_64-linux-gnu

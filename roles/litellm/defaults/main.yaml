@@ -50,8 +50,9 @@ litellm_salt_key: "{{ lookup('password', '/dev/null length=32 chars=ascii_letter
 litellm_ui_enabled: true
 
 # Model routing — models are managed via LiteLLM UI/API (store_model_in_db: true)
-# KServe gateway URL used when adding models via the UI
-litellm_kserve_gateway_url: "http://envoy-gateway.envoy-gateway-system.svc.cluster.local"
+# KServe gateway URL used when adding models via the UI. This is the in-cluster
+# AI Gateway data plane (ai-gateway), NOT the envoy-gateway control-plane service.
+litellm_kserve_gateway_url: "http://{{ ai_gateway_name | default('ai-gateway') }}.{{ gateway_namespace | default('envoy-gateway-system') }}.svc.cluster.local"
 litellm_kserve_namespace: "llm-inference"
 
 # Redis cache — reduces latency for repeated prompts
@@ -118,3 +119,61 @@ litellm_multi_node_resources:
     cpu: "4"
     memory: "4Gi"
 
+# --- Content-safety guardrail (litellm mode) ---
+# A LiteLLM custom_code guardrail (Qwen3Guard) that
+# screens every request pre-call against a small guard model (fail-closed).
+# The `qwen3guard` catalog model is deployed by llm_services when this is on.
+# Only meaningful in litellm mode — LiteLLM must be in the request path.
+guardrails_enabled: "{{ (auth_provider | default('keycloak')) == 'litellm' }}"
+guardrail_name: "content_safety"
+# The gateway/vLLM served model name (catalog id), NOT the HF repo — the endpoint
+# rejects the repo id (Qwen/Qwen3Guard-Gen-0.6B) with a 404.
+guardrail_model: "qwen3guard"
+guardrail_guard_namespace: "{{ llm_services_namespace | default('llm-inference') }}"
+# Guard endpoint — the qwen3guard model reached directly via the in-cluster AI gateway
+# DATA PLANE. The `ai-gateway` service lives in the gateway namespace
+# (envoy-gateway-system), while the route prefix is the model's own namespace
+# (/<model-ns>/<model>/v1, same path model_internal_url builds). Not via LiteLLM
+# itself (would recurse the guardrail).
+guard_service_url: "http://{{ ai_gateway_name | default('ai-gateway') }}.{{ gateway_namespace | default('envoy-gateway-system') }}.svc.cluster.local/{{ guardrail_guard_namespace }}/qwen3guard/v1/chat/completions"
+guard_max_tokens: 32
+guard_timeout: 60
+guard_block_on_controversial: false
+guardrail_litellm_namespace: "{{ litellm_namespace | default('litellm') }}"
+guardrail_litellm_deployment: "litellm"
+guardrail_litellm_container: "litellm"
+
+# --- Hybrid Router (optional, litellm mode) ---
+# A LiteLLM custom router (monkey-patches litellm.router
+# to add an `auto_router/hybrid_router` prefix) that classifies prompt complexity
+# and uses an online multi-armed bandit to pick the cheapest capable model per
+# tier. The router package is mounted from a ConfigMap into the config dir (next
+# to config.yaml) and wired via litellm_settings.callbacks. Off by default
+# (opt-in); only meaningful in litellm mode. Compatible with the deployed LiteLLM
+# version (uses Router.async_pre_routing_hook / PreRoutingHookResponse, v1.83.x).
+hybrid_router_enabled: false
+# LiteLLM resolves `callbacks` modules by file path relative to the config-file
+# directory, so the router code is mounted here (where config.yaml lives).
+hybrid_router_mount_dir: "/etc/litellm"
+hybrid_router_model_name: "hybrid-router"          # client-facing virtual model name
+# Default and tier targets follow the model a solution layer auto-deploys
+# (llm_services_autodeploy_models, e.g. the agent toolkit's default); qwen3-4b otherwise.
+hybrid_router_default_model: "{{ (llm_services_autodeploy_models | default([]) | first) | default('qwen3-4b', true) }}"
+hybrid_router_bandit: "thompson"
+hybrid_router_delta: 0.1
+hybrid_router_epsilon: 0.1
+hybrid_router_target_tpt: 1.0
+hybrid_router_quality_weight: 0.0
+# Candidate models per complexity tier — use your DEPLOYED served model names.
+hybrid_router_tier_candidates:
+  SIMPLE: ["{{ hybrid_router_default_model }}"]
+  MEDIUM: ["{{ hybrid_router_default_model }}"]
+  COMPLEX: ["{{ hybrid_router_default_model }}"]
+  REASONING: ["{{ hybrid_router_default_model }}"]
+hybrid_router_tier_boundaries:
+  simple_medium: 0.15
+  medium_complex: 0.35
+  complex_reasoning: 0.60
+# LiteLLM base routing strategy used when the hybrid router is enabled (the bandit
+# runs pre-routing; this is the underlying deployment strategy).
+hybrid_router_base_strategy: "usage-based-routing-v2"

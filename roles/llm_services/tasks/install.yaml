@@ -137,3 +137,22 @@
 - name: "llm_services | Deploy default models"
   include_tasks: deploy_models.yaml
   when: llm_services_deploy_models | default(true) | bool
+
+# Default model(s) requested by a solution layer (llm_services_autodeploy_models).
+- name: "llm_services | Deploy solution-requested default models"
+  include_tasks: deploy_models.yaml
+  vars:
+    _mm_only_models: "{{ llm_services_autodeploy_models }}"
+  when: llm_services_autodeploy_models | default([]) | length > 0
+
+# The content-safety guardrail (litellm role) is registered default-on and
+# fail-closed, so its guard model must be served whenever the guardrail is on —
+# otherwise every LiteLLM request is blocked. A failed guard deploy is fatal for
+# the same reason.
+- name: "llm_services | Deploy guard model for the content-safety guardrail"
+  include_tasks: deploy_models.yaml
+  vars:
+    _mm_only_models: ["{{ guardrail_guard_model | default('qwen3guard') }}"]
+    model_deploy_strict: true
+  when:
+    - guardrails_enabled | default((auth_provider | default('keycloak')) == 'litellm') | bool

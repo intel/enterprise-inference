@@ -91,3 +91,22 @@ llm_services_deploy_models: false
 # model_deploy_flags: ""                    # Additional flags for deploy-default-models.sh
 # model_deploy_flags: "--skip-download"     # Fast for testing (assume weights on PVC)
 # model_deploy_flags: "--no-wait"           # Don't wait for models to become Ready
+
+# --- vLLM Semantic Router (optional, off by default) ---
+# Classifier-based intelligent routing: one endpoint auto-selects the best-fit
+# model per request. Opt-in and additive — direct model calls are unaffected.
+# Chart reference: charts/vllm-sr/README.md
+# vllm_sr_enabled: true
+# vllm_sr_route_models:                     # deployed models the router may pick from
+#   - qwen3-4b
+#   - qwen3-coder-30b
+# vllm_sr_litellm_model_name: "semantic-router"   # client-facing name (litellm mode)
+# vllm_sr_config_override: null             # advanced: full canonical routing config
+
+# --- Hybrid Router (optional, off by default; litellm mode) ---
+# Complexity-tier + multi-armed-bandit routing inside LiteLLM. Clients call the
+# hybrid-router model. Router code: roles/litellm/files/router/
+# hybrid_router_enabled: true
+# hybrid_router_tier_candidates:            # deployed models per complexity tier
+#   SIMPLE:  [qwen3-4b]
+#   COMPLEX: [qwen3-coder-30b]

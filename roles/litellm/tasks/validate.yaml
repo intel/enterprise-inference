@@ -15,16 +15,31 @@
     _val_deploy.resources[0].status.conditions | default([]) |
     selectattr('type','eq','Available') | selectattr('status','eq','True') | list | length == 0
 
-- name: "litellm | validate | Check /health endpoint"
-  ansible.builtin.uri:
-    url: "http://litellm.{{ litellm_namespace }}.svc.cluster.local:4000/health"
-    method: GET
-    status_code: 200
-    timeout: 10
+- name: "litellm | validate | Resolve running pod"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ litellm_namespace }}"
+    label_selectors:
+      - app.kubernetes.io/name=litellm
+  register: _val_pods
+  failed_when: >-
+    _val_pods.resources | default([]) | length == 0 or
+    _val_pods.resources | selectattr('status.phase', 'eq', 'Running') | list | length == 0
+
+- name: "litellm | validate | Check readiness endpoint"
+  # Run inside the workload because the Ansible host neither resolves *.svc
+  # names nor participates in the cluster's ambient-mesh network.
+  kubernetes.core.k8s_exec:
+    namespace: "{{ litellm_namespace }}"
+    pod: "{{ _val_pods.resources[0].metadata.name }}"
+    command: >-
+      python -c "import urllib.request;
+      print(urllib.request.urlopen('http://127.0.0.1:4000/health/readiness', timeout=10).status)"
   register: _val_health
   retries: 5
   delay: 5
-  until: _val_health.status == 200
+  until: _val_health.stdout | default('') | trim == '200'
   failed_when: false
 
 - name: "litellm | validate | Check master key is set"
@@ -40,5 +55,5 @@
   ansible.builtin.debug:
     msg:
       - "LiteLLM deployment: {{ 'OK' if _val_deploy.resources | length > 0 else 'FAIL' }}"
-      - "LiteLLM /health: {{ 'OK' if _val_health.status | default(0) == 200 else 'WARN (check manually)' }}"
+      - "LiteLLM readiness: {{ 'OK' if _val_health.stdout | default('') | trim == '200' else 'WARN (check manually)' }}"
       - "Master key secret: {{ 'OK' if _val_secret.resources | length > 0 else 'FAIL' }}"

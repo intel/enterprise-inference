@@ -17,6 +17,9 @@ trap 'jobs -p | xargs -r kill 2>/dev/null || true' EXIT
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MM_LIB="$SCRIPT_DIR/lib"
 MM_TEMPLATES="${MM_TEMPLATES:-$SCRIPT_DIR/templates}"
+# Reusable chat-template files referenced by a model's `chat_template_file:`
+# (see lib/config.sh). Keeps large Jinja out of models.yaml and shared across models.
+MM_CHAT_TEMPLATES="${MM_CHAT_TEMPLATES:-$SCRIPT_DIR/chat-templates}"
 # Legacy per-directory runtime configs (fallback only). The primary source is
 # the `runtimes:` map inside models.yaml (MM_CONFIG); raw ClusterServingRuntime
 # manifests still live here, referenced via `serving_runtime_manifest:`.
@@ -52,7 +55,7 @@ EXTRA_LABELS=()
 MODEL_ARGS_JSON="[]"; MODEL_ENV_JSON="{}"
 RUNTIME_VERSION_ARGS_JSON="[]"; RUNTIME_VERSION_ENV_JSON="{}"
 MODEL_SERVERS_JSON="{}"; MODEL_DEFAULT_SERVER=""; MODEL_RUNTIME_RAW=""; MODEL_SERVER_VERSION_RAW=""
-MODEL_SERVER_VERSION=""
+MODEL_SERVER_VERSION=""; MODEL_DRAFT_ID=""
 
 OPT_ID=""; OPT_NAME=""; OPT_SERVER=""; OPT_AS=""
 OPT_CPU=""; OPT_MEMORY=""; OPT_REPLICAS=""
@@ -494,6 +497,91 @@ build_chat_template_blocks() {
 "
 }
 
+# ── Intel XPU (runtime device: xpu) ─────────────────────────────────────────
+XPU_ENV_MOUNT_PATH="/etc/vllm-xpu"
+xpu_env_cm_name() { echo "${MODEL_NAME}-xpu-env"; }
+
+xpu_env_script() {
+    cat <<'EOS'
+source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true
+export LD_LIBRARY_PATH=/host-gpu-libs:${LD_LIBRARY_PATH}
+EOS
+}
+
+apply_xpu_env_cm() {
+    jq -n --arg n "$(xpu_env_cm_name)" --arg ns "$MODEL_NAMESPACE" --arg v "$(xpu_env_script)" \
+        '{apiVersion:"v1", kind:"ConfigMap",
+          metadata:{name:$n, namespace:$ns,
+                    labels:{"app.kubernetes.io/managed-by":"model-manager"}},
+          data:{"env.sh":$v}}' \
+      | kubectl apply -f - >/dev/null
+}
+
+# XPU device count = tensor-parallel size (--tp / --arg, else the catalog args).
+xpu_tp_size() {
+    local tp="${TP_SIZE:-1}" cat_tp
+    if [[ "$tp" == "1" ]]; then
+        cat_tp=$(jq -r 'index("--tensor-parallel-size") as $i | if $i then .[$i+1] else empty end' \
+                 <<< "${MODEL_ARGS_JSON:-[]}" 2>/dev/null)
+        [[ -n "$cat_tp" && "$cat_tp" != "null" ]] && tp="$cat_tp"
+    fi
+    echo "$tp"
+}
+
+# Sets XPU_RESOURCE, XPU_COUNT, XPU_SUPPLEMENTAL_GROUPS, XPU_MOUNTS, XPU_VOLUMES
+# (the chat-template mount/volume are folded in, the XPU template owns both lists).
+build_xpu_blocks() {
+    local rj host_lib
+    rj=$(runtime_json "$MODEL_RUNTIME")
+    XPU_RESOURCE=$(jq -r '.xpu.resource // "gpu.intel.com/xe"' <<< "$rj")
+    XPU_SUPPLEMENTAL_GROUPS=$(jq -c '.xpu.supplemental_groups // [990, 44]' <<< "$rj")
+    host_lib=$(jq -r '.xpu.host_lib_dir // "/usr/lib/x86_64-linux-gnu"' <<< "$rj")
+    XPU_COUNT=$(xpu_tp_size)
+    XPU_MOUNTS="        volumeMounts:
+          - name: xpu-env
+            mountPath: ${XPU_ENV_MOUNT_PATH}
+            readOnly: true
+          - name: host-gpu-libs
+            mountPath: /host-gpu-libs
+            readOnly: true
+          - name: host-gpu-libs
+            mountPath: ${host_lib}/libze_intel_gpu.so.1
+            subPath: libze_intel_gpu.so.1
+            readOnly: true
+          - name: host-gpu-libs
+            mountPath: ${host_lib}/libze_loader.so.1
+            subPath: libze_loader.so.1
+            readOnly: true
+          - name: host-opencl-vendors
+            mountPath: /etc/OpenCL/vendors
+            readOnly: true
+          - name: host-intel-opencl
+            mountPath: ${host_lib}/intel-opencl
+            readOnly: true
+"
+    XPU_VOLUMES="    volumes:
+      - name: xpu-env
+        configMap:
+          name: $(xpu_env_cm_name)
+      - name: host-gpu-libs
+        hostPath: {path: ${host_lib}, type: Directory}
+      - name: host-opencl-vendors
+        hostPath: {path: /etc/OpenCL/vendors, type: Directory}
+      - name: host-intel-opencl
+        hostPath: {path: ${host_lib}/intel-opencl, type: Directory}
+"
+    if chat_template_needs_volume; then
+        XPU_MOUNTS+="          - name: chat-template
+            mountPath: ${CHAT_TEMPLATE_MOUNT_PATH}
+            readOnly: true
+"
+        XPU_VOLUMES+="      - name: chat-template
+        configMap:
+          name: $(chat_template_cm_name)
+"
+    fi
+}
+
 # Args block. Precedence (lowest → highest), deduped by flag name so a higher
 # layer REPLACES rather than appends — the emitted list matches vLLM's
 # last-wins runtime semantics but the CRD carries only one occurrence:
@@ -534,7 +622,7 @@ build_args_block() {
     # EXTRA_ARGS from --arg CLI — highest precedence.
     if (( ${#EXTRA_ARGS[@]} > 0 )); then
         local extra_json
-        extra_json=$(printf '%s\n' "${EXTRA_ARGS[@]}" | jq -Rc '[inputs]')
+        extra_json=$(printf '%s\n' "${EXTRA_ARGS[@]}" | jq -Rnc '[inputs]')
         all_json=$(jq -c --argjson e "$extra_json" '. + $e' <<< "$all_json")
     fi
 
@@ -715,6 +803,31 @@ build_nri_annotations() {
 # In the default mode a failure aborts before any weights download or manifest
 # apply. Called from cmd_deploy, outside the render_manifest command
 # substitution, so `die` can terminate the process cleanly.
+# `cpu: auto` (models.yaml, opt-in per model) — NUMA-aware sizing: one NUMA
+# node's free physical cores per TP rank on the smallest
+# schedulable node, so the model fits any Xeon. A model already deployed keeps its
+# CPU, so re-deploys stay unchanged. Numeric cpu values (and --cpu) are untouched.
+resolve_auto_cpu() {
+    [[ "$MODEL_CPU" == "auto" ]] || return 0
+    resolve_tp_size
+    local live min_cpu
+    live=$(kubectl get llminferenceservice "$MODEL_NAME" -n "$MODEL_NAMESPACE" \
+        -o jsonpath='{.spec.template.containers[0].resources.requests.cpu}' 2>/dev/null || true)
+    if [[ -n "$live" ]]; then
+        MODEL_CPU="$live"; info "  CPU auto: keeping deployed value ${live}"; return 0
+    fi
+    min_cpu=$(runtime_json "$MODEL_RUNTIME" | jq -r --arg c "$MODEL_CATEGORY" '.categories[$c].defaults.cpu // 8')
+    if [[ "$CPU_POLICY" == "nri-balloons" ]]; then
+        MODEL_CPU=$(_nri_py auto-cpu --tp "$TP_SIZE" ${MODEL_NODE:+--node "$MODEL_NODE"} 2>/dev/null) || MODEL_CPU=0
+        (( MODEL_CPU >= min_cpu )) \
+            || abort "cpu: auto — only ${MODEL_CPU} free CPUs per NUMA node for ${MODEL_NAME} (tp=${TP_SIZE}, need >= ${min_cpu})." \
+                     "Undeploy a model, add a node, or pass --cpu."
+    else
+        MODEL_CPU="$min_cpu"   # no NUMA balloons to size against: category default
+    fi
+    info "  CPU auto: ${MODEL_CPU} (tp=${TP_SIZE}, policy ${CPU_POLICY})"
+}
+
 nri_preflight_gate() {
     [[ "${MM_NRI_ENABLED:-true}" =~ ^(true|1|yes)$ ]] || return 0
 
@@ -751,7 +864,12 @@ render_manifest() {
 
     case "$MODEL_KIND" in
         LLMInferenceService)
-            render_template "$MM_TEMPLATES/llm-inference-service.yaml" \
+            local llmisvc_tmpl="$MM_TEMPLATES/llm-inference-service.yaml"
+            if [[ "${RUNTIME_DEVICE:-cpu}" == "xpu" ]]; then
+                build_xpu_blocks
+                llmisvc_tmpl="$MM_TEMPLATES/llm-inference-service-xpu.yaml"
+            fi
+            render_template "$llmisvc_tmpl" \
                 "MODEL_NAME=$MODEL_NAME" "NAMESPACE=$MODEL_NAMESPACE" \
                 "IMAGE=$MODEL_IMAGE" "CPU=$MODEL_CPU" "MEMORY=$MODEL_MEMORY" \
                 "REPLICAS=$MODEL_REPLICAS" "MODEL_URI=$MODEL_URI" \
@@ -762,7 +880,10 @@ render_manifest() {
                 "CHAT_TEMPLATE_MOUNT=$CHAT_TEMPLATE_MOUNT" \
                 "CHAT_TEMPLATE_VOLUME=$CHAT_TEMPLATE_VOLUME" \
                 "AFFINITY=$affinity_block" \
-                "EXTRA_LABELS=$labels_block"
+                "EXTRA_LABELS=$labels_block" \
+                "XPU_RESOURCE=${XPU_RESOURCE:-}" "XPU_COUNT=${XPU_COUNT:-}" \
+                "XPU_SUPPLEMENTAL_GROUPS=${XPU_SUPPLEMENTAL_GROUPS:-}" \
+                "XPU_MOUNTS=${XPU_MOUNTS:-}" "XPU_VOLUMES=${XPU_VOLUMES:-}"
             ;;
         InferenceService)
             local template="$MM_TEMPLATES/inference-service.yaml"
@@ -894,8 +1015,21 @@ if [ -f \"\$cfg\" ]; then
   echo '  patched auto_map for offline load'
 fi"
         fi
+        # Speculative decoding: the pod serves offline and mounts only this model's
+        # directory, so the draft model (models.yaml draft_model_id) is fetched into
+        # <name>/draft and referenced as /mnt/models/draft. Own sentinel, so a model
+        # whose weights are already present still gets its draft.
+        local draft_fetch=""
+        if [[ -n "${MODEL_DRAFT_ID:-}" ]]; then
+            draft_fetch="
+if [ ! -f /models/$MODEL_NAME/draft/.download_complete ]; then
+  command -v hf >/dev/null 2>&1 || pip install -q huggingface_hub[hf_xet]
+  hf download '$MODEL_DRAFT_ID' --local-dir /models/$MODEL_NAME/draft
+  touch /models/$MODEL_NAME/draft/.download_complete
+fi"
+        fi
         dl_cmd="set -e
-export HOME=/tmp HF_HOME=/tmp/.hf XDG_CACHE_HOME=/tmp/.cache PIP_CACHE_DIR=/tmp/.pip
+export HOME=/tmp HF_HOME=/tmp/.hf XDG_CACHE_HOME=/tmp/.cache PIP_CACHE_DIR=/tmp/.pip$draft_fetch
 if [ -f $sentinel ]; then echo 'Weights already present, skipping download'; exit 0; fi
 command -v hf >/dev/null 2>&1 || pip install -q huggingface_hub[hf_xet]
 hf download '$MODEL_ID' --local-dir /models/$MODEL_NAME$trc_prefetch
@@ -1168,6 +1302,7 @@ cmd_deploy() {
     [[ -n "$MODEL_NODE" ]] && info "  Node: $MODEL_NODE"
     cpu_policy_resolve
     info "  CPU policy: $CPU_POLICY"
+    resolve_auto_cpu
 
     # Normalise CPU/memory for the policy (kubelet-static rounds cpu to an
     # integer, and to a whole physical core under full-pcpus-only) and reject
@@ -1230,6 +1365,11 @@ cmd_deploy() {
         ensure_namespace "$MODEL_NAMESPACE"
         info "Storing chat template in ConfigMap: $(chat_template_cm_name)"
         apply_chat_template_cm "$(chat_template_cm_name)" "$MODEL_NAMESPACE" "$MODEL_CHAT_TEMPLATE"
+    fi
+    if [[ "${RUNTIME_DEVICE:-cpu}" == "xpu" ]]; then
+        ensure_namespace "$MODEL_NAMESPACE"
+        info "Storing XPU oneAPI env hook in ConfigMap: $(xpu_env_cm_name)"
+        apply_xpu_env_cm
     fi
 
     if [[ "$action" != "skip" ]]; then
@@ -1381,6 +1521,8 @@ cmd_undeploy() {
     # a model whose entry has since been edited or removed; --ignore-not-found
     # makes the no-template case a no-op.
     kubectl delete configmap "$(chat_template_cm_name)" -n "$MODEL_NAMESPACE" \
+        --ignore-not-found >/dev/null 2>&1 || true
+    kubectl delete configmap "$(xpu_env_cm_name)" -n "$MODEL_NAMESPACE" \
         --ignore-not-found >/dev/null 2>&1 || true
     aigateway_deregister "$MODEL_NAME" "$MODEL_NAMESPACE" "$MODEL_KIND" "$MODEL_ROUTING"
     litellm_deregister "$MODEL_NAME"

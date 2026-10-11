@@ -89,6 +89,10 @@ resolve_model() {
         MODEL_CPU MODEL_MEMORY MODEL_REPLICAS MODEL_CATEGORY MODEL_IMAGE MODEL_NODE MODEL_ROUTING \
         <<< "$fields"
 
+    # Speculative-decoding draft model, fetched next to the weights (see the download job).
+    MODEL_DRAFT_ID=$(echo "$_MM_CONFIG_JSON" | jq -r --arg n "$name" \
+        '.models[] | select(.name == $n) | .draft_model_id // ""')
+
     # chat_template is resolved separately, NOT through the joined `read` above:
     # a `|` block scalar is legitimately multi-line and `read` stops at the first
     # newline, which silently truncated the template to its opening line. vLLM
@@ -96,6 +100,24 @@ resolve_model() {
     # "Unexpected end of template" error.
     MODEL_CHAT_TEMPLATE=$(echo "$_MM_CONFIG_JSON" | jq -r --arg n "$name" \
         '.models[] | select(.name == $n) | .chat_template // ""')
+
+    # `chat_template_file:` references a reusable template file (under
+    # MM_CHAT_TEMPLATES, or an absolute path on the deploy host). Its CONTENT is
+    # read and treated exactly like inline Jinja (→ ConfigMap → /etc/chat-template),
+    # so large templates live in files and can be shared across models instead of
+    # being duplicated inline in models.yaml. Mutually exclusive with chat_template.
+    local _ct_file
+    _ct_file=$(echo "$_MM_CONFIG_JSON" | jq -r --arg n "$name" \
+        '.models[] | select(.name == $n) | .chat_template_file // ""')
+    if [[ -n "$_ct_file" ]]; then
+        [[ -n "$MODEL_CHAT_TEMPLATE" ]] && \
+            abort "Model '$name': set either chat_template OR chat_template_file, not both."
+        local _ct_path="$_ct_file"
+        [[ "$_ct_path" != /* ]] && _ct_path="${MM_CHAT_TEMPLATES:-$SCRIPT_DIR/chat-templates}/$_ct_file"
+        [[ -f "$_ct_path" ]] || \
+            abort "Model '$name' chat_template_file not found: $_ct_path"
+        MODEL_CHAT_TEMPLATE=$(cat "$_ct_path")
+    fi
 
     # Reject a non-scalar chat_template. Some HF repos (e.g. Hermes-3) publish
     # tokenizer_config.json's chat_template as a LIST of {name, template} entries;

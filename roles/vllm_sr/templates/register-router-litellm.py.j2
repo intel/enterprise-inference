@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+# Copyright (C) 2025-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+"""Register (idempotently) the semantic router as a LiteLLM virtual model.
+
+Piped into the LiteLLM pod so it uses the pod's own master key (PROXY_MASTER_KEY,
+the key this chart wires as general_settings.master_key). Clients then call
+`model: <name>` and LiteLLM forwards to the semantic-router gateway, which
+classifies and routes to the chosen backend model.
+"""
+import json
+import os
+import urllib.error
+import urllib.request
+
+BASE = "http://127.0.0.1:4000"
+MODEL = "{{ reg_model_name }}"
+API_BASE = "{{ reg_api_base }}"
+# Forward the router's classify-trigger keyword to the gateway (NOT the
+# client-facing MODEL name, which the router would pass straight through).
+TRIGGER = "{{ reg_trigger_model }}"
+KEY = os.environ.get("PROXY_MASTER_KEY") or os.environ.get("LITELLM_MASTER_KEY") or ""
+
+
+def call(method, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(BASE + path, data=data, method=method)
+    req.add_header("Authorization", "Bearer " + KEY)
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status, resp.read().decode()
+    except urllib.error.HTTPError as err:
+        return err.code, err.read().decode()
+    except Exception as err:  # noqa: BLE001
+        print("ERROR: %s %s failed: %s" % (method, path, err))
+        raise SystemExit(1)
+
+
+# Idempotent: delete any existing entries under this name, then add a fresh one
+# (LiteLLM /model/new mints a new id each call and does not upsert on name).
+_, raw = call("GET", "/model/info")
+try:
+    existing = json.loads(raw)
+except ValueError:
+    existing = {}
+for entry in (existing.get("data") or []):
+    if entry.get("model_name") == MODEL:
+        mid = (entry.get("model_info") or {}).get("id")
+        if mid:
+            call("POST", "/model/delete", {"id": mid})
+
+payload = {
+    "model_name": MODEL,
+    "litellm_params": {"model": "openai/" + TRIGGER, "api_base": API_BASE, "api_key": "unused"},
+}
+status, raw = call("POST", "/model/new", payload)
+if status not in (200, 201):
+    print("ERROR: registration failed (HTTP %s): %s" % (status, raw))
+    raise SystemExit(1)
+print("registered %s -> %s" % (MODEL, API_BASE))

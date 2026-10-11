@@ -1,0 +1,77 @@
+---
+# =============================================================================
+# vLLM Semantic Router — validate (read-only)
+# =============================================================================
+
+- name: "vllm_sr | validate | Router deployment ready"
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    namespace: "{{ vllm_sr_namespace }}"
+    label_selectors:
+      - "app.kubernetes.io/name=semantic-router"
+      - "app.kubernetes.io/component=router"   # the dashboard Deployment shares the name label
+  register: _v_deploy
+
+- name: "vllm_sr | validate | Dashboard ready and routed"
+  when: vllm_sr_dashboard_enabled | bool
+  block:
+    - name: "vllm_sr | validate | Dashboard deployment"
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ vllm_sr_namespace }}"
+        label_selectors:
+          - "app.kubernetes.io/name=semantic-router"
+          - "app.kubernetes.io/component=dashboard"
+      register: _v_dash
+      failed_when: >-
+        (_v_dash.resources | default([]) | length == 0) or
+        (_v_dash.resources[0].status.readyReplicas | default(0) | int < 1)
+
+    - name: "vllm_sr | validate | Dashboard HTTPRoute accepted"
+      kubernetes.core.k8s_info:
+        api_version: gateway.networking.k8s.io/v1
+        kind: HTTPRoute
+        namespace: "{{ vllm_sr_namespace }}"
+        label_selectors:
+          - "app.kubernetes.io/component=dashboard"
+      register: _v_dash_route
+      failed_when: >-
+        (_v_dash_route.resources | default([]) | length == 0) or
+        not ((_v_dash_route.resources[0].status.parents | default([]) | map(attribute='conditions') | flatten
+              | selectattr('type', 'equalto', 'Accepted') | selectattr('status', 'equalto', 'True') | list) | length > 0)
+
+- name: "vllm_sr | validate | Semantic-router gateway programmed"
+  kubernetes.core.k8s_info:
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    name: "{{ vllm_sr_gateway_name }}"
+    namespace: "{{ vllm_sr_gateway_namespace }}"
+  register: _v_gw
+
+- name: "vllm_sr | validate | ext_proc EnvoyPatchPolicy present"
+  kubernetes.core.k8s_info:
+    api_version: gateway.envoyproxy.io/v1alpha1
+    kind: EnvoyPatchPolicy
+    name: "{{ vllm_sr_gateway_name }}-extproc"
+    namespace: "{{ vllm_sr_gateway_namespace }}"
+  register: _v_epp
+
+- name: "vllm_sr | validate | AIGatewayRoutes present for routed models"
+  kubernetes.core.k8s_info:
+    api_version: aigateway.envoyproxy.io/v1beta1
+    kind: AIGatewayRoute
+    namespace: "{{ vllm_sr_gateway_namespace }}"
+    label_selectors:
+      - "app.kubernetes.io/part-of=vllm-sr"
+  register: _v_routes
+
+- name: "vllm_sr | validate | Summary"
+  ansible.builtin.debug:
+    msg:
+      - "Router ready:      {{ (_v_deploy.resources | default([]) | length > 0) and (_v_deploy.resources[0].status.readyReplicas | default(0) | int >= 1) }}"
+      - "Gateway programmed: {{ _v_gw.resources | default([]) | length > 0 and (_v_gw.resources[0].status.addresses | default([]) | length > 0) }}"
+      - "ext_proc policy:    {{ _v_epp.resources | default([]) | length > 0 }}"
+      - "AIGatewayRoutes:    {{ _v_routes.resources | default([]) | length }}"
+      - "Exposure mode:      {{ vllm_sr_expose }}"

@@ -88,7 +88,11 @@
     - name: Enumerate autodeploy models from the catalog
       shell: |
         set -o pipefail
+        {% if _mm_only_models is defined %}
+        yq -o=json '.' "{{ _mm_catalog }}" | jq -r --argjson only '{{ _mm_only_models | to_json }}' '.models[] | select(.name as $n | $only | index($n)) | .name'
+        {% else %}
         yq -o=json '.' "{{ _mm_catalog }}" | jq -r '.models[] | select(.autodeploy == true) | .name'
+        {% endif %}
       args:
         executable: /bin/bash
       register: _mm_model_names
@@ -134,7 +138,10 @@
         MM_LITELLM_ENABLED: "{{ 'true' if auth_provider | default('keycloak') == 'litellm' else 'false' }}"
         MM_LITELLM_URL: "{{ 'http://litellm.' + (litellm_namespace | default('litellm')) + '.svc.cluster.local:4000' if auth_provider | default('keycloak') == 'litellm' else '' }}"
         MM_LITELLM_MASTER_KEY: "{{ (_deploy_litellm_secret.resources[0].data.master_key | b64decode) if (auth_provider | default('keycloak') == 'litellm' and _deploy_litellm_secret.resources | default([]) | length > 0) else '' }}"
-        MM_LITELLM_KSERVE_URL: "http://envoy-gateway.{{ gateway_namespace | default('envoy-gateway-system') }}.svc.cluster.local"
+        # The in-cluster AI Gateway DATA PLANE (KServe attaches per-model HTTPRoutes
+        # here), NOT the "envoy-gateway" control-plane service (xDS/admin ports) — the
+        # latter resets plain HTTP :80, so LiteLLM could never reach the model.
+        MM_LITELLM_KSERVE_URL: "http://{{ ai_gateway_name | default('ai-gateway') }}.{{ gateway_namespace | default('envoy-gateway-system') }}.svc.cluster.local"
         # AIGatewayRoute unified endpoint — only when auth_provider=keycloak.
         MM_AIGATEWAY_ENABLED: "{{ 'true' if auth_provider | default('keycloak') == 'keycloak' else 'false' }}"
         MM_EG_GATEWAY_NAME: "{{ gateway_name | default('eg-gateway') }}"

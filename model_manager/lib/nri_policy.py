@@ -628,6 +628,30 @@ def _node_capacity_report(
 
 # ── Pre-flight validation ───────────────────────────────────────────────────
 
+def auto_cpu(tp: int, node: str = "") -> int:
+    """CPU for a `cpu: auto` model: the free balloon CPUs of `tp` NUMA nodes.
+
+    NUMA-aware sizing: a TP=1 model gets one NUMA
+    node's worth of physical cores, minus the reserved seed. Free (not total) CPUs,
+    so models already on the node still fit; the smallest schedulable node decides,
+    so the pod fits wherever it lands. 0 = nothing free.
+    """
+    nodes = [node] if node else _schedulable_nri_nodes(tp)
+    sizes: list[int] = []
+    for n in nodes:
+        in_use = _balloon_pods_cpu_on_node(n)
+        caps = _per_numa_capacity(n)
+        if not caps:
+            sizes.append(max(0, _node_balloon_pool(n) - in_use))
+            continue
+        reserved_per_numa = _reserved_cpus_count(n) // len(caps)
+        per_numa_used = in_use // len(caps)
+        usable = sorted((max(0, c - reserved_per_numa - per_numa_used) for c in caps), reverse=True)
+        span = max(1, min(tp, len(usable)))
+        sizes.append(usable[span - 1] * span)
+    return min(sizes) if sizes else 0
+
+
 def preflight(cpu: int, tp: int, node: str = "", replicas: int = 1) -> dict:
     """Run comprehensive pre-deploy NRI validation.
 
@@ -826,6 +850,10 @@ def cmd_preflight(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_auto_cpu(args: argparse.Namespace) -> None:
+    print(auto_cpu(tp=int(args.tp or 1), node=args.node or ""))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="NRI balloon policy helper")
     sub = parser.add_subparsers(dest="command")
@@ -846,6 +874,10 @@ def main() -> None:
     p_preflight.add_argument("--node", default="")
     p_preflight.add_argument("--replicas", default="1")
 
+    p_auto = sub.add_parser("auto-cpu", help="CPU for a cpu: auto model (NUMA-aware sizing)")
+    p_auto.add_argument("--tp", default="1")
+    p_auto.add_argument("--node", default="")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -857,6 +889,8 @@ def main() -> None:
         cmd_resolve(args)
     elif args.command == "preflight":
         cmd_preflight(args)
+    elif args.command == "auto-cpu":
+        cmd_auto_cpu(args)
 
 
 if __name__ == "__main__":

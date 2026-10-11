@@ -1,0 +1,6 @@
+---
+# Ordering comes from components.yaml (layer + depends_on), never meta dependencies.
+galaxy_info:
+  role_name: vllm_sr
+  description: vLLM Semantic Router — classifier-based intelligent model routing (opt-in)
+dependencies: []
