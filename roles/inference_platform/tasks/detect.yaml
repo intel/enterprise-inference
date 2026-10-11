@@ -42,6 +42,8 @@
   register: _ip_api
   changed_when: false
   failed_when: false
+  # Read-only, so it must also run under --check; skipped, the verdict is wrong.
+  check_mode: false
   when: inference_platform == 'auto'
 
 - name: "inference_platform | Read server version"
@@ -50,6 +52,7 @@
   register: _ip_version
   changed_when: false
   failed_when: false
+  check_mode: false
   when:
     - inference_platform == 'auto'
     - _ip_platforms | selectattr('probe.version', 'defined') | list | length > 0
