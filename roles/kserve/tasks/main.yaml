@@ -1,3 +1,7 @@
 ---
+- name: "kserve | Detect platform"
+  ansible.builtin.include_role:
+    name: inference_platform
+
 - name: "kserve | Dispatch action: {{ component_action }}"
   ansible.builtin.include_tasks: "{{ component_action }}.yaml"
