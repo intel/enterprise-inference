@@ -51,6 +51,15 @@
         namespace: "{{ kserve_istio_namespace }}"
       register: _istio_check
 
+    - name: "kserve | Create Istio namespace (owned)"
+      ansible.builtin.include_role:
+        name: inference_ownership
+        tasks_from: namespace
+      vars:
+        ownership_name: kserve
+        ownership_namespace: "{{ kserve_istio_namespace }}"
+      when: _istio_check.resources | length == 0
+
     - name: "kserve | Install Istio via Helm (istio-base)"
       kubernetes.core.helm:
         name: istio-base
@@ -68,6 +77,21 @@
         chart_version: "{{ kserve_istio_version }}"
         release_namespace: "{{ kserve_istio_namespace }}"
         wait: true
+      when: _istio_check.resources | length == 0
+
+    # istio-base installs the Istio CRDs; label them so teardown can find them.
+    - name: "kserve | Label Istio CRDs (owned)"
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail &&
+          helm get manifest istio-base -n {{ kserve_istio_namespace }}
+          | kubectl label -f - --overwrite enterprise-inference/owner=kserve
+        executable: /bin/bash
+      register: _kserve_istio_label
+      until: _kserve_istio_label.rc == 0
+      retries: 3
+      delay: 10
+      changed_when: false
       when: _istio_check.resources | length == 0
 
     - name: "kserve | Wait for istiod"
@@ -112,6 +136,20 @@
         state: present
       when: _knative_check.resources | length == 0
 
+    # Marks that this role installed Knative; teardown removes the Knative
+    # manifests only when it is set.
+    - name: "kserve | Label Knative namespace (owned)"
+      kubernetes.core.k8s:
+        state: patched
+        api_version: v1
+        kind: Namespace
+        name: "{{ kserve_knative_namespace }}"
+        definition:
+          metadata:
+            labels:
+              enterprise-inference/owner: kserve
+      when: _knative_check.resources | length == 0
+
     - name: "kserve | Wait for Knative Serving controller"
       kubernetes.core.k8s_info:
         api_version: apps/v1
@@ -147,6 +185,14 @@
          else 'Fresh install' }}
       KServe v{{ kserve_version }}
       {{ ('(from ' ~ _kserve_installed_chart ~ ')') if _kserve_installed_chart and _kserve_installed_chart != _kserve_target_chart else '' }}
+
+- name: "kserve | Create namespace (owned)"
+  ansible.builtin.include_role:
+    name: inference_ownership
+    tasks_from: namespace
+  vars:
+    ownership_name: kserve
+    ownership_namespace: "{{ kserve_namespace }}"
 
 - name: "kserve | Label namespace — Istio"
   kubernetes.core.k8s:
@@ -207,13 +253,35 @@
     _kserve_release.status is none or
     _kserve_installed_chart != _kserve_target_chart
   block:
+    # Only CRDs this run creates are ours. The label is put into the manifest
+    # before the apply, so they are created labelled (a failure between apply
+    # and a later label step would leave them looking like someone else's).
+    # CRDs that already existed are applied without it and keep their labels.
     - name: "kserve | Install KServe CRDs via Helm template + server-side apply"
       ansible.builtin.shell:
-        cmd: >
-          helm template kserve-crd
-          {{ kserve_helm_repo }}/kserve-crd
-          --version v{{ kserve_version }}
-          | kubectl apply --server-side -f -
+        cmd: |
+          set -euo pipefail
+          f=$(mktemp); trap 'rm -f "$f"' EXIT
+          helm template kserve-crd {{ kserve_helm_repo }}/kserve-crd --version v{{ kserve_version }} > "$f"
+          existing=$(kubectl get -f "$f" --ignore-not-found -o name | sed 's#^.*/##')
+          new=$(yq -N 'select(.kind == "CustomResourceDefinition") | .metadata.name' "$f" \
+                | { grep -vxF -f <(printf '%s\n' "$existing") || true; } | paste -sd, -)
+          NEW="$new" yq -i '(select(.kind == "CustomResourceDefinition")
+            | select(.metadata.name as $n | strenv(NEW) | split(",") | any_c(. == $n))
+            | .metadata.labels."enterprise-inference/owner") = "kserve"' "$f"
+          echo "new CRDs (labelled as ours): ${new:-none}"
+          kubectl apply --server-side -f "$f"
+          # Helm installs CRs of these kinds next. Wait until the API serves them
+          # and discovery lists them: api-resources also rewrites the discovery
+          # cache Helm maps kinds through, which can predate these CRDs.
+          kubectl wait --for=condition=Established -f "$f" --timeout=120s >/dev/null
+          kinds=$(yq -N 'select(.kind == "CustomResourceDefinition") | .spec.names.plural + "." + .spec.group' "$f")
+          for _ in $(seq 1 30); do
+            missing=$(grep -vxF -f <(kubectl api-resources -o name 2>/dev/null) <<< "$kinds" || true)
+            [[ -z "$missing" ]] && break
+            sleep 2
+          done
+          [[ -z "$missing" ]] || { echo "API discovery does not list: $missing" >&2; exit 1; }
         executable: /bin/bash
       register: _kserve_crd
       changed_when: "'serverside-applied' in _kserve_crd.stdout"
@@ -319,6 +387,15 @@
       register: _lws_check
       failed_when: false
 
+    - name: "kserve | LLMIsvc — create LWS namespace (owned)"
+      ansible.builtin.include_role:
+        name: inference_ownership
+        tasks_from: namespace
+      vars:
+        ownership_name: kserve
+        ownership_namespace: "{{ kserve_lws_namespace }}"
+      when: _lws_check.status is not defined or _lws_check.status is none
+
     - name: "kserve | LLMIsvc — label LWS namespace — Istio"
       kubernetes.core.k8s:
         state: present
@@ -354,6 +431,16 @@
         create_namespace: true
         wait: true
         timeout: "5m0s"
+      when: _lws_check.status is not defined or _lws_check.status is none
+
+    - name: "kserve | LLMIsvc — label LWS CRD (owned)"
+      ansible.builtin.command:
+        cmd: kubectl label crd leaderworkersets.leaderworkerset.x-k8s.io --overwrite enterprise-inference/owner=kserve
+      register: _kserve_lws_label
+      until: _kserve_lws_label.rc == 0
+      retries: 3
+      delay: 10
+      changed_when: false
       when: _lws_check.status is not defined or _lws_check.status is none
 
     - name: "kserve | LLMIsvc — wait for LWS operator"
@@ -506,6 +593,21 @@
     # On a fresh install _llmisvc_needs_install is true; on re-runs the CRDs already
     # exist so the block condition (kserve_llmisvc_enabled) is still true and we
     # must ensure the value is set correctly regardless of install vs upgrade.
+    # Helm maps kinds through the on-disk discovery cache, which can predate the
+    # LLMIsvc CRDs just installed. Wait until discovery lists them;
+    # api-resources also rewrites that cache.
+    - name: "kserve | LLMIsvc — wait for API discovery to list LLMIsvc kinds"
+      ansible.builtin.command:
+        cmd: kubectl api-resources -o name
+      register: _kserve_llmisvc_kinds
+      until: "'llminferenceserviceconfigs.serving.kserve.io' in _kserve_llmisvc_kinds.stdout_lines"
+      retries: 30
+      delay: 2
+      # A partially unavailable aggregated API makes api-resources exit 1; only
+      # the listed kinds matter here.
+      failed_when: "'llminferenceserviceconfigs.serving.kserve.io' not in _kserve_llmisvc_kinds.stdout_lines"
+      changed_when: false
+
     - name: "kserve | LLMIsvc — upgrade runtime configs with llmisvcConfigs"
       kubernetes.core.helm:
         name: kserve-runtime-configs

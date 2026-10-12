@@ -16,3 +16,11 @@ nfd_helm_repo: "https://kubernetes-sigs.github.io/node-feature-discovery/charts"
 nfd_helm_repo_name: "nfd"
 nfd_helm_chart: "nfd/node-feature-discovery"
 nfd_version: "0.17.1"
+
+# Owned objects — what teardown removes (see roles/inference_ownership).
+# The release is uninstalled only from a namespace this role created, so an
+# NFD that was already on the cluster (or the OpenShift NFD Operator) is left
+# alone. NFD's CRDs and node labels stay, as before.
+nfd_owned_objects:
+  - {helm: node-feature-discovery, namespace: "{{ nfd_namespace }}"}
+  - {kind: Namespace, api_version: v1, name: "{{ nfd_namespace }}"}

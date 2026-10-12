@@ -64,6 +64,8 @@
           metadata:
             name: "{{ keycloak_realm }}-realm-import"
             namespace: "{{ keycloak_namespace }}"
+            labels:
+              enterprise-inference/owner: keycloak_config
           spec:
             keycloakCRName: keycloak
             realm:
@@ -206,6 +208,8 @@
           metadata:
             name: "{{ keycloak_client_secret_name }}"
             namespace: "{{ keycloak_namespace }}"
+            labels:
+              enterprise-inference/owner: keycloak_config
           type: Opaque
           stringData:
             client-id: "{{ keycloak_client_id }}"

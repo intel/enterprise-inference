@@ -2,73 +2,18 @@
 # =============================================================================
 # LiteLLM — Teardown
 # =============================================================================
+# Removes only what this role installed (see litellm_owned_objects).
+# litellm-db-secret belongs to the postgresql role and langfuse-api-keys to
+# the langfuse role; neither is touched here.
 
-- name: "litellm | teardown | Remove Helm release"
-  kubernetes.core.helm:
-    name: litellm
-    release_namespace: "{{ litellm_namespace }}"
-    state: absent
-    wait: true
-  failed_when: false
-
-- name: "litellm | teardown | Remove HTTPRoute"
-  kubernetes.core.k8s:
-    state: absent
-    api_version: gateway.networking.k8s.io/v1
-    kind: HTTPRoute
-    name: litellm
-    namespace: "{{ litellm_namespace }}"
-  failed_when: false
-
-- name: "litellm | teardown | Remove SecurityPolicy"
-  kubernetes.core.k8s:
-    state: absent
-    api_version: gateway.envoyproxy.io/v1alpha1
-    kind: SecurityPolicy
-    name: litellm-no-auth
-    namespace: "{{ litellm_namespace }}"
-  failed_when: false
-
-- name: "litellm | teardown | Remove rate-limit BackendTrafficPolicy"
-  kubernetes.core.k8s:
-    state: absent
-    api_version: gateway.envoyproxy.io/v1alpha1
-    kind: BackendTrafficPolicy
-    name: litellm-rate-limit
-    namespace: "{{ litellm_namespace }}"
-  failed_when: false
-
-- name: "litellm | teardown | Remove ConfigMaps"
-  kubernetes.core.k8s:
-    state: absent
-    api_version: v1
-    kind: ConfigMap
-    name: "{{ item }}"
-    namespace: "{{ litellm_namespace }}"
-  loop:
-    - litellm-credentials
-  failed_when: false
-
-- name: "litellm | teardown | Remove Secrets"
-  kubernetes.core.k8s:
-    state: absent
-    api_version: v1
-    kind: Secret
-    name: "{{ item }}"
-    namespace: "{{ litellm_namespace }}"
-  loop:
-    - litellm-master-key
-    - litellm-db-secret
-  failed_when: false
-
-- name: "litellm | teardown | Remove namespace"
-  kubernetes.core.k8s:
-    state: absent
-    api_version: v1
-    kind: Namespace
-    name: "{{ litellm_namespace }}"
-  failed_when: false
+- name: "litellm | teardown | Remove owned objects"
+  ansible.builtin.include_role:
+    name: inference_ownership
+    tasks_from: delete
+  vars:
+    ownership_name: litellm
+    ownership_items: "{{ litellm_owned_objects }}"
 
 - name: "litellm | teardown | Complete"
   ansible.builtin.debug:
-    msg: "LiteLLM removed from namespace '{{ litellm_namespace }}'"
+    msg: "LiteLLM teardown done for namespace '{{ litellm_namespace }}' (only objects this role installed)"

@@ -3,6 +3,7 @@ kind: ClusterServingRuntime
 metadata:
   name: openvino-runtime
   labels:
+    enterprise-inference/owner: model-manager
     app.kubernetes.io/managed-by: model-manager
   annotations:
     serving.kserve.io/server-type: ovms

@@ -98,11 +98,15 @@
 
     # ── Namespace ─────────────────────────────────────────────────────────────
 
-    - name: "litellm | Create namespace"
-      kubernetes.core.k8s:
-        kind: Namespace
-        name: "{{ litellm_namespace }}"
-        state: present
+    # Usually already created by the postgresql role (for litellm-db-secret);
+    # labelled as ours only when this role creates it.
+    - name: "litellm | Create namespace (owned)"
+      ansible.builtin.include_role:
+        name: inference_ownership
+        tasks_from: namespace
+      vars:
+        ownership_name: litellm
+        ownership_namespace: "{{ litellm_namespace }}"
 
     # baseline (not restricted): the prisma-engine-seed initContainer must run as
     # root to read the engines baked into /root at image build time (see below).
@@ -133,6 +137,8 @@
           metadata:
             name: envoy-to-litellm
             namespace: "{{ litellm_namespace }}"
+            labels:
+              enterprise-inference/owner: litellm
           spec:
             from:
               - group: gateway.envoyproxy.io
@@ -201,6 +207,8 @@
           metadata:
             name: litellm-master-key
             namespace: "{{ litellm_namespace }}"
+            labels:
+              enterprise-inference/owner: litellm
           stringData:
             master_key: "sk-{{ litellm_master_key }}"
             salt_key: "{{ litellm_salt_key }}"
@@ -357,6 +365,14 @@
             type: ClusterIP
             port: 4000
 
+    # The namespace is usually not ours, so mark the release itself.
+    - name: "litellm | Mark Helm release as owned"
+      ansible.builtin.command:
+        cmd: >-
+          kubectl label secret -n {{ litellm_namespace }} -l owner=helm,name=litellm
+          --overwrite enterprise-inference/owner=litellm
+      changed_when: false
+
     # ── Wait for readiness (with progress) ───────────────────────────────────
 
     - name: "litellm | Waiting for pods to be ready (image pull may take a few minutes)..."
@@ -396,6 +412,31 @@
       retries: 60
       delay: 5
 
+    # Valkey StatefulSet PVCs are not removed by helm uninstall.
+    - name: "litellm | Find release PVCs"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        namespace: "{{ litellm_namespace }}"
+        label_selectors:
+          - app.kubernetes.io/instance=litellm
+      register: _litellm_pvcs
+
+    - name: "litellm | Label release PVCs (owned)"
+      kubernetes.core.k8s:
+        state: patched
+        api_version: v1
+        kind: PersistentVolumeClaim
+        name: "{{ item.metadata.name }}"
+        namespace: "{{ litellm_namespace }}"
+        definition:
+          metadata:
+            labels:
+              enterprise-inference/owner: litellm
+      loop: "{{ _litellm_pvcs.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+
 # ── Gateway integration (runs even on re-runs to stay idempotent) ─────────────
 
 # HSTS on the public LiteLLM host: browsers/SDKs must never send the UI login
@@ -422,6 +463,8 @@
       metadata:
         name: litellm
         namespace: "{{ litellm_namespace }}"
+        labels:
+          enterprise-inference/owner: litellm
       spec:
         parentRefs:
           - name: "{{ gateway_name | default('eg-gateway') }}"
@@ -449,6 +492,8 @@
       metadata:
         name: litellm-no-auth
         namespace: "{{ litellm_namespace }}"
+        labels:
+          enterprise-inference/owner: litellm
       spec:
         targetRefs:
           - group: gateway.networking.k8s.io
@@ -470,6 +515,8 @@
       metadata:
         name: litellm-rate-limit
         namespace: "{{ litellm_namespace }}"
+        labels:
+          enterprise-inference/owner: litellm
       spec:
         targetRefs:
           - group: gateway.networking.k8s.io
@@ -511,6 +558,7 @@
         namespace: "{{ litellm_namespace }}"
         labels:
           app.kubernetes.io/managed-by: ansible
+          enterprise-inference/owner: litellm
       data:
         hostname: "{{ litellm_hostname }}"
         ui_url: "https://{{ litellm_hostname }}"

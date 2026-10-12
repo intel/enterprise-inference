@@ -809,6 +809,7 @@ download_weights() {
     if [[ -n "${HF_TOKEN:-}" ]]; then
         kubectl create secret generic hf-token -n "$MODEL_NAMESPACE" \
             --from-literal=token="$HF_TOKEN" --dry-run=client -o yaml \
+            | kubectl label --local -f - -o yaml enterprise-inference/owner=model-manager \
             | kubectl apply -f - >/dev/null 2>&1
     fi
 

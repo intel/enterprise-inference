@@ -5,6 +5,7 @@ metadata:
   namespace: {{NAMESPACE}}
   labels:
     app.kubernetes.io/name: {{MODEL_NAME}}
+    enterprise-inference/owner: model-manager
     app.kubernetes.io/managed-by: model-manager
 spec:
   endpoints:
@@ -19,6 +20,7 @@ metadata:
   namespace: {{NAMESPACE}}
   labels:
     app.kubernetes.io/name: {{MODEL_NAME}}
+    enterprise-inference/owner: model-manager
     app.kubernetes.io/managed-by: model-manager
 spec:
   schema:
@@ -36,6 +38,7 @@ metadata:
   namespace: {{NAMESPACE}}
   labels:
     app.kubernetes.io/name: {{MODEL_NAME}}
+    enterprise-inference/owner: model-manager
     app.kubernetes.io/managed-by: model-manager
 spec:
   parentRefs:

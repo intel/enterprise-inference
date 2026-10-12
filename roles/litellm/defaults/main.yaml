@@ -118,3 +118,20 @@ litellm_multi_node_resources:
     cpu: "4"
     memory: "4Gi"
 
+
+# Owned objects — what teardown removes (see roles/inference_ownership).
+# The postgresql role (platform layer) normally creates the litellm namespace
+# and litellm-db-secret, so neither is ours: the namespace is deleted only if
+# this role created it, and the Helm release is marked as ours through its
+# release record. The Valkey StatefulSet PVC is listed because helm uninstall
+# leaves it.
+litellm_owned_objects:
+  - {helm: litellm, namespace: "{{ litellm_namespace }}"}
+  - {kind: PersistentVolumeClaim, api_version: v1, namespace: "{{ litellm_namespace }}"}
+  - {kind: ReferenceGrant, api_version: gateway.networking.k8s.io/v1beta1, namespace: "{{ litellm_namespace }}"}
+  - {kind: HTTPRoute, api_version: gateway.networking.k8s.io/v1, namespace: "{{ litellm_namespace }}"}
+  - {kind: SecurityPolicy, api_version: gateway.envoyproxy.io/v1alpha1, namespace: "{{ litellm_namespace }}"}
+  - {kind: BackendTrafficPolicy, api_version: gateway.envoyproxy.io/v1alpha1, namespace: "{{ litellm_namespace }}"}
+  - {kind: ConfigMap, api_version: v1, namespace: "{{ litellm_namespace }}"}
+  - {kind: Secret, api_version: v1, namespace: "{{ litellm_namespace }}"}
+  - {kind: Namespace, api_version: v1, name: "{{ litellm_namespace }}"}

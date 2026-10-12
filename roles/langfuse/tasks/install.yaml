@@ -44,11 +44,14 @@
 
     # ── Namespace ─────────────────────────────────────────────────────────────
 
-    - name: "langfuse | Create namespace"
-      kubernetes.core.k8s:
-        kind: Namespace
-        name: "{{ langfuse_namespace }}"
-        state: present
+    # Usually already created by the postgresql role; labelled only if made here.
+    - name: "langfuse | Create namespace (owned)"
+      ansible.builtin.include_role:
+        name: inference_ownership
+        tasks_from: namespace
+      vars:
+        ownership_name: langfuse
+        ownership_namespace: "{{ langfuse_namespace }}"
 
     # ── PostgreSQL credentials ────────────────────────────────────────────────
 
@@ -137,6 +140,8 @@
           metadata:
             name: langfuse-secrets
             namespace: "{{ langfuse_namespace }}"
+            labels:
+              enterprise-inference/owner: langfuse
           stringData:
             salt: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
             encryption_key: "{{ lookup('password', '/dev/null length=64 chars=hexdigits') | lower }}"
@@ -417,6 +422,14 @@
             secretAccessKey:
               value: "{{ _langfuse_s3_secret_key }}"
 
+    # The namespace is usually not ours, so mark the release itself.
+    - name: "langfuse | Mark Helm release as owned"
+      ansible.builtin.command:
+        cmd: >-
+          kubectl label secret -n {{ langfuse_namespace }} -l owner=helm,name=langfuse
+          --overwrite enterprise-inference/owner=langfuse
+      changed_when: false
+
     # ── Fix failed Prisma migrations (Langfuse bug: some migrations not idempotent on empty DB)
     - name: "langfuse | Wait for initial migration attempt (45s)"
       ansible.builtin.pause:
@@ -511,6 +524,31 @@
       retries: 60
       delay: 5
 
+    # ClickHouse/Valkey StatefulSet PVCs are not removed by helm uninstall.
+    - name: "langfuse | Find release PVCs"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        namespace: "{{ langfuse_namespace }}"
+        label_selectors:
+          - app.kubernetes.io/instance=langfuse
+      register: _langfuse_pvcs
+
+    - name: "langfuse | Label release PVCs (owned)"
+      kubernetes.core.k8s:
+        state: patched
+        api_version: v1
+        kind: PersistentVolumeClaim
+        name: "{{ item.metadata.name }}"
+        namespace: "{{ langfuse_namespace }}"
+        definition:
+          metadata:
+            labels:
+              enterprise-inference/owner: langfuse
+      loop: "{{ _langfuse_pvcs.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+
 # ── Load secrets for use in tasks outside the install block ──────────────────
 # Runs unconditionally so re-runs (Helm already installed) still have keys set
 
@@ -541,6 +579,8 @@
       metadata:
         name: langfuse
         namespace: "{{ langfuse_namespace }}"
+        labels:
+          enterprise-inference/owner: langfuse
       spec:
         parentRefs:
           - name: "{{ gateway_name | default('eg-gateway') }}"
@@ -567,6 +607,8 @@
       metadata:
         name: langfuse-no-auth
         namespace: "{{ langfuse_namespace }}"
+        labels:
+          enterprise-inference/owner: langfuse
       spec:
         targetRefs:
           - group: gateway.networking.k8s.io
@@ -598,6 +640,7 @@
             namespace: "{{ litellm_namespace | default('litellm') }}"
             labels:
               app.kubernetes.io/managed-by: ansible
+              enterprise-inference/owner: langfuse
           stringData:
             LANGFUSE_HOST: "http://langfuse-web.{{ langfuse_namespace }}.svc.cluster.local:3000"
             LANGFUSE_PUBLIC_KEY: "{{ _langfuse_public_key }}"
@@ -635,6 +678,7 @@
         namespace: "{{ langfuse_namespace }}"
         labels:
           app.kubernetes.io/managed-by: ansible
+          enterprise-inference/owner: langfuse
       data:
         hostname: "{{ langfuse_hostname }}"
         ui_url: "https://{{ langfuse_hostname }}"

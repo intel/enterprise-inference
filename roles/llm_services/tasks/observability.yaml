@@ -51,6 +51,7 @@
         labels:
           grafana_dashboard: "1"
           app.kubernetes.io/managed-by: ansible
+          enterprise-inference/owner: llm_services
           inference-engine: "{{ item.item }}"
       data:
         dashboard.json: "{{ lookup('file', role_path + '/files/dashboards/' + item.item + '.json') }}"
