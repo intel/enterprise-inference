@@ -297,6 +297,17 @@
 # ClusterIP service, not this route. Publishing inference.<domain> in litellm
 # mode would expose an unauthenticated bypass around LiteLLM.
 
+# Resolves the route and prepares the platform gateway for it.
+- name: "envoy_ai_gateway | Attach the inference route to the gateway"
+  ansible.builtin.include_role:
+    name: envoy_gateway
+    tasks_from: attach.yaml
+  vars:
+    gateway_attach_service: inference
+  when:
+    - ai_gateway_create | bool
+    - auth_provider | default('keycloak') == 'keycloak'
+
 - name: "envoy_ai_gateway | Create external inference HTTPRoute (eg-gateway → ai-gateway)"
   kubernetes.core.k8s:
     state: present
