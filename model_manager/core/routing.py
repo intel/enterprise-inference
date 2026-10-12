@@ -6,9 +6,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from mm.config import discover_global_config, discover_inference_config
-from mm.k8s import K8sClient
-from mm.ui import abort, info, ok, warn
+from .config import discover_global_config, discover_inference_config
+from .k8s import K8sClient
+from .ui import abort, info, ok, warn
 
 class RoutingManager:
     def __init__(self, k8s: K8sClient, script_dir: Path, templates_dir: Path):

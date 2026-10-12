@@ -3,7 +3,7 @@ import os
 import subprocess
 from typing import Any
 
-from mm.ui import abort, err
+from .ui import abort, err, ok
 
 class K8sClient:
     def __init__(self, kubeconfig: str | None = None, context: str | None = None):
@@ -78,13 +78,11 @@ class K8sClient:
         if not phase:
             abort(f"PVC '{pvc_name}' not found in namespace '{namespace}'. Provision storage with the infrastructure playbook before deploying models.")
         elif phase == "Bound":
-            from mm.ui import ok
             ok(f"Storage ready: {pvc_name} ({phase})")
         elif phase == "Pending":
             sc = self.get_raw("pvc", pvc_name, "-n", namespace, "-o", "jsonpath={.spec.storageClassName}")
             binding_mode = self.get_raw("storageclass", sc, "-o", "jsonpath={.volumeBindingMode}")
             if binding_mode == "WaitForFirstConsumer":
-                from mm.ui import ok
                 ok(f"Storage ready: {pvc_name} (Pending — binds on first consumer, StorageClass '{sc}' uses WaitForFirstConsumer)")
             else:
                 abort(f"PVC '{pvc_name}' in namespace '{namespace}' is not ready (phase: Pending, StorageClass '{sc}' binding '{binding_mode}'). Check your storage provisioner.")

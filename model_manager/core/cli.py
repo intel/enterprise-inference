@@ -9,12 +9,12 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from mm.config import AppConfig, ModelConfig, load_app_config
-from mm.k8s import K8sClient
-from mm.policy import CpuPolicyManager
-from mm.renderer import ManifestRenderer
-from mm.routing import RoutingManager
-from mm.ui import (
+from .config import AppConfig, ModelConfig, load_app_config
+from .k8s import K8sClient
+from .policy import CpuPolicyManager
+from .renderer import ManifestRenderer
+from .routing import RoutingManager
+from .ui import (
     BOLD, CYAN, DIM, GREEN, RED, RESET, YELLOW,
     abort, err, fmt_duration, info, ok, warn
 )

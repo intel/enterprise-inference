@@ -3,8 +3,8 @@ import os
 import re
 from typing import Any
 
-from mm.k8s import K8sClient
-from mm.ui import abort, info, warn
+from .k8s import K8sClient
+from .ui import abort, info, warn
 
 # Import nri_policy from scripts
 try:
@@ -13,7 +13,7 @@ except ImportError:
     try:
         from scripts import nri_policy
     except ImportError:
-        from mm import nri_policy
+        import nri_policy
 
 class CpuPolicyManager:
     def __init__(self, k8s: K8sClient):

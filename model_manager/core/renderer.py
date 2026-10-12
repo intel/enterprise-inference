@@ -2,8 +2,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from mm.config import ModelConfig
-from mm.ui import abort
+from .config import ModelConfig
+from .ui import abort
 
 class ManifestRenderer:
     def __init__(self, templates_dir: Path):

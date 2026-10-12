@@ -5,7 +5,7 @@ import sys
 from typing import Any
 import yaml
 
-from mm.ui import abort
+from .ui import abort
 
 @dataclass
 class DefaultsConfig:
