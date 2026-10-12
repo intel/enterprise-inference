@@ -1,0 +1,174 @@
+# Copyright (C) 2025-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+{# Chart values for the official vllm-project/semantic-router chart (charts/vllm-sr). #}
+replicaCount: {{ vllm_sr_replicas }}
+
+image:
+  repository: "{{ vllm_sr_image_repository }}"
+{% if vllm_sr_image_tag %}
+  tag: "{{ vllm_sr_image_tag }}"
+{% endif %}
+
+service:
+  type: ClusterIP
+
+# Classifier + embedding (mmbert) models are cached here → survive pod restarts.
+persistence:
+  enabled: {{ vllm_sr_persistence_enabled | bool | lower }}
+  storageClassName: "{{ vllm_sr_storage_class }}"
+  accessMode: ReadWriteOnce
+  size: "{{ vllm_sr_storage_size }}"
+
+# We use the unified observability stack and our own Envoy AI Gateway — disable
+# the chart's bundled subcharts (redis/milvus/jaeger/prometheus/grafana).
+dependencies:
+  semanticCache:
+    redis:
+      enabled: {{ 'true' if vllm_sr_cache_backend == 'redis' else 'false' }}
+    milvus:
+      enabled: false
+  responseApi:
+    redis:
+      enabled: false
+  observability:
+    jaeger:
+      enabled: false
+    prometheus:
+      enabled: false
+    grafana:
+      enabled: false
+
+# Dashboard (official chart). vllm_sr_dashboard_enabled; the agent toolkit turns it on.
+dashboard:
+  enabled: {{ vllm_sr_dashboard_enabled | bool | lower }}
+{% if vllm_sr_dashboard_enabled | bool %}
+  jwtSecret:
+    existingSecret: "{{ vllm_sr_dashboard_secret }}"
+    existingSecretKey: "jwt-secret"
+  persistence:
+    enabled: true
+    size: "{{ vllm_sr_dashboard_storage_size }}"
+  extraEnv:
+    - name: DASHBOARD_ADMIN_EMAIL
+      valueFrom: {secretKeyRef: {name: "{{ vllm_sr_dashboard_secret }}", key: admin-email}}
+    - name: DASHBOARD_ADMIN_NAME
+      value: "{{ vllm_sr_dashboard_admin_name }}"
+    - name: DASHBOARD_ADMIN_PASSWORD
+      valueFrom: {secretKeyRef: {name: "{{ vllm_sr_dashboard_secret }}", key: admin-password}}
+  httpRoute:
+    enabled: true
+    hostname: "{{ vllm_sr_dashboard_hostname }}"
+    parentRef:
+      name: "{{ gateway_name | default('eg-gateway') }}"
+      namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
+      sectionName: https
+{% endif %}
+
+{# Proxy env for the router's Hugging Face model downloads (the official chart
+   takes extra container env through extraEnv). #}
+{% set _has_proxy = (http_proxy | default('') | length > 0) or (https_proxy | default('') | length > 0) %}
+{% if vllm_sr_hf_token or _has_proxy %}
+extraEnv:
+{% if vllm_sr_hf_token %}
+  - name: HF_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: vllm-sr-env-secrets
+        key: HF_TOKEN
+  - name: HUGGING_FACE_HUB_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: vllm-sr-env-secrets
+        key: HF_TOKEN
+{% endif %}
+{% if _has_proxy %}
+  - name: HTTP_PROXY
+    value: "{{ http_proxy | default('') }}"
+  - name: HTTPS_PROXY
+    value: "{{ https_proxy | default('') }}"
+  - name: NO_PROXY
+    value: "{{ no_proxy | default('') }}"
+  - name: http_proxy
+    value: "{{ http_proxy | default('') }}"
+  - name: https_proxy
+    value: "{{ https_proxy | default('') }}"
+  - name: no_proxy
+    value: "{{ no_proxy | default('') }}"
+{% endif %}
+{% endif %}
+
+{% if vllm_sr_config_override %}
+# Operator-supplied canonical Router config (atomic override).
+configOverride:
+{{ vllm_sr_config_override | to_nice_yaml(indent=2) | indent(2, true) }}
+{% else %}
+# Default Router config rendered from vllm_sr_route_models. Author richer routing
+# decisions via vllm_sr_config_override — see docs/vllm-semantic-router.md.
+config:
+  version: v0.3
+  listeners:
+    - name: "grpc-{{ vllm_sr_grpc_port }}"
+      address: "0.0.0.0"
+      port: {{ vllm_sr_grpc_port }}
+      timeout: "300s"
+    - name: "http-{{ vllm_sr_api_port }}"
+      address: "0.0.0.0"
+      port: {{ vllm_sr_api_port }}
+      timeout: "300s"
+  providers:
+    defaults:
+      default_model: "{{ vllm_sr_default_model }}"
+      reasoning_families:
+        qwen3:
+          type: "chat_template_kwargs"
+          parameter: "enable_thinking"
+        deepseek:
+          type: "chat_template_kwargs"
+          parameter: "thinking"
+      default_reasoning_effort: high
+    models:
+{% for m in vllm_sr_route_models %}
+      - name: "{{ m }}"
+        provider_model_id: "{{ m }}"
+        backend_refs:
+          - name: "primary"
+            endpoint: "{{ m }}-kserve-workload-svc.{{ vllm_sr_model_namespace }}.svc.cluster.local:8000"
+            protocol: "http"
+            weight: 100
+{% endfor %}
+  routing:
+    modelCards:
+{% for m in vllm_sr_route_models %}
+      - name: "{{ m }}"
+{% endfor %}
+    signals:
+      domains:
+        - name: "general"
+          description: "Catch-all domain"
+          mmlu_categories: ["other"]
+    decisions:
+      - name: "default-route"
+        description: "Default route for every request."
+        priority: 1
+        rules:
+          operator: "AND"
+          conditions: []
+        modelRefs:
+          - model: "{{ vllm_sr_default_model }}"
+            use_reasoning: false
+  global:
+    services:
+      observability:
+        tracing:
+          enabled: false
+    stores:
+      response_cache:
+        enabled: true
+        backend_type: "{{ vllm_sr_cache_backend }}"
+        embedding_model: mmbert
+      memory:
+        embedding_model: mmbert
+      vector_store:
+        embedding_model: mmbert
+{% endif %}

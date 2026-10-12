@@ -1,0 +1,62 @@
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: {{MODEL_NAME}}
+  namespace: {{NAMESPACE}}
+  labels:
+    app.kubernetes.io/name: {{MODEL_NAME}}
+    app.kubernetes.io/managed-by: model-manager{{EXTRA_LABELS}}
+spec:
+{{NRI_ANNOTATIONS}}  model:
+    uri: {{MODEL_URI}}
+  replicas: {{REPLICAS}}
+  router:
+    gateway:
+      refs:
+        - name: {{GATEWAY_NAME}}
+          namespace: {{GATEWAY_NAMESPACE}}
+    route: {}
+    scheduler: {}
+  template:
+    containers:
+      - name: main
+        image: {{IMAGE}}
+        args: {{ARGS}}
+        env: {{ENV}}
+{{XPU_MOUNTS}}        resources:
+          requests:
+            cpu: "{{CPU}}"
+            memory: {{MEMORY}}
+            {{XPU_RESOURCE}}: "{{XPU_COUNT}}"
+          limits:
+            cpu: "{{CPU}}"
+            memory: {{MEMORY}}
+            {{XPU_RESOURCE}}: "{{XPU_COUNT}}"
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 120
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 12
+          periodSeconds: 10
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+        # The XPU runtime runs as root with the host render/video groups so it can
+        # open /dev/dri.
+        securityContext:
+          runAsNonRoot: false
+          runAsUser: 0
+    securityContext:
+      supplementalGroups: {{XPU_SUPPLEMENTAL_GROUPS}}
+{{XPU_VOLUMES}}{{AFFINITY}}

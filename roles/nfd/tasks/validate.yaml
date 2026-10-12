@@ -1,0 +1,52 @@
+---
+# =============================================================================
+# NFD — Validate
+# =============================================================================
+
+- name: "nfd | validate | Check Helm release"
+  kubernetes.core.helm_info:
+    name: node-feature-discovery
+    release_namespace: "{{ nfd_namespace }}"
+  register: _nfd_val_release
+  failed_when: _nfd_val_release.status is not defined or _nfd_val_release.status is none
+
+- name: "nfd | validate | Check worker DaemonSet readiness"
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: DaemonSet
+    name: node-feature-discovery-worker
+    namespace: "{{ nfd_namespace }}"
+  register: _nfd_val_worker
+  failed_when: >-
+    _nfd_val_worker.resources | default([]) | length == 0 or
+    (_nfd_val_worker.resources[0].status.numberReady | default(0) | int) == 0 or
+    (_nfd_val_worker.resources[0].status.numberReady | default(0) | int) !=
+    (_nfd_val_worker.resources[0].status.desiredNumberScheduled | default(0) | int)
+
+- name: "nfd | validate | Check master deployment readiness"
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: node-feature-discovery-master
+    namespace: "{{ nfd_namespace }}"
+  register: _nfd_val_master
+  failed_when: >-
+    _nfd_val_master.resources | default([]) | length == 0 or
+    (_nfd_val_master.resources[0].status.readyReplicas | default(0) | int) < 1
+
+- name: "nfd | validate | Check nodes have discovered CPU features"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Node
+    label_selectors:
+      - feature.node.kubernetes.io/cpu-model.vendor_id
+  register: _nfd_val_nodes
+  failed_when: _nfd_val_nodes.resources | default([]) | length == 0
+
+- name: "nfd | validate | Summary"
+  ansible.builtin.debug:
+    msg:
+      - "NFD Helm release: OK"
+      - "NFD worker pods: {{ _nfd_val_worker.resources[0].status.numberReady }} ready"
+      - "NFD master: OK"
+      - "NFD-labeled nodes: {{ _nfd_val_nodes.resources | length }}"

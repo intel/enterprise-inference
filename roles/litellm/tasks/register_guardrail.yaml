@@ -1,0 +1,67 @@
+---
+# =============================================================================
+# Content-safety guardrail registration (litellm mode)
+# =============================================================================
+# Renders the Qwen3Guard custom_code (screens the last user message against the
+# `qwen3guard` guard model, fail-closed) and registers it with LiteLLM's runtime
+# /guardrails API by exec-ing `python -` inside the LiteLLM pod (so it reads the
+# pod's own LITELLM_MASTER_KEY). Idempotent: PUT if the guardrail already exists.
+# =============================================================================
+
+- name: "litellm | guardrail | Wait for LiteLLM deployment to be ready"
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: "{{ guardrail_litellm_deployment }}"
+    namespace: "{{ guardrail_litellm_namespace }}"
+  register: _gr_litellm
+  until: >-
+    _gr_litellm.resources | length > 0 and
+    _gr_litellm.resources[0].status.readyReplicas is defined and
+    _gr_litellm.resources[0].status.readyReplicas == _gr_litellm.resources[0].spec.replicas
+  retries: 60
+  delay: 5
+
+- name: "litellm | guardrail | Render Qwen3Guard custom_code"
+  ansible.builtin.set_fact:
+    _guard_custom_code: "{{ lookup('template', 'qwen3guard_gen.py.j2') }}"
+
+- name: "litellm | guardrail | Build registration payload"
+  ansible.builtin.set_fact:
+    reg_guardrail_name: "{{ guardrail_name }}"
+    reg_gateway_url: "http://127.0.0.1:4000"
+    _reg_payload:
+      guardrail:
+        guardrail_name: "{{ guardrail_name }}"
+        litellm_params:
+          guardrail: custom_code
+          mode: pre_call
+          default_on: true
+          custom_code: "{{ _guard_custom_code }}"
+        guardrail_info:
+          description: "Qwen3Guard content-safety screening (pre_call, fail-closed)"
+
+- name: "litellm | guardrail | Register with LiteLLM (/guardrails API, in-pod)"
+  ansible.builtin.command:
+    cmd: >-
+      kubectl exec -i -n {{ guardrail_litellm_namespace }}
+      deploy/{{ guardrail_litellm_deployment }} -c {{ guardrail_litellm_container }} -- python -
+    stdin: "{{ lookup('template', 'register-guardrail.py.j2') }}"
+  vars:
+    reg_payload_b64: "{{ _reg_payload | to_json | b64encode }}"
+  environment:
+    KUBECONFIG: "{{ kubernetes_kubeconfig | default(omit) }}"
+  register: _gr_reg
+  retries: 12
+  delay: 5
+  until: _gr_reg.rc == 0
+  changed_when: "'registered' in (_gr_reg.stdout | default('')) or 'updated' in (_gr_reg.stdout | default(''))"
+  failed_when: _gr_reg.rc != 0
+  no_log: true
+
+- name: "litellm | guardrail | Registration result"
+  ansible.builtin.debug:
+    msg:
+      - "Guardrail '{{ guardrail_name }}' registered with LiteLLM (mode=pre_call, default_on=true)"
+      - "Guard model: {{ guardrail_model }} @ {{ guard_service_url }}"
+      - "{{ _gr_reg.stdout_lines | default([]) }}"

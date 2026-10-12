@@ -1,0 +1,195 @@
+{{- $routerMultiReplica := false -}}
+{{- if .Values.autoscaling.enabled -}}
+{{- $routerMultiReplica = gt (int .Values.autoscaling.maxReplicas) 1 -}}
+{{- else -}}
+{{- $routerMultiReplica = gt (int .Values.replicaCount) 1 -}}
+{{- end -}}
+{{- $config := include "semantic-router.effectiveConfig" . | fromYaml -}}
+{{- $global := (get $config "global") | default (dict) -}}
+{{- $router := (get $global "router") | default (dict) -}}
+{{- $learning := (get $router "learning") | default (dict) -}}
+{{- $learningEnabled := false -}}
+{{- if hasKey $learning "enabled" -}}
+{{- $learningEnabled = get $learning "enabled" -}}
+{{- end -}}
+{{- $adaptation := (get $learning "adaptation") | default (dict) -}}
+{{- $protection := (get $learning "protection") | default (dict) -}}
+{{- $adaptationEnabled := true -}}
+{{- if hasKey $adaptation "enabled" -}}
+{{- $adaptationEnabled = get $adaptation "enabled" -}}
+{{- end -}}
+{{- $protectionEnabled := true -}}
+{{- if hasKey $protection "enabled" -}}
+{{- $protectionEnabled = get $protection "enabled" -}}
+{{- end -}}
+{{- $localLearningStateEnabled := and $learningEnabled (or $adaptationEnabled $protectionEnabled) -}}
+{{- $safetyGuards := (get .Values "safetyGuards") | default (dict) -}}
+{{- $rejectMultiReplicaLocalLearningState := true -}}
+{{- if hasKey $safetyGuards "rejectMultiReplicaLocalLearningState" -}}
+{{- $rejectMultiReplicaLocalLearningState = get $safetyGuards "rejectMultiReplicaLocalLearningState" -}}
+{{- end -}}
+{{- if and $rejectMultiReplicaLocalLearningState $routerMultiReplica $localLearningStateEnabled -}}
+{{- fail "multi-replica router deployments cannot use Router Learning local state; disable global.router.learning, use one router replica, or set safetyGuards.rejectMultiReplicaLocalLearningState=false after accepting replica-local learning divergence" -}}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "semantic-router.fullname" . }}
+  namespace: {{ include "semantic-router.namespace" . }}
+  labels:
+    {{- include "semantic-router.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "semantic-router.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "semantic-router.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: router
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- $registry := trimSuffix "/" (default "" .Values.global.imageRegistry) }}
+      {{- $prefix := ternary "" (printf "%s/" $registry) (eq $registry "") }}
+      serviceAccountName: {{ include "semantic-router.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # Models are now automatically downloaded by the router at startup
+      # No initContainer is needed - the router uses its built-in Go-based
+      # modeldownload package to download models from HuggingFace based on
+      # the mom_registry configuration in config.yaml
+      # Note: HF_TOKEN secret (hf-token-secret) is still required for downloading
+      # gated models (e.g., embeddinggemma-300m). The E2E framework creates this
+      # secret automatically if HF_TOKEN is available in the test environment.
+      containers:
+      - name: {{ .Chart.Name }}
+        image: "{{ $prefix }}{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        {{- with .Values.args }}
+        args:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+        ports:
+        - containerPort: {{ .Values.service.grpc.targetPort }}
+          name: grpc
+          protocol: TCP
+        - containerPort: {{ .Values.service.metrics.targetPort }}
+          name: metrics
+          protocol: TCP
+        - containerPort: {{ .Values.service.api.targetPort }}
+          name: classify-api
+          protocol: TCP
+        {{- if or .Values.env .Values.extraEnv }}
+        env:
+        {{- with .Values.env }}
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.extraEnv }}
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- end }}
+        {{- with .Values.envFromSecrets }}
+        envFrom:
+          {{- range . }}
+          - secretRef:
+              name: {{ . }}
+          {{- end }}
+        {{- end }}
+        volumeMounts:
+        - name: runtime-tmp
+          mountPath: /tmp
+        - name: config-volume
+          mountPath: /app/config/config.yaml
+          subPath: config.yaml
+          readOnly: true
+        - name: config-volume
+          mountPath: /app/config/tools_db.json
+          subPath: tools_db.json
+          readOnly: true
+        {{- if and .Values.knowledgeBases.enabled .Values.knowledgeBases.existingConfigMap }}
+        - name: knowledge-bases-volume
+          mountPath: {{ .Values.knowledgeBases.mountPath | quote }}
+          readOnly: true
+        {{- end }}
+        {{- with .Values.extraVolumeMounts }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        - name: models-volume
+          mountPath: /app/models
+        {{- if .Values.startupProbe.enabled }}
+        # Startup probe for slow-starting containers (model loading takes ~60s with Gemma)
+        startupProbe:
+          tcpSocket:
+            port: {{ .Values.service.grpc.targetPort }}
+          periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+          timeoutSeconds: {{ .Values.startupProbe.timeoutSeconds }}
+          failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+        {{- end }}
+        {{- if .Values.livenessProbe.enabled }}
+        livenessProbe:
+          tcpSocket:
+            port: {{ .Values.service.grpc.targetPort }}
+          initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+          periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+          timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
+          failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+        {{- end }}
+        {{- if .Values.readinessProbe.enabled }}
+        readinessProbe:
+          tcpSocket:
+            port: {{ .Values.service.grpc.targetPort }}
+          initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+          periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+          timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
+          failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+        {{- end }}
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+      volumes:
+      - name: runtime-tmp
+        emptyDir: {}
+      - name: config-volume
+        configMap:
+          name: {{ include "semantic-router.fullname" . }}-config
+      {{- if and .Values.knowledgeBases.enabled .Values.knowledgeBases.existingConfigMap }}
+      - name: knowledge-bases-volume
+        configMap:
+          name: {{ .Values.knowledgeBases.existingConfigMap | quote }}
+      {{- end }}
+      {{- if .Values.persistence.enabled }}
+      - name: models-volume
+        persistentVolumeClaim:
+          claimName: {{ include "semantic-router.pvcName" . }}
+      {{- else }}
+      - name: models-volume
+        emptyDir: {}
+      {{- end }}
+      {{- with .Values.extraVolumes }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

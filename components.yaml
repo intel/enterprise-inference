@@ -52,3 +52,11 @@ components:
     layer: inference
     enabled: "{{ kserve_enabled | default(true) | bool }}"
     depends_on: [kserve]
+
+  # vLLM Semantic Router — opt-in, classifier-based model routing. Runs after
+  # models + gateway are up; wires an ext_proc onto a dedicated semantic-router
+  # gateway. Off by default (vllm_sr_enabled). See docs/vllm-semantic-router.md.
+  - name: vllm_sr
+    layer: inference
+    enabled: "{{ vllm_sr_enabled | default(false) | bool }}"
+    depends_on: [llm_services]

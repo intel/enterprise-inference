@@ -78,6 +78,11 @@ llm_services_deploy_runtimes: true
 # Override via: ./es_auto_installer.sh install inference --skip-models
 llm_services_deploy_models: true
 
+# Catalog models to deploy on install regardless of llm_services_deploy_models /
+# `autodeploy:` — set by a solution layer that needs a default model (the agent
+# toolkit sets its default). Empty here, so inference-only installs deploy none.
+llm_services_autodeploy_models: []
+
 # Extra flags appended to each `model-manager deploy <name> --wait` invocation.
 # Examples:
 #   model_deploy_flags: "--wait-timeout 1800"   # allow longer for large models

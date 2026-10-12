@@ -15,13 +15,12 @@
   register: _litellm_release
   failed_when: false
 
-- name: "litellm | Already installed — skipping"
+- name: "litellm | Existing release — reconciling configuration"
   ansible.builtin.debug:
-    msg: "LiteLLM already deployed in {{ litellm_namespace }} — skipping install."
+    msg: "LiteLLM already deployed in {{ litellm_namespace }} — reconciling the Helm release and router configuration."
   when: _litellm_release.status is defined and _litellm_release.status is not none
 
-- name: "litellm | Install"
-  when: _litellm_release.status is not defined or _litellm_release.status is none
+- name: "litellm | Install or reconcile"
   block:
 
     # ── Detect cluster topology for sizing ───────────────────────────────────
@@ -205,6 +204,12 @@
             master_key: "sk-{{ litellm_master_key }}"
             salt_key: "{{ litellm_salt_key }}"
 
+    # ── Hybrid router wiring ──────────────────────────────────────────────────
+    # Creates the router-code ConfigMap and computes the volumes/mounts/model/
+    # callbacks/router_settings the Helm values below consume (empty when disabled).
+    - name: "litellm | Configure hybrid router wiring (before Helm)"
+      ansible.builtin.include_tasks: hybrid_router_setup.yaml
+
     # ── Helm install ──────────────────────────────────────────────────────────
     # Chart is vendored at charts/litellm-helm (no internet required at install).
     # Valkey subchart deploys response cache when redis.enabled=true.
@@ -242,7 +247,9 @@
             - litellm-master-key
           # Proxy vars merged in when the cluster is behind a corporate proxy —
           # required for the prisma CLI bootstrap (see set_fact above).
-          envVars: "{{ {'UI_USERNAME': 'admin'} | combine(_litellm_proxy_env) }}"
+          # PYTHONPATH = the config dir (hybrid mode) so the router package next to
+          # config.yaml is importable regardless of how litellm resolves the module.
+          envVars: "{{ {'UI_USERNAME': 'admin'} | combine(_litellm_proxy_env) | combine({'PYTHONPATH': hybrid_router_mount_dir} if (hybrid_router_enabled | default(false) | bool) else {}) }}"
           extraEnvVars:
             - name: LITELLM_SALT_KEY
               valueFrom:
@@ -262,8 +269,10 @@
           # /root, seeded from the image by an initContainer, fixes it — see
           # files/prisma-engine-seed.sh for the full explanation.
           extraInitContainers: "{{ _litellm_prisma_seed_containers }}"
-          volumes: "{{ litellm_prisma_root_volumes }}"
-          volumeMounts: "{{ litellm_prisma_root_volume_mounts }}"
+          # prisma seed volumes + (when hybrid_router_enabled) the router-code
+          # ConfigMap mounts that rebuild the package tree under /app.
+          volumes: "{{ litellm_prisma_root_volumes + (_hybrid_volumes | default([])) }}"
+          volumeMounts: "{{ litellm_prisma_root_volume_mounts + (_hybrid_volume_mounts | default([])) }}"
           # ── Schema migration Job ──────────────────────────────────────────
           # The chart's default 512Mi limit is far below what
           # `python litellm/proxy/prisma_migration.py` actually needs (~2.1Gi
@@ -291,9 +300,12 @@
                 ttl: "{{ litellm_cache_ttl | default(600) }}"
               success_callback: "{{ ['langfuse'] if (langfuse_enabled | default(false) | bool or litellm_enabled | default(false) | bool or (auth_provider | default('keycloak')) == 'litellm') else [] }}"
               failure_callback: "{{ ['langfuse'] if (langfuse_enabled | default(false) | bool or litellm_enabled | default(false) | bool or (auth_provider | default('keycloak')) == 'litellm') else [] }}"
-            model_list: []
-            router_settings:
-              routing_strategy: least-busy
+              # Hybrid router callback (empty unless hybrid_router_enabled) — imports
+              # custom_hybrid_router at startup and monkey-patches litellm.router.Router.
+              callbacks: "{{ _hybrid_callbacks | default([]) }}"
+            # hybrid-router virtual model (empty list unless hybrid_router_enabled)
+            model_list: "{{ _hybrid_model_list | default([]) }}"
+            router_settings: "{{ _hybrid_router_settings if (_hybrid_router_settings | default({})) else {'routing_strategy': 'least-busy'} }}"
           # Response cache. Keeps the Bitnami valkey subchart wiring (Service
           # name, wait logic) but runs the official upstream valkey/valkey image
           # instead of the deprecated bitnamilegacy/valkey. The Bitnami
@@ -475,6 +487,12 @@
           - group: gateway.networking.k8s.io
             kind: HTTPRoute
             name: litellm
+        # A route-level policy replaces the gateway-wide one (gateway-default-timeout),
+        # so restate its timeout or Envoy's 15s default cuts long generations (504).
+        timeout:
+          http:
+            requestTimeout: "{{ gateway_request_timeout | default('600s') }}"
+            connectionIdleTimeout: "{{ gateway_request_timeout | default('600s') }}"
         rateLimit:
           type: Local
           local:
@@ -525,3 +543,7 @@
       - "Admin username: admin"
       - "Master key: kubectl get secret litellm-master-key -n {{ litellm_namespace }} -o jsonpath='{.data.master_key}' | base64 -d"
       - "Auth mode: LiteLLM virtual keys (Bearer <key>); LiteLLM is the sole auth boundary"
+
+- name: "litellm | Register content-safety guardrail (litellm mode)"
+  ansible.builtin.include_tasks: register_guardrail.yaml
+  when: guardrails_enabled | bool

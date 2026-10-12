@@ -1,0 +1,81 @@
+---
+# =============================================================================
+# Hybrid Router
+# =============================================================================
+
+- name: "litellm | hybrid | Default wiring to empty (disabled)"
+  ansible.builtin.set_fact:
+    _hybrid_volumes: []
+    _hybrid_volume_mounts: []
+    _hybrid_model_list: []
+    _hybrid_callbacks: []
+    _hybrid_router_settings: {}
+
+- name: "litellm | hybrid | Configure hybrid router"
+  when: hybrid_router_enabled | bool
+  block:
+    - name: "litellm | hybrid | Create router-code ConfigMap (flat dotted keys)"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: litellm-router-code
+            namespace: "{{ litellm_namespace }}"
+            labels:
+              app.kubernetes.io/managed-by: ansible
+              app.kubernetes.io/part-of: litellm-hybrid-router
+          data:
+            custom_hybrid_router.py: "{{ lookup('file', role_path + '/files/router/custom_hybrid_router.py') }}"
+            router_strategy.__init__.py: "{{ lookup('file', role_path + '/files/router/router_strategy/__init__.py') }}"
+            efficiency_router.__init__.py: "{{ lookup('file', role_path + '/files/router/router_strategy/efficiency_router/__init__.py') }}"
+            efficiency_router.bandit.py: "{{ lookup('file', role_path + '/files/router/router_strategy/efficiency_router/bandit.py') }}"
+            efficiency_router.efficiency_router.py: "{{ lookup('file', role_path + '/files/router/router_strategy/efficiency_router/efficiency_router.py') }}"
+            hybrid_router.__init__.py: "{{ lookup('file', role_path + '/files/router/router_strategy/hybrid_router/__init__.py') }}"
+            hybrid_router.hybrid_router.py: "{{ lookup('file', role_path + '/files/router/router_strategy/hybrid_router/hybrid_router.py') }}"
+
+    # subPath mounts rebuild the package tree in the LiteLLM CONFIG DIR
+    # ({{ hybrid_router_mount_dir }}). LiteLLM's get_instance_fn resolves a
+    # `callbacks` module by FILE PATH relative to the config file's directory
+    # (config.yaml lives there), not CWD/PYTHONPATH — so the module must sit
+    # alongside config.yaml. custom_hybrid_router.py then self-inserts its own
+    # dir on sys.path to import the router_strategy package next to it.
+    - name: "litellm | hybrid | Build helm wiring facts"
+      ansible.builtin.set_fact:
+        _hybrid_volumes:
+          - name: router-code
+            configMap:
+              name: litellm-router-code
+        _hybrid_volume_mounts:
+          - { name: router-code, mountPath: "{{ hybrid_router_mount_dir }}/custom_hybrid_router.py", subPath: custom_hybrid_router.py }
+          - { name: router-code, mountPath: "{{ hybrid_router_mount_dir }}/router_strategy/__init__.py", subPath: router_strategy.__init__.py }
+          - { name: router-code, mountPath: "{{ hybrid_router_mount_dir }}/router_strategy/efficiency_router/__init__.py", subPath: efficiency_router.__init__.py }
+          - { name: router-code, mountPath: "{{ hybrid_router_mount_dir }}/router_strategy/efficiency_router/bandit.py", subPath: efficiency_router.bandit.py }
+          - { name: router-code, mountPath: "{{ hybrid_router_mount_dir }}/router_strategy/efficiency_router/efficiency_router.py", subPath: efficiency_router.efficiency_router.py }
+          - { name: router-code, mountPath: "{{ hybrid_router_mount_dir }}/router_strategy/hybrid_router/__init__.py", subPath: hybrid_router.__init__.py }
+          - { name: router-code, mountPath: "{{ hybrid_router_mount_dir }}/router_strategy/hybrid_router/hybrid_router.py", subPath: hybrid_router.hybrid_router.py }
+        _hybrid_callbacks:
+          - "custom_hybrid_router.proxy_handler_instance"
+        _hybrid_model_list:
+          - model_name: "{{ hybrid_router_model_name }}"
+            litellm_params:
+              model: "auto_router/hybrid_router"
+              hybrid_router_config:
+                bandit: "{{ hybrid_router_bandit }}"
+                delta: "{{ hybrid_router_delta }}"
+                epsilon: "{{ hybrid_router_epsilon }}"
+                target_tpt: "{{ hybrid_router_target_tpt }}"
+                quality_weight: "{{ hybrid_router_quality_weight }}"
+                tier_candidates: "{{ hybrid_router_tier_candidates }}"
+                complexity_router_config:
+                  tier_boundaries: "{{ hybrid_router_tier_boundaries }}"
+              hybrid_router_default_model: "{{ hybrid_router_default_model }}"
+        _hybrid_router_settings:
+          routing_strategy: "{{ hybrid_router_base_strategy }}"
+          redis_host: "litellm-redis-primary.{{ litellm_namespace }}.svc.cluster.local"
+          redis_port: 6379
+
+    - name: "litellm | hybrid | Wiring summary"
+      ansible.builtin.debug:
+        msg: "Hybrid router ENABLED — virtual model '{{ hybrid_router_model_name }}', default {{ hybrid_router_default_model }}, tiers {{ hybrid_router_tier_candidates.keys() | list }}"
