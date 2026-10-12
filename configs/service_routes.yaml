@@ -27,3 +27,12 @@ service_routes:
     port: 3000
     namespace: langfuse
     prefix: none
+
+  # LiteLLM API (auth_provider: litellm, virtual keys).
+  litellm:
+    path: /litellm
+    subdomain: litellm
+    service: litellm
+    port: 4000
+    namespace: litellm
+    prefix: strip

@@ -20,7 +20,7 @@ litellm_valkey_tag: "8.0-alpine"                # valkey/valkey (official upstre
 
 # Gateway integration
 gateway_create: "{{ envoy_gateway_enabled | default(false) }}"
-# Routing from the solutions service_routes registry (configs/service_routes.yaml)
+# Routing from this repo's configs/service_routes.yaml (merged with every repo's)
 # via the shared service_route filter; follows routing_mode:
 # litellm.<domain>, or <domain>/litellm (prefix stripped).
 litellm_route: >-

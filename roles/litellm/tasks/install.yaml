@@ -385,20 +385,14 @@
 
 # ── Gateway integration (runs even on re-runs to stay idempotent) ─────────────
 
-# In path mode the route mounts on the shared apex listener, which admits routes
-# only from labelled namespaces (gateway_apex_route_label_*, envoy_gateway role).
-- name: "litellm | Label namespace — allow apex-listener routes (path mode)"
-  when: gateway_create | bool and litellm_route.section_name == 'https-apex'
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: v1
-      kind: Namespace
-      metadata:
-        name: "{{ litellm_namespace }}"
-        labels: >-
-          {{ {(gateway_apex_route_label_key | default('gateway-apex-routes')):
-              (gateway_apex_route_label_value | default('allowed'))} }}
+# Resolves the route and prepares the platform gateway for it.
+- name: "litellm | Attach the API to the gateway"
+  ansible.builtin.include_role:
+    name: envoy_gateway
+    tasks_from: attach.yaml
+  vars:
+    gateway_attach_service: litellm
+  when: gateway_create | bool
 
 # API: only the exact inference paths reach LiteLLM (prefix stripped in path mode).
 - name: "litellm | Create API HTTPRoute"
