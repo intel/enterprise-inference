@@ -248,10 +248,11 @@ def build_annotations(
     annotation is included so the NRI plugin picks it up.
     """
     bname = balloon_name(tp, balloon_override)
+    ann_key = _NRI_BALLOON_POD_ANNOTATION if kind == "InferenceService" else _NRI_BALLOON_ANNOTATION
     annotations: dict[str, str] = {
         "cpu-policy.model-manager.io/type": "nri-balloons",
         "cpu-policy.model-manager.io/balloon": bname,
-        _NRI_BALLOON_ANNOTATION: bname,
+        ann_key: bname,
     }
     _info(f"Binding pods to NRI balloon '{bname}'")
     return annotations

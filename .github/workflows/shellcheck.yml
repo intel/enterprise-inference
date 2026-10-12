@@ -61,23 +61,16 @@ jobs:
             "shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
           shellcheck --version
 
-      # A `*.sh` glob missed the largest script in either tree
-      # (model_manager/model-manager, 1429 lines, no suffix), so discovery
-      # reads shebangs as well as suffixes.
+      # A `*.sh` glob misses scripts without extensions, so discovery reads
+      # shebangs as well as suffixes.
       #
       # Entry points are linted with -x so the helper scripts they source are
-      # followed. The --source-path list is required because the source
-      # statements are built from a variable ("$MM_LIB/config.sh") that
-      # ShellCheck cannot resolve unaided -- without it, 7 globals that the
-      # helpers do set and the entry point does read looked unused.
-      #
-      # Helper scripts are then linted on their own. ShellCheck sees one file at
-      # a time, so a global a helper sets for its caller reads as unused: 26 of
-      # the 31 SC2034 hits were that. Turning SC2034 off for them was too blunt
-      # -- it also hid four globals that really are written and never read
-      # anywhere (RUNTIME_DEVICE, NRI_ADVANCED_MODE, NRI_HIDE_HT,
-      # NRI_TARGET_NODE). So each hit is checked individually instead, and
-      # suppressed only when some other file demonstrably reads that variable.
+      # followed. Helper scripts are then linted on their own. ShellCheck sees one
+      # file at a time, so a global a helper sets for its caller reads as unused:
+      # SC2034 hits are checked individually and suppressed only when some other file
+      # demonstrably reads that variable. The check applies to SHOUTY_CASE names of
+      # 3+ characters only: those are the cross-file globals by convention, and a
+      # short lowercase name like a loop's `i` collides textually with unrelated files.
       # The check applies to SHOUTY_CASE names of 3+ characters only: those are
       # the cross-file globals by convention, and a short lowercase name like a
       # loop's `i` collides textually with unrelated files.

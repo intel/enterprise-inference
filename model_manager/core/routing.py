@@ -122,7 +122,7 @@ class RoutingManager:
         warn("Could not resolve inference hostname — set MM_INFERENCE_HOSTNAME or MM_GLOBAL_CONFIG")
         return ""
 
-    def build_endpoint_url(self, model_name: str, model_kind: str, category: str) -> str:
+    def build_endpoint_url(self, model_name: str, model_kind: str, category: str, namespace: str = "llm-inference") -> str:
         host = self.resolve_inference_hostname()
         if category == "embed":
             api_path = "v1/embeddings"
@@ -134,7 +134,7 @@ class RoutingManager:
         if self.aigateway_enabled():
             return f"https://{host}/{api_path}"
         if model_kind == "LLMInferenceService":
-            return f"https://{host}/{self.ai_gateway_ns}/{model_name}/{api_path}"
+            return f"https://{host}/{namespace}/{model_name}/{api_path}"
         return f"https://{host}/v2/models/{model_name}/infer"
 
     def model_internal_url(self, model_name: str, namespace: str, model_kind: str) -> str:
@@ -325,16 +325,21 @@ class RoutingManager:
 
     def litellm_curl(self, method: str, url: str, data: str | None = None) -> str:
         key = self.litellm_key()
-        curl_args = f"-sf -X {method} -H 'Content-Type: application/json'"
+        curl_cmd = ["curl", "-sf", "-X", method, "-H", "Content-Type: application/json"]
         if key:
-            curl_args += f" -H 'Authorization: Bearer {key}'"
+            curl_cmd.extend(["-H", f"Authorization: Bearer {key}"])
         if data:
-            curl_args += f" -d '{data}'"
-        curl_args += f" '{url}'"
+            curl_cmd.extend(["-d", data])
+        curl_cmd.append(url)
+
         pod_name = f"mm-curl-{int(time.time() * 1000) % 100000}"
-        res = self.k8s.run("run", pod_name, "--rm", "-i", "--restart=Never",
-                           f"--image={os.getenv('MM_CURL_IMAGE', 'curlimages/curl:8.12.1')}",
-                           "-n", self.litellm_ns, "--", "sh", "-c", f"curl {curl_args}")
+        run_args = [
+            "run", pod_name, "--rm", "-i", "--restart=Never",
+            f"--image={os.getenv('MM_CURL_IMAGE', 'curlimages/curl:8.12.1')}",
+            "-n", self.litellm_ns, "--"
+        ] + curl_cmd
+
+        res = self.k8s.run(*run_args)
         out = res.stdout.strip()
         idx = out.rfind("}")
         return out[:idx+1] if idx != -1 else out
@@ -350,7 +355,8 @@ class RoutingManager:
                 for m in data.get("data", [])
                 if m.get("model_name") == model_name and m.get("model_info", {}).get("id")
             ]
-        except Exception:
+        except (json.JSONDecodeError, KeyError) as e:
+            warn(f"Failed to parse LiteLLM model info: {e}")
             return []
 
     def litellm_register(self, model_name: str, model_url: str) -> None:

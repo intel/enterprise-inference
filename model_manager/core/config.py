@@ -12,7 +12,7 @@ class DefaultsConfig:
     namespace: str = "llm-inference"
     runtime: str = "vllm"
     replicas: int = 1
-    require_amx: bool = True
+    require_amx: bool = False
 
 @dataclass
 class StorageConfig:
@@ -69,7 +69,7 @@ def load_app_config(config_path: str | Path) -> AppConfig:
         namespace=raw_defs.get("namespace", "llm-inference"),
         runtime=raw_defs.get("runtime", "vllm"),
         replicas=int(raw_defs.get("replicas", 1)),
-        require_amx=bool(raw_defs.get("require_amx", True)),
+        require_amx=bool(raw_defs.get("require_amx", False)),
     )
 
     raw_st = data.get("storage", {})
@@ -114,26 +114,37 @@ def load_app_config(config_path: str | Path) -> AppConfig:
     runtimes = data.get("runtimes", {})
     return AppConfig(defaults, storage, network, models, runtimes, data)
 
-def discover_global_config(script_dir: Path) -> Path | None:
-    if os.getenv("MM_GLOBAL_CONFIG") and Path(os.environ["MM_GLOBAL_CONFIG"]).is_file():
-        return Path(os.environ["MM_GLOBAL_CONFIG"])
+def _discover_repo_roots(script_dir: Path) -> list[Path]:
+    roots: list[Path] = []
+    if os.getenv("MM_GLOBAL_CONFIG_SEARCH"):
+        for p in os.environ["MM_GLOBAL_CONFIG_SEARCH"].split(":"):
+            candidate = Path(p.strip())
+            if candidate.is_dir():
+                roots.append(candidate)
 
     # Search upwards for repo root containing es_auto_installer.sh
     cur = script_dir.resolve()
-    roots = []
     while cur != cur.parent:
         if (cur / "es_auto_installer.sh").is_file():
-            roots.append(cur)
+            if cur not in roots:
+                roots.append(cur)
             break
         cur = cur.parent
 
-    # Siblings
+    # Siblings matching *ai-solutions*
     if roots:
         parent = roots[0].parent
         for s in parent.glob("*ai-solutions*"):
             if s.is_dir() and s not in roots:
                 roots.append(s)
 
+    return roots
+
+def discover_global_config(script_dir: Path) -> Path | None:
+    if os.getenv("MM_GLOBAL_CONFIG") and Path(os.environ["MM_GLOBAL_CONFIG"]).is_file():
+        return Path(os.environ["MM_GLOBAL_CONFIG"])
+
+    roots = _discover_repo_roots(script_dir)
     sub_paths = ["env/local/global_config.yaml", "config/defaults/global_config.yaml"]
     for r in roots:
         for sub in sub_paths:
@@ -146,14 +157,7 @@ def discover_inference_config(script_dir: Path) -> Path | None:
     if os.getenv("MM_INFERENCE_CONFIG") and Path(os.environ["MM_INFERENCE_CONFIG"]).is_file():
         return Path(os.environ["MM_INFERENCE_CONFIG"])
 
-    cur = script_dir.resolve()
-    roots = []
-    while cur != cur.parent:
-        if (cur / "es_auto_installer.sh").is_file():
-            roots.append(cur)
-            break
-        cur = cur.parent
-
+    roots = _discover_repo_roots(script_dir)
     sub_paths = ["env/local/config.inference.yaml", "ext/enterprise.ai-inference/config.yaml"]
     for r in roots:
         for sub in sub_paths:

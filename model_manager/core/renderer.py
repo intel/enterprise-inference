@@ -93,26 +93,47 @@ class ManifestRenderer:
             out += f"\n    {k}: {json.dumps(v)}"
         return out
 
-    def build_affinity_block(self, node: str = "", require_amx: bool = True) -> str:
-        if not node and not require_amx:
+    def build_affinity_block(
+        self,
+        node: str = "",
+        require_amx: bool = False,
+        nri_node_selector_term: dict[str, Any] | None = None
+    ) -> str:
+        has_node_pref = bool(node)
+        has_nri_req = bool(nri_node_selector_term)
+        has_amx_req = bool(require_amx)
+
+        if not has_node_pref and not has_nri_req and not has_amx_req:
             return ""
 
         lines = [
             "    affinity:",
             "      nodeAffinity:"
         ]
-        if require_amx:
+        if has_nri_req or has_amx_req:
             lines.extend([
                 "        requiredDuringSchedulingIgnoredDuringExecution:",
                 "          nodeSelectorTerms:",
-                "            - matchExpressions:",
-                "                - key: feature.node.kubernetes.io/cpu-cpuid.AMXBF16",
-                "                  operator: In",
-                "                  values:",
-                '                    - "true"'
+                "            - matchExpressions:"
             ])
+            if has_nri_req and nri_node_selector_term:
+                match_exprs = nri_node_selector_term.get("matchExpressions", [])
+                tp_val = match_exprs[0].get("values", ["0"])[0] if match_exprs else "0"
+                lines.extend([
+                    "                - key: nri.intel.com/max-tp",
+                    "                  operator: Gt",
+                    "                  values:",
+                    f'                    - "{tp_val}"'
+                ])
+            if has_amx_req:
+                lines.extend([
+                    "                - key: feature.node.kubernetes.io/cpu-cpuid.AMXBF16",
+                    "                  operator: In",
+                    "                  values:",
+                    '                    - "true"'
+                ])
 
-        if node:
+        if has_node_pref:
             lines.extend([
                 "        preferredDuringSchedulingIgnoredDuringExecution:",
                 "          - weight: 100",

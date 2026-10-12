@@ -1,0 +1,4 @@
+# model-manager runtime dependencies
+# Requires Python >= 3.10
+PyYAML>=6.0
+kubernetes>=29.0
