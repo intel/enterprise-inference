@@ -243,33 +243,24 @@
 # llm-inference). So this backendRef is cross-namespace and requires a
 # ReferenceGrant in the target namespace permitting the edge namespace's
 # HTTPRoutes to reference the Service (Gateway API blocks cross-ns refs by default).
+- name: "agentgateway | Attach the inference route to the gateway"
+  ansible.builtin.include_role:
+    name: envoy_gateway
+    tasks_from: attach.yaml
+  vars:
+    gateway_attach_service: inference
+  when: ai_gateway_create | bool
+
 - name: "agentgateway | Create external inference HTTPRoute (eg-gateway → ai-gateway)"
   kubernetes.core.k8s:
     state: present
-    definition:
-      apiVersion: gateway.networking.k8s.io/v1
-      kind: HTTPRoute
-      metadata:
-        name: inference-external
-        namespace: "{{ envoy_gateway_namespace }}"
-        labels:
-          app.kubernetes.io/managed-by: agentgateway-role
-      spec:
-        hostnames:
-          - "{{ inference_hostname }}"
-        parentRefs:
-          - name: "{{ envoy_gateway_name }}"
-            namespace: "{{ envoy_gateway_namespace }}"
-            sectionName: https
-        rules:
-          - matches:
-              - path:
-                  type: PathPrefix
-                  value: /
-            backendRefs:
-              - name: "{{ ai_gateway_service_name }}"
-                namespace: "{{ ai_gateway_namespace }}"
-                port: 80
+    definition: >-
+      {{ gateway_attach
+         | combine({'backend': ai_gateway_service_name, 'port': 80})
+         | gateway_httproute('inference-external',
+             gateway_name=envoy_gateway_name, gateway_namespace=envoy_gateway_namespace,
+             backend_namespace=ai_gateway_namespace)
+         | combine({'metadata': {'labels': {'app.kubernetes.io/managed-by': 'agentgateway-role'}}}, recursive=true) }}
   when: ai_gateway_create | bool
 
 # Allow the edge HTTPRoute (in envoy_gateway_namespace) to target the ai-gateway

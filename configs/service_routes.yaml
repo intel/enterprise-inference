@@ -1,0 +1,29 @@
+---
+# =============================================================================
+# Service Routing Registry — enterprise-inference's own services
+# =============================================================================
+# How the services this repo installs are exposed through the platform's Envoy
+# Gateway. Merged with every other repo's registry by the ai-solutions
+# installer, which fails if two repos claim the same service, subdomain or
+# path. Field reference: ai-solutions configs/service_routes.yaml. A role
+# publishes its service by including envoy_gateway's attach.yaml.
+# =============================================================================
+service_routes:
+  # The unified inference API (auth_provider: keycloak, gateway JWT).
+  inference:
+    path: /inference
+    subdomain: inference
+    service: ai-gateway
+    port: 80
+    namespace: envoy-gateway-system
+    prefix: strip
+
+  # Base path is compiled into the stock image (NEXT_PUBLIC_BASE_PATH), so it is
+  # internal-only in path mode unless pinned to a subdomain.
+  langfuse:
+    path: /langfuse
+    subdomain: langfuse
+    service: langfuse-web
+    port: 3000
+    namespace: langfuse
+    prefix: none
