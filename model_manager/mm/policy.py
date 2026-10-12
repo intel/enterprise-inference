@@ -6,11 +6,14 @@ from typing import Any
 from mm.k8s import K8sClient
 from mm.ui import abort, info, warn
 
-# Import existing nri_policy directly
+# Import nri_policy from scripts
 try:
-    from mm import nri_policy  # If packaged or in path
-except ImportError:
     import nri_policy
+except ImportError:
+    try:
+        from scripts import nri_policy
+    except ImportError:
+        from mm import nri_policy
 
 class CpuPolicyManager:
     def __init__(self, k8s: K8sClient):
