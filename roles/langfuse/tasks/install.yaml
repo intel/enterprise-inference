@@ -532,6 +532,14 @@
 
 # ── Gateway integration ───────────────────────────────────────────────────────
 
+- name: "langfuse | Attach Langfuse to the gateway"
+  ansible.builtin.include_role:
+    name: envoy_gateway
+    tasks_from: attach.yaml
+  vars:
+    gateway_attach_service: langfuse
+  when: gateway_create | bool and langfuse_route.published
+
 - name: "langfuse | Create HTTPRoute"
   when: gateway_create | bool and langfuse_route.published
   kubernetes.core.k8s:

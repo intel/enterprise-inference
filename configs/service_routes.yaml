@@ -17,3 +17,13 @@ service_routes:
     port: 80
     namespace: envoy-gateway-system
     prefix: strip
+
+  # Base path is compiled into the stock image (NEXT_PUBLIC_BASE_PATH), so it is
+  # internal-only in path mode unless pinned to a subdomain.
+  langfuse:
+    path: /langfuse
+    subdomain: langfuse
+    service: langfuse-web
+    port: 3000
+    namespace: langfuse
+    prefix: none
