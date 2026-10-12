@@ -531,6 +531,15 @@
 
 # ── Gateway integration ───────────────────────────────────────────────────────
 
+- name: "langfuse | Publish the langfuse host"
+  ansible.builtin.include_role:
+    name: gateway_listener
+  vars:
+    gateway_listener_name: langfuse
+    gateway_listener_namespace: "{{ langfuse_namespace }}"
+    gateway_listener_hosts: [{name: langfuse, hostname: "{{ langfuse_hostname }}"}]
+  when: gateway_create | bool
+
 - name: "langfuse | Create HTTPRoute"
   when: gateway_create | bool
   kubernetes.core.k8s:
@@ -543,9 +552,7 @@
         namespace: "{{ langfuse_namespace }}"
       spec:
         parentRefs:
-          - name: "{{ gateway_name | default('eg-gateway') }}"
-            namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
-            sectionName: https
+          - "{{ gateway_listener_ref | combine({'sectionName': 'langfuse'}) }}"
         hostnames:
           - "{{ langfuse_hostname }}"
         rules:

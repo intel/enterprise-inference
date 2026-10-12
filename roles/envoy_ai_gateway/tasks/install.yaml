@@ -290,6 +290,17 @@
 # ClusterIP service, not this route. Publishing inference.<domain> in litellm
 # mode would expose an unauthenticated bypass around LiteLLM.
 
+- name: "envoy_ai_gateway | Publish the inference host"
+  ansible.builtin.include_role:
+    name: gateway_listener
+  vars:
+    gateway_listener_name: inference
+    gateway_listener_namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
+    gateway_listener_hosts: [{name: inference, hostname: "{{ inference_hostname }}"}]
+  when:
+    - ai_gateway_create | bool
+    - auth_provider | default('keycloak') == 'keycloak'
+
 - name: "envoy_ai_gateway | Create external inference HTTPRoute (eg-gateway → ai-gateway)"
   kubernetes.core.k8s:
     state: present
@@ -305,9 +316,7 @@
         hostnames:
           - "{{ inference_hostname }}"
         parentRefs:
-          - name: "{{ envoy_gateway_name | default('eg-gateway') }}"
-            namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
-            sectionName: https
+          - "{{ gateway_listener_ref | combine({'sectionName': 'inference'}) }}"
         rules:
           - matches:
               - path:
@@ -333,6 +342,18 @@
     namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
   # Absent on any install that was never in keycloak mode — not an error.
   failed_when: false
+  when:
+    - ai_gateway_create | bool
+    - auth_provider | default('keycloak') != 'keycloak'
+
+- name: "envoy_ai_gateway | Unpublish the inference host when not keycloak"
+  ansible.builtin.include_role:
+    name: gateway_listener
+    tasks_from: remove.yaml
+  vars:
+    gateway_listener_name: inference
+    gateway_listener_namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
+    gateway_listener_hosts: [{name: inference, hostname: "{{ inference_hostname }}"}]
   when:
     - ai_gateway_create | bool
     - auth_provider | default('keycloak') != 'keycloak'

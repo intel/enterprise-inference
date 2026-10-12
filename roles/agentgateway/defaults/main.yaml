@@ -30,8 +30,9 @@ agentgateway_wait_timeout: "300s"
 agentgateway_inference_extension_enabled: true
 
 # --- Gateway API CRDs (agentgateway needs the standard channel) ---
-# Kept in step with the version pulled by other roles; applied server-side.
-agentgateway_gateway_api_version: "v1.5.0"
+# Only applied when absent (agentgateway as the sole gateway); with the
+# ai-solutions platform, envoy_gateway owns them. Same version it ships.
+agentgateway_gateway_api_version: "v1.6.1"
 agentgateway_gateway_api_manifest: >-
   https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ agentgateway_gateway_api_version }}/standard-install.yaml
 

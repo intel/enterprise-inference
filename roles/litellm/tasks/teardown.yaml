@@ -20,6 +20,15 @@
     namespace: "{{ litellm_namespace }}"
   failed_when: false
 
+- name: "litellm | Unpublish the litellm host"
+  ansible.builtin.include_role:
+    name: gateway_listener
+    tasks_from: remove.yaml
+  vars:
+    gateway_listener_name: litellm
+    gateway_listener_namespace: "{{ litellm_namespace }}"
+    gateway_listener_hosts: [{name: litellm, hostname: "{{ litellm_hostname }}"}]
+
 - name: "litellm | teardown | Remove SecurityPolicy"
   kubernetes.core.k8s:
     state: absent

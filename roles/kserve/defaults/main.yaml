@@ -68,7 +68,7 @@ kserve_llmisvc_tokenizer_image: "ghcr.io/llm-d/llm-d-uds-tokenizer:vllm-v0.19.1"
 #   enable AI integration (extensionManager, backendResources: InferencePool).
 #   These must match the versions used by the envoy_gateway role.
 # ---------------------------------------------------------------------------
-kserve_envoy_gateway_version: "1.7.1"
+kserve_envoy_gateway_version: "{{ envoy_gateway_version | default('1.9.2') }}"
 kserve_envoy_gateway_namespace: "envoy-gateway-system"
 kserve_envoy_gateway_helm_repo: "oci://docker.io/envoyproxy/gateway-helm"
 kserve_envoy_ai_controller_namespace: "envoy-ai-gateway-system"

@@ -412,6 +412,15 @@
         if litellm_hsts_enabled | default(true) | bool else []
       }}
 
+- name: "litellm | Publish the litellm host"
+  ansible.builtin.include_role:
+    name: gateway_listener
+  vars:
+    gateway_listener_name: litellm
+    gateway_listener_namespace: "{{ litellm_namespace }}"
+    gateway_listener_hosts: [{name: litellm, hostname: "{{ litellm_hostname }}"}]
+  when: gateway_create | bool
+
 - name: "litellm | Create HTTPRoute"
   when: gateway_create | bool
   kubernetes.core.k8s:
@@ -424,9 +433,7 @@
         namespace: "{{ litellm_namespace }}"
       spec:
         parentRefs:
-          - name: "{{ gateway_name | default('eg-gateway') }}"
-            namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
-            sectionName: https
+          - "{{ gateway_listener_ref | combine({'sectionName': 'litellm'}) }}"
         hostnames:
           - "{{ litellm_hostname }}"
         rules:

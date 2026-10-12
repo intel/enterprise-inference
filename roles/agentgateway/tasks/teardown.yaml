@@ -103,6 +103,15 @@
         state: absent
       failed_when: false
 
+    - name: "agentgateway | Unpublish the inference host"
+      ansible.builtin.include_role:
+        name: gateway_listener
+        tasks_from: remove.yaml
+      vars:
+        gateway_listener_name: inference
+        gateway_listener_namespace: "{{ envoy_gateway_namespace }}"
+        gateway_listener_hosts: [{name: inference, hostname: "{{ inference_hostname }}"}]
+
     - name: "agentgateway | Delete AI Gateway resource"
       kubernetes.core.k8s:
         api_version: gateway.networking.k8s.io/v1

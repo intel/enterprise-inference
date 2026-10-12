@@ -20,6 +20,15 @@
     namespace: "{{ langfuse_namespace }}"
   failed_when: false
 
+- name: "langfuse | Unpublish the langfuse host"
+  ansible.builtin.include_role:
+    name: gateway_listener
+    tasks_from: remove.yaml
+  vars:
+    gateway_listener_name: langfuse
+    gateway_listener_namespace: "{{ langfuse_namespace }}"
+    gateway_listener_hosts: [{name: langfuse, hostname: "{{ langfuse_hostname }}"}]
+
 - name: "langfuse | teardown | Remove SecurityPolicy"
   kubernetes.core.k8s:
     state: absent

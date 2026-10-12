@@ -1,0 +1,7 @@
+---
+galaxy_info:
+  author: Intel Corporation
+  description: Publish a solution's hosts on the platform gateway (ListenerSet)
+  license: Apache-2.0
+  min_ansible_version: "2.17"
+dependencies: []
