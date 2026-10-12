@@ -1,4 +1,8 @@
 ---
+- name: "litellm | Detect platform"
+  ansible.builtin.include_role:
+    name: inference_platform
+
 - name: "litellm | Dispatch action: {{ component_action | default('install') }}"
   ansible.builtin.include_tasks: "{{ component_action | default('install') }}.yaml"
   when: >-

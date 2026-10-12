@@ -1,0 +1,108 @@
+---
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+# =============================================================================
+# Platforms and their probes come from the registry (see its header for the
+# fields). Same rules as model-manager's lib/platform.sh:
+#   - checked in registry order, first match wins, no match → kubernetes
+#   - a probe error before a match fails the run: unreachable / Unauthorized /
+#     Forbidden says nothing about the platform, and a wrong guess would take
+#     the paths that break it.
+# Read-only: discovery GETs and `kubectl version`, nothing is created.
+# =============================================================================
+- name: "inference_platform | Load platform registry"
+  ansible.builtin.set_fact:
+    _ip_platforms: "{{ (lookup('file', inference_platform_registry) | from_yaml).platforms }}"
+
+- name: "inference_platform | Validate platform registry"
+  ansible.builtin.assert:
+    that:
+      - item.name is defined
+      - item.probe.api is defined or item.probe.version is defined
+    fail_msg: "Platform '{{ item.name | default('?') }}' in {{ inference_platform_registry }} needs a name and a probe (api or version)."
+    quiet: true
+  loop: "{{ _ip_platforms }}"
+  loop_control:
+    label: "{{ item.name | default('?') }}"
+
+- name: "inference_platform | Validate inference_platform"
+  ansible.builtin.assert:
+    that: inference_platform in _ip_valid
+    fail_msg: "inference_platform='{{ inference_platform }}' is invalid. Valid: {{ _ip_valid | join(' | ') }}."
+    quiet: true
+  vars:
+    _ip_valid: "{{ ['auto', 'kubernetes'] + (_ip_platforms | map(attribute='name') | list) }}"
+
+- name: "inference_platform | Probe platform APIs"
+  ansible.builtin.command:
+    argv: [kubectl, get, --raw, "{{ item.probe.api }}", --request-timeout=15s]
+  loop: "{{ _ip_platforms | selectattr('probe.api', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _ip_api
+  changed_when: false
+  failed_when: false
+  # Read-only, so it must also run under --check; skipped, the verdict is wrong.
+  check_mode: false
+  when: inference_platform == 'auto'
+
+- name: "inference_platform | Read server version"
+  ansible.builtin.command:
+    cmd: kubectl version -o json --request-timeout=15s
+  register: _ip_version
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - inference_platform == 'auto'
+    - _ip_platforms | selectattr('probe.version', 'defined') | list | length > 0
+
+# Walk the registry in order. Verdict is a platform name, or "!<reason>" for
+# a probe error, or empty when nothing matched.
+- name: "inference_platform | Decide platform"
+  ansible.builtin.set_fact:
+    _ip_verdict: >-
+      {%- set ns = namespace(verdict='') -%}
+      {%- for p in _ip_platforms -%}
+        {%- if not ns.verdict -%}
+          {%- if p.probe.api is defined -%}
+            {%- set r = _ip_api.results | selectattr('item.name', 'equalto', p.name) | first -%}
+            {%- if r.rc == 0 -%}
+              {%- set ns.verdict = p.name -%}
+            {%- elif '(NotFound)' not in r.stderr -%}
+              {%- set ns.verdict = '!' ~ p.name ~ ': ' ~ (r.stderr | trim) -%}
+            {%- endif -%}
+          {%- elif _ip_version.rc != 0 -%}
+            {%- set ns.verdict = '!' ~ p.name ~ ': ' ~ (_ip_version.stderr | trim) -%}
+          {%- elif (_ip_version.stdout | from_json).serverVersion.gitVersion is search(p.probe.version) -%}
+            {%- set ns.verdict = p.name -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.verdict }}
+  when: inference_platform == 'auto'
+
+- name: "inference_platform | Fail when the platform cannot be determined"
+  ansible.builtin.fail:
+    msg: >-
+      Could not detect the cluster platform (probe for {{ _ip_verdict[1:] }}).
+      Fix cluster access (kubectl get nodes), or set inference_platform to a
+      platform name in config.inference.yaml.
+  when:
+    - inference_platform == 'auto'
+    - _ip_verdict is match('!')
+
+- name: "inference_platform | Record platform"
+  ansible.builtin.set_fact:
+    inference_platform_resolved: >-
+      {{ inference_platform if inference_platform != 'auto'
+         else (_ip_verdict or 'kubernetes') }}
+
+- name: "inference_platform | Announce platform"
+  ansible.builtin.debug:
+    msg: "Platform: {{ _ip_label }} ({{ 'detected' if inference_platform == 'auto' else 'set by inference_platform' }})"
+  vars:
+    # Plain Kubernetes is the fallback, not a registry entry.
+    _ip_label: >-
+      {{ _ip_platforms | selectattr('name', 'equalto', inference_platform_resolved)
+         | map(attribute='label') | first | default('Kubernetes') }}

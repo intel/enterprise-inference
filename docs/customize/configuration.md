@@ -225,6 +225,7 @@ Disabling NFD means those affinity rules cannot be satisfied.
 | `MM_CONFIG` | Path to the model catalog (`models.yaml`) |
 | `MM_GLOBAL_CONFIG` | Path to the platform's `global_config.yaml` |
 | `MM_INFERENCE_HOSTNAME` | Override the resolved endpoint hostname in either auth mode |
+| `MM_PLATFORM` | Skip platform detection: `kubernetes` or a name from `model_manager/platforms.yaml` (e.g. `openshift`) |
 | `MM_CPU_POLICY` | Override `kubernetes_cpu_policy` for one invocation |
 | `MM_NRI_ENABLED` | Set `false` to skip NRI CPU-pinning annotations |
 | `MM_NRI_PREFLIGHT` | `warn` — report a capacity shortfall but proceed |

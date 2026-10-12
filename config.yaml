@@ -7,6 +7,13 @@
 # via:  -e @ext/enterprise.ai-inference/config.yaml
 # =============================================================================
 
+# --- Platform ---
+# Detected from the cluster before any inference role runs, using the platform
+# registry in model_manager/platforms.yaml (add new platforms there).
+# Detection fails rather than guess if the cluster cannot be read.
+# Set to skip detection.
+# inference_platform: "auto"             # auto | kubernetes | <registry name, e.g. openshift>
+
 # --- Keycloak (realm & client owned by this solution) ---
 keycloak_realm: "inference"
 keycloak_client_id: "inference-client"

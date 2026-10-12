@@ -1,3 +1,7 @@
 ---
+- name: "llm_services | Detect platform"
+  ansible.builtin.include_role:
+    name: inference_platform
+
 - name: "llm_services | Dispatch action: {{ component_action }}"
   ansible.builtin.include_tasks: "{{ component_action }}.yaml"

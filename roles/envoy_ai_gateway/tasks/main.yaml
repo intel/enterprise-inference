@@ -1,3 +1,7 @@
 ---
+- name: "envoy_ai_gateway | Detect platform"
+  ansible.builtin.include_role:
+    name: inference_platform
+
 - name: "envoy_ai_gateway | Dispatch action: {{ component_action }}"
   ansible.builtin.include_tasks: "{{ component_action }}.yaml"
