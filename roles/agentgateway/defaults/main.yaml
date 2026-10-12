@@ -49,7 +49,12 @@ ai_gateway_namespace: "{{ kserve_llmisvc_namespace | default('llm-inference') }}
 ai_gateway_service_name: "ai-gateway"
 
 # External inference hostname (eg-gateway TLS listener → ai-gateway).
-inference_hostname: "inference.{{ base_domain_name | default('inference-example.com') }}"
+# Host from the inference entry in configs/service_routes.yaml (see attach.yaml).
+inference_hostname: >-
+  {{ ('inference' | service_route(routing_mode | default('subdomain'),
+                                  base_domain_name | default('inference-example.com'),
+                                  service_routes | default({}),
+                                  service_route_overrides | default({}))).host }}
 
 # Edge gateway to bridge from (must match the envoy_gateway role).
 envoy_gateway_name: "eg-gateway"
