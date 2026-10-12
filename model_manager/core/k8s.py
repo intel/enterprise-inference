@@ -1,6 +1,6 @@
 import json
 import os
-import subprocess
+import subprocess  # nosec B404
 from typing import Any
 
 from .ui import abort, err, ok
@@ -22,7 +22,7 @@ class K8sClient:
     def run(self, *args: str, check: bool = False, capture_output: bool = True) -> subprocess.CompletedProcess[str]:
         cmd = self._cmd(*args)
         try:
-            res = subprocess.run(cmd, text=True, capture_output=capture_output, check=check)
+            res = subprocess.run(cmd, text=True, capture_output=capture_output, check=check)  # nosec B603
             return res
         except subprocess.CalledProcessError as e:
             if check:
@@ -44,19 +44,19 @@ class K8sClient:
 
     def apply_ssa(self, manifest: str, field_manager: str = "model-manager") -> bool:
         cmd = self._cmd("apply", "--server-side", f"--field-manager={field_manager}", "--force-conflicts", "-f", "-")
-        res = subprocess.run(cmd, input=manifest, text=True, capture_output=True)
+        res = subprocess.run(cmd, input=manifest, text=True, capture_output=True)  # nosec B603
         if res.returncode != 0:
             abort(f"Server-side apply failed:\n{res.stderr}")
         return True
 
     def diff_ssa(self, manifest: str, field_manager: str = "model-manager") -> int:
         cmd = self._cmd("diff", "--server-side", f"--field-manager={field_manager}", "--force-conflicts", "-f", "-")
-        res = subprocess.run(cmd, input=manifest, text=True, capture_output=True)
+        res = subprocess.run(cmd, input=manifest, text=True, capture_output=True)  # nosec B603
         return res.returncode
 
     def apply(self, manifest: str) -> bool:
         cmd = self._cmd("apply", "-f", "-")
-        res = subprocess.run(cmd, input=manifest, text=True, capture_output=True)
+        res = subprocess.run(cmd, input=manifest, text=True, capture_output=True)  # nosec B603
         if res.returncode != 0:
             abort(f"kubectl apply failed:\n{res.stderr}")
         return True

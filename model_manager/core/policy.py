@@ -102,10 +102,8 @@ class CpuPolicyManager:
                     opts = cfg.get("kubeletconfig", {}).get("cpuManagerPolicyOptions", {})
                     if opts.get("full-pcpus-only") == "true" and cpu_int % 2 != 0:
                         abort(f"kubelet-static on node '{probe_node}' has full-pcpus-only=true enabled: CPU request must be a multiple of whole physical cores (even number), got cpu={cpu_int}.")
-                except Exception:
-                    pass
-        elif self.policy == "nri-balloons":
-            pass
+                except (json.JSONDecodeError, KeyError) as e:
+                    warn(f"Could not parse kubelet config from node '{probe_node}': {e}")
         return cpu_int
 
     def build_annotations(self, cpu: int, tp_size: int, node: str, kind: str) -> tuple[dict[str, str], int]:

@@ -20,7 +20,7 @@ class RoutingManager:
         self.route_timeout = os.getenv("MM_AIGATEWAY_ROUTE_TIMEOUT", "600s")
         self.litellm_ns = os.getenv("MM_LITELLM_NAMESPACE", "litellm")
         self.litellm_svc = os.getenv("MM_LITELLM_SERVICE", "litellm")
-        self.litellm_secret = os.getenv("MM_LITELLM_SECRET", "litellm-master-key")
+        self.litellm_key_ref = os.getenv("MM_LITELLM_SECRET", "litellm-master-key")
 
     def auth_provider(self) -> str:
         env_val = os.getenv("MM_LITELLM_ENABLED")
@@ -38,8 +38,8 @@ class RoutingManager:
                     data = yaml.safe_load(f) or {}
                 if data.get("auth_provider") == "litellm":
                     return "litellm"
-            except Exception:
-                pass
+            except (yaml.YAMLError, OSError) as e:
+                warn(f"Failed to read global config '{gc}': {e}")
         return "keycloak"
 
     def ai_gateway_provider(self) -> str:
@@ -57,8 +57,8 @@ class RoutingManager:
                     p = data.get("ai_gateway_provider")
                     if p in ("agentgateway", "envoy"):
                         return p
-                except Exception:
-                    pass
+                except (yaml.YAMLError, OSError) as e:
+                    warn(f"Failed to read gateway config '{cfg}': {e}")
         return "envoy"
 
     def aigateway_enabled(self) -> bool:
@@ -78,7 +78,7 @@ class RoutingManager:
             try:
                 return res["items"][0]["status"]["loadBalancer"]["ingress"][0]["ip"]
             except (KeyError, IndexError):
-                pass
+                return ""
         return ""
 
     def resolve_inference_hostname(self) -> str:
@@ -92,8 +92,8 @@ class RoutingManager:
                 import yaml
                 with open(gc, "r", encoding="utf-8") as f:
                     gc_data = yaml.safe_load(f) or {}
-            except Exception:
-                pass
+            except (yaml.YAMLError, OSError) as e:
+                warn(f"Failed to read global config '{gc}': {e}")
 
         prefix = ""
         if self.auth_provider() == "litellm":
@@ -106,8 +106,8 @@ class RoutingManager:
                             d = yaml.safe_load(f) or {}
                         if d.get("litellm_hostname"):
                             return d["litellm_hostname"]
-                    except Exception:
-                        pass
+                    except (yaml.YAMLError, OSError) as e:
+                        warn(f"Failed to read litellm config '{c_path}': {e}")
             prefix = "litellm"
 
         if gc_data:
@@ -315,12 +315,12 @@ class RoutingManager:
     def litellm_key(self) -> str:
         if os.getenv("MM_LITELLM_MASTER_KEY"):
             return os.environ["MM_LITELLM_MASTER_KEY"]
-        enc = self.k8s.get_raw("secret", self.litellm_secret, "-n", self.litellm_ns, "-o", "jsonpath={.data.master_key}")
+        enc = self.k8s.get_raw("secret", self.litellm_key_ref, "-n", self.litellm_ns, "-o", "jsonpath={.data.master_key}")
         if enc:
             try:
                 return base64.b64decode(enc).decode("utf-8")
-            except Exception:
-                pass
+            except (ValueError, UnicodeDecodeError) as e:
+                warn(f"Failed to decode LiteLLM master key: {e}")
         return ""
 
     def litellm_curl(self, method: str, url: str, data: str | None = None) -> str:

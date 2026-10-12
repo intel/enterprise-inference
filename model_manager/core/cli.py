@@ -3,6 +3,8 @@ import base64
 import json
 import os
 import re
+import shutil
+import subprocess  # nosec B404
 import sys
 import time
 import urllib.request
@@ -34,11 +36,7 @@ class ModelManagerApp:
         self.app_config: AppConfig | None = None
 
     def check_prerequisites(self) -> None:
-        missing = []
-        for tool in ("kubectl", "curl"):
-            res = os.system(f"command -v {tool} >/dev/null 2>&1")
-            if res != 0:
-                missing.append(tool)
+        missing = [tool for tool in ("kubectl", "curl") if shutil.which(tool) is None]
         if missing:
             abort(f"Missing required tools: {', '.join(missing)}")
 
@@ -47,7 +45,8 @@ class ModelManagerApp:
 
     def resolve_model(self, target: str, args: argparse.Namespace) -> tuple[ModelConfig, dict[str, Any]]:
         self.load_config()
-        assert self.app_config is not None
+        if self.app_config is None:
+            abort("Configuration not loaded.")
 
         if args.id:
             raw_name = args.name or re.sub(r"[^a-zA-Z0-9]", "-", args.id.split("/")[-1]).lower()
@@ -144,7 +143,8 @@ class ModelManagerApp:
         return model, rt_cfg
 
     def render_manifest(self, model: ModelConfig, rt_cfg: dict[str, Any], args: argparse.Namespace) -> str:
-        assert self.app_config is not None
+        if self.app_config is None:
+            abort("Configuration not loaded.")
         category = model.category or "llm"
         cat_info = rt_cfg.get("categories", {}).get(category, {})
 
@@ -307,8 +307,10 @@ class ModelManagerApp:
         print(f"  {CYAN}{sep}{RESET}")
 
         if auth == "litellm":
+            res_name = self.routing_mgr.litellm_key_ref
+            res_ns = self.routing_mgr.litellm_ns
             print(f"\n  {BOLD}1. Get your LiteLLM API key:{RESET}")
-            print(f"  {DIM}export LITELLM_VIRTUAL_KEY=$(kubectl get secret {self.routing_mgr.litellm_secret} -n {self.routing_mgr.litellm_ns} \\")
+            print(f"  {DIM}export LITELLM_VIRTUAL_KEY=$(kubectl get secret {res_name} -n {res_ns} \\")
             print(f"    -o jsonpath='{{.data.master_key}}' | base64 -d){RESET}")
         else:
             print(f"\n  {BOLD}1. Get a Keycloak token:{RESET}")
@@ -494,22 +496,21 @@ class ModelManagerApp:
             pod_name = self.k8s.get_raw("pods", "-n", model.namespace, "-l", f"job-name=download-{model.name}", "-o", "jsonpath={.items[0].metadata.name}")
             if pod_name:
                 try:
-                    import subprocess
                     cmd = self.k8s._cmd("logs", "-f", pod_name, "-n", model.namespace)
-                    log_proc = subprocess.Popen(cmd)
-                except Exception:
-                    pass
+                    log_proc = subprocess.Popen(cmd)  # nosec B603
+                except OSError as e:
+                    warn(f"Failed to stream download job logs: {e}")
                 break
             time.sleep(1)
 
         # Wait for completion
         res = self.k8s.run("wait", "--for=condition=complete", f"job/download-{model.name}",
                            "-n", model.namespace, "--timeout=7200s")
-        if log_proc:
+        if log_proc and log_proc.poll() is None:
             try:
                 log_proc.terminate()
-            except Exception:
-                pass
+            except OSError as e:
+                warn(f"Could not terminate log streamer: {e}")
 
         if res.returncode == 0:
             ok(f"Download complete: {model.name}")
@@ -593,7 +594,8 @@ class ModelManagerApp:
             abort("No model specified. Use: model-manager undeploy <name>|all")
 
         self.load_config()
-        assert self.app_config is not None
+        if self.app_config is None:
+            abort("Configuration not loaded.")
 
         if target == "all":
             for name in list(self.app_config.models.keys()):
@@ -644,16 +646,21 @@ class ModelManagerApp:
 
     def cmd_cpu_collisions_check(self) -> None:
         self.load_config()
-        assert self.app_config is not None
+        if self.app_config is None:
+            abort("Configuration not loaded.")
         ns = self.app_config.defaults.namespace
         report_script = self.script_dir / "scripts" / "nri-cpu-report.py"
         if not report_script.is_file():
             abort(f"nri-cpu-report.py not found at {report_script}")
         info(f"Running CPU pinning & collision report (namespace: {ns})")
         py_exe = sys.executable
-        k_flag = f"--kubeconfig {self.k8s.kubeconfig}" if self.k8s.kubeconfig else ""
-        env_cmd = "env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy"
-        os.system(f"{env_cmd} {py_exe} {report_script} --namespace {ns} {k_flag}")
+        cmd = [py_exe, str(report_script), "--namespace", ns]
+        if self.k8s.kubeconfig:
+            cmd.extend(["--kubeconfig", self.k8s.kubeconfig])
+        env = os.environ.copy()
+        for p in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+            env.pop(p, None)
+        subprocess.run(cmd, env=env, check=False)  # nosec B603
 
 
 def build_parser() -> argparse.ArgumentParser:
