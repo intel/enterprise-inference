@@ -435,11 +435,13 @@
         hostnames:
           - "{{ gateway_listener_publish.host }}"
         # One host per service: exact paths. Path mode: one rule per path under
-        # litellm_path, rewritten to the path LiteLLM serves.
+        # litellm_path, rewritten to the path LiteLLM serves; the shared host's
+        # cookies are dropped (the API takes virtual keys).
         rules: >-
           {%- set out = [] -%}
           {%- set hdrs = {'type': 'ResponseHeaderModifier', 'responseHeaderModifier': {'set': litellm_route_headers}} -%}
           {%- set backend = [{'name': 'litellm', 'port': 4000}] -%}
+          {%- set nocookie = {'type': 'RequestHeaderModifier', 'requestHeaderModifier': {'remove': ['Cookie']}} -%}
           {%- if gateway_listener_publish.mode == 'subdomain' -%}
           {%- set m = [] -%}
           {%- for p in litellm_public_paths -%}{%- set _ = m.append({'path': {'type': 'Exact', 'value': p}}) -%}{%- endfor -%}
@@ -447,7 +449,7 @@
           {%- else -%}
           {%- for p in litellm_public_paths -%}
           {%- set _ = out.append({'matches': [{'path': {'type': 'Exact', 'value': litellm_path ~ p}}],
-                                  'filters': [hdrs, {'type': 'URLRewrite', 'urlRewrite': {'path': {'type': 'ReplaceFullPath', 'replaceFullPath': p}}}],
+                                  'filters': [hdrs, nocookie, {'type': 'URLRewrite', 'urlRewrite': {'path': {'type': 'ReplaceFullPath', 'replaceFullPath': p}}}],
                                   'backendRefs': backend}) -%}
           {%- endfor -%}
           {%- endif -%}

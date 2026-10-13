@@ -2,7 +2,7 @@
 # =============================================================================
 # gateway_listener — grant an apex path to a namespace (path mode)
 # =============================================================================
-# Inputs: see defaults (gateway_listener_namespace, _path, _route, _cookies).
+# Inputs: see defaults (gateway_listener_namespace, gateway_listener_path).
 
 - name: "gateway_listener | apex path | Validate {{ gateway_listener_path }}"
   ansible.builtin.assert:
@@ -47,23 +47,3 @@
     definition:
       metadata:
         labels: "{{ {gateway_apex_label_key: gateway_apex_label_value} }}"
-
-# One origin serves every path here, so a Path=/ cookie reaches every backend.
-# The route forwards only its own cookies; the browser boundary is unchanged.
-- name: "gateway_listener | apex path | Cookie allowlist for {{ gateway_listener_route }}"
-  kubernetes.core.k8s:
-    state: "{{ 'absent' if '*' in gateway_listener_cookies else 'present' }}"
-    definition:
-      apiVersion: gateway.envoyproxy.io/v1alpha1
-      kind: EnvoyExtensionPolicy
-      metadata:
-        name: "{{ gateway_listener_route }}-cookies"
-        namespace: "{{ gateway_listener_namespace }}"
-      spec:
-        targetRefs:
-          - group: gateway.networking.k8s.io
-            kind: HTTPRoute
-            name: "{{ gateway_listener_route }}"
-        lua:
-          - type: Inline
-            inline: "{{ lookup('ansible.builtin.template', 'cookie-allowlist.lua.j2') }}"

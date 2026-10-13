@@ -14,15 +14,13 @@ gateway_apex_label_key: "gateway.ai-solutions.intel.com/apex-routes"
 gateway_apex_label_value: "allowed"
 gateway_path_grants_configmap: "gateway-path-grants"   # key: path without '/' ('/'->'.'), value: namespace
 
-# Inputs: name, owning namespace, [{name, hostname}] for subdomain mode, and
-# the apex path, route and cookie allowlist ('name*' = prefix, ['*'] = all)
-# for path mode. gateway_listener_mode overrides routing_mode.
+# Inputs: name, owning namespace, [{name, hostname}] for subdomain mode and the
+# apex path for path mode; gateway_listener_mode overrides routing_mode. In path
+# mode services share one origin: scope cookies to the path (APIs drop them).
 gateway_listener_name: ""
 gateway_listener_namespace: ""
 gateway_listener_hosts: []
 gateway_listener_path: ""
-gateway_listener_route: "{{ gateway_listener_name }}"
-gateway_listener_cookies: []
 gateway_listener_mode: ""
 _gl_mode: "{{ gateway_listener_mode | default(routing_mode | default('subdomain'), true) }}"
 _gl_key: "{{ '_root' if gateway_listener_path == '/' else gateway_listener_path[1:] | replace('/', '.') }}"
