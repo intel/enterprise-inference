@@ -72,6 +72,9 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
   {GREEN}MM_PREFLIGHT{RESET}          'warn' ⇒ report placement failures, don't block
   {GREEN}MM_SKIP_PREFLIGHT{RESET}     1 ⇒ skip the placement pre-flight entirely
   {GREEN}MM_INFERENCE_HOSTNAME{RESET} Override inference gateway hostname
+  {GREEN}MM_INFERENCE_GATEWAY_SVC_NS{RESET}
+                        Namespace of the AI Gateway Service LiteLLM calls
+                        (default: MM_INFERENCE_GATEWAY_NS, else envoy-gateway-system)
 
 {BOLD}{CYAN}CPU policies:{RESET}
   {GREEN}nri-balloons{RESET}    (default) NRI balloons plugin — NUMA-aware balloons sized

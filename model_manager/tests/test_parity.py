@@ -43,6 +43,10 @@ BE = {"MM_CPU_POLICY": "best-effort"}
 NRI = {"MM_CPU_POLICY": "nri-balloons"}
 # Legacy computed LiteLLM's api_base even with LiteLLM disabled, warning about it.
 NO_LITELLM_URL = (r"^\[WARN \]  AI Gateway service 'ai-gateway' not found.*\n", "")
+# --help documents MM_INFERENCE_GATEWAY_SVC_NS, which is new.
+HELP_SVC_NS = (r"^(  MM_INFERENCE_HOSTNAME .*\n)",
+               r"\1  MM_INFERENCE_GATEWAY_SVC_NS\n                        Namespace of the AI Gateway Service LiteLLM calls\n"
+               r"                        (default: MM_INFERENCE_GATEWAY_NS, else envoy-gateway-system)\n")
 
 
 def case(name, *args, env=None, k8s=(), catalog=None, deviations=()):
@@ -95,9 +99,9 @@ CASES = [
     case("fx-bad-env", "deploy", "badenv", "--dry-run", env=BE, catalog=FIXTURE),
     case("fx-bad-template", "deploy", "badtpl", "--dry-run", env=BE, catalog=FIXTURE),
     # CLI surface and validation errors.
-    case("no-args"),
-    case("help", "--help"),
-    case("help-command", "help"),
+    case("no-args", deviations=[HELP_SVC_NS]),
+    case("help", "--help", deviations=[HELP_SVC_NS]),
+    case("help-command", "help", deviations=[HELP_SVC_NS]),
     case("version", "version"),
     case("version-flag", "-v"),
     case("unknown-option", "deploy", "qwen3-0-6b", "--bogus"),
