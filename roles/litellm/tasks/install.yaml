@@ -313,7 +313,7 @@
               tag: "{{ litellm_valkey_tag }}"
             auth:
               enabled: true
-              existingSecret: litellm-redis-auth
+              existingSecret: litellm-redis-auth  # checkov:skip=CKV_SECRET_6: Secret name, not a value
               existingSecretPasswordKey: password
             networkPolicy:
               enabled: false
