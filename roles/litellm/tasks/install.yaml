@@ -120,29 +120,6 @@
               pod-security.kubernetes.io/warn: "restricted"
       when: enforce_pss | default(false) | bool
 
-    # ReferenceGrant allows Envoy Gateway SecurityPolicy (in gateway namespace)
-    # to reference the LiteLLM service (in litellm namespace) for extAuth.
-    # Must be created after namespace exists — moved here from envoy_gateway role.
-    - name: "litellm | Create ReferenceGrant for Envoy Gateway extAuth"
-      when: auth_provider | default('keycloak') == 'litellm' and gateway_create | bool
-      kubernetes.core.k8s:
-        state: present
-        definition:
-          apiVersion: gateway.networking.k8s.io/v1beta1
-          kind: ReferenceGrant
-          metadata:
-            name: envoy-to-litellm
-            namespace: "{{ litellm_namespace }}"
-          spec:
-            from:
-              - group: gateway.envoyproxy.io
-                kind: SecurityPolicy
-                namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
-            to:
-              - group: ""
-                kind: Service
-                name: litellm
-
     # ── PostgreSQL credentials ────────────────────────────────────────────────
     # The postgresql role creates the DB and copies credentials as
     # 'litellm-db-secret' into this namespace.
@@ -255,7 +232,7 @@
                   name: litellm-master-key
                   key: master_key
             - name: LANGFUSE_HOST
-              value: "{{ 'http://langfuse-web.' + (langfuse_namespace | default('langfuse')) + '.svc.cluster.local:3000' if (langfuse_enabled | default(false) | bool or litellm_enabled | default(false) | bool or (auth_provider | default('keycloak')) == 'litellm') else '' }}"
+              value: "{{ 'http://langfuse-web.' + (langfuse_namespace | default('langfuse')) + '.svc.cluster.local:3000' if _litellm_langfuse | bool else '' }}"
           # ── prisma query engine seed ──────────────────────────────────────
           # The prisma engines are baked into the image under /root, which uid
           # 1000 cannot read, so the proxy cannot reach them. An emptyDir over
@@ -289,8 +266,8 @@
                 host: "litellm-redis-primary.{{ litellm_namespace }}.svc.cluster.local"
                 port: 6379
                 ttl: "{{ litellm_cache_ttl | default(600) }}"
-              success_callback: "{{ ['langfuse'] if (langfuse_enabled | default(false) | bool or litellm_enabled | default(false) | bool or (auth_provider | default('keycloak')) == 'litellm') else [] }}"
-              failure_callback: "{{ ['langfuse'] if (langfuse_enabled | default(false) | bool or litellm_enabled | default(false) | bool or (auth_provider | default('keycloak')) == 'litellm') else [] }}"
+              success_callback: "{{ ['langfuse'] if _litellm_langfuse | bool else [] }}"
+              failure_callback: "{{ ['langfuse'] if _litellm_langfuse | bool else [] }}"
             model_list: []
             router_settings:
               routing_strategy: least-busy
@@ -397,6 +374,17 @@
       delay: 5
 
 # ── Gateway integration (runs even on re-runs to stay idempotent) ─────────────
+
+# The gateway no longer delegates auth to LiteLLM (extAuth), so the grant
+# older releases created for it is removed.
+- name: "litellm | Remove the Envoy Gateway extAuth ReferenceGrant"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: gateway.networking.k8s.io/v1beta1
+    kind: ReferenceGrant
+    name: envoy-to-litellm
+    namespace: "{{ litellm_namespace }}"
+  failed_when: false
 
 # HSTS on the public LiteLLM host: browsers/SDKs must never send the UI login
 # password or a virtual key over plaintext :80 before the 301 to HTTPS. Built

@@ -20,7 +20,8 @@ components:
 
   - name: keycloak_config
     layer: inference
-    enabled: "{{ keycloak_enabled | default(auth_provider | default('keycloak') != 'litellm') | bool }}"
+    # Both auth modes: people sign in through Keycloak; the gateway trusts its JWTs.
+    enabled: "{{ keycloak_enabled | default(true) | bool }}"
     depends_on: []
 
   - name: envoy_ai_gateway
@@ -45,7 +46,8 @@ components:
 
   - name: langfuse
     layer: inference
-    enabled: "{{ litellm_enabled | default(auth_provider | default('keycloak') == 'litellm') | bool }}"
+    # Optional tracing for LiteLLM: on with LiteLLM unless langfuse_enabled: false.
+    enabled: "{{ (litellm_enabled | default(auth_provider | default('keycloak') == 'litellm') | bool) and (langfuse_enabled | default(true) | bool) }}"
     depends_on: [litellm]
 
   - name: llm_services

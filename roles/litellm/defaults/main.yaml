@@ -118,3 +118,5 @@ litellm_multi_node_resources:
     cpu: "4"
     memory: "4Gi"
 
+# Send traces to Langfuse unless it is turned off (langfuse_enabled: false).
+_litellm_langfuse: "{{ langfuse_enabled | default(true) | bool }}"

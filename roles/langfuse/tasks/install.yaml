@@ -576,7 +576,7 @@
 # ── Wire LiteLLM → Langfuse callback ─────────────────────────────────────────
 
 - name: "langfuse | Configure LiteLLM to send traces to Langfuse"
-  when: litellm_enabled | default(false) | bool or (auth_provider | default('keycloak')) == 'litellm'
+  when: litellm_enabled | default(auth_provider | default('keycloak') == 'litellm') | bool
   block:
     - name: "langfuse | Get Langfuse public key from API"
       ansible.builtin.uri:
