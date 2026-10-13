@@ -20,7 +20,7 @@ def env(key: str, default: str) -> str:
 
 GATEWAY, GATEWAY_NS = env("MM_AI_GATEWAY_NAME", "ai-gateway"), env("MM_AI_GATEWAY_NS", "llm-inference")
 LITELLM_NS, LITELLM_SVC = env("MM_LITELLM_NAMESPACE", "litellm"), env("MM_LITELLM_SERVICE", "litellm")
-LITELLM_SECRET = env("MM_LITELLM_SECRET", "litellm-master-key")
+LITELLM_KEY_REF = env("MM_LITELLM_SECRET", "litellm-master-key")
 TRUE, FALSE = ("true", "1", "yes"), ("false", "0", "no")
 
 
@@ -151,7 +151,7 @@ def _litellm_base() -> str:
 def _litellm_key() -> str:
     if os.environ.get("MM_LITELLM_MASTER_KEY"):
         return os.environ["MM_LITELLM_MASTER_KEY"]
-    encoded = k8s.out("get", "secret", LITELLM_SECRET, "-n", LITELLM_NS, "-o", "jsonpath={.data.master_key}")
+    encoded = k8s.out("get", "secret", LITELLM_KEY_REF, "-n", LITELLM_NS, "-o", "jsonpath={.data.master_key}")
     try:
         return base64.b64decode(encoded).decode().strip()
     except (binascii.Error, UnicodeDecodeError):
@@ -264,7 +264,7 @@ def print_endpoints(m: Model) -> None:
     print(f"  {CYAN}{sep}{RESET}")
     if litellm:
         print(f"\n  {BOLD}1. Get your LiteLLM API key:{RESET}")
-        print(f"  {DIM}export LITELLM_VIRTUAL_KEY=$(kubectl get secret {LITELLM_SECRET} -n {LITELLM_NS} \\")
+        print(f"  {DIM}export LITELLM_VIRTUAL_KEY=$(kubectl get secret {LITELLM_KEY_REF} -n {LITELLM_NS} \\")
         print(f"    -o jsonpath='{{.data.master_key}}' | base64 -d){RESET}")
     else:
         print(f"\n  {BOLD}1. Get a Keycloak token:{RESET}")
