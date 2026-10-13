@@ -163,9 +163,15 @@ def _litellm(method: str, url: str, payload: dict | None = None) -> str | None:
     key = _litellm_key()
     curl = ["curl", "-sf", "-X", method, "-H", "Content-Type: application/json", *(["-H", "@-"] if key else []),
             *(["-d", json.dumps(payload)] if payload else []), url]
-    r = k8s.run("run", f"mm-curl-{secrets.token_hex(4)}", "--rm", "-i", "--quiet", "--restart=Never",
-                f"--image={env('MM_CURL_IMAGE', 'curlimages/curl:8.12.1')}", "-n", LITELLM_NS, "--", *curl,
-                stdin=f"Authorization: Bearer {key}\n" if key else "")
+    pod = f"mm-curl-{secrets.token_hex(4)}"
+    # Restricted Pod Security; curlimages/curl runs as the non-root curl_user (uid 100).
+    restricted = {"apiVersion": "v1", "spec": {
+        "securityContext": {"runAsNonRoot": True, "runAsUser": 100, "seccompProfile": {"type": "RuntimeDefault"}},
+        "containers": [{"name": pod, "securityContext": {"allowPrivilegeEscalation": False,
+                                                         "capabilities": {"drop": ["ALL"]}}}]}}
+    r = k8s.run("run", pod, "--rm", "-i", "--quiet", "--restart=Never", "-n", LITELLM_NS,
+                f"--image={env('MM_CURL_IMAGE', 'curlimages/curl:8.12.1')}", "--override-type=strategic",
+                f"--overrides={json.dumps(restricted)}", "--", *curl, stdin=f"Authorization: Bearer {key}\n" if key else "")
     return r.stdout[:r.stdout.rfind("}") + 1] if r.returncode == 0 else None
 
 
