@@ -6,7 +6,7 @@ import os
 import re
 from pathlib import Path
 
-from .config import Catalog, Model, mm_path, pick, text
+from .config import Catalog, Model, gateway_ref, mm_path, pick, text
 from .ui import abort
 
 CHAT_TEMPLATE_DIR = "/etc/chat-template"
@@ -127,10 +127,10 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
     }
     if m.kind == "LLMInferenceService":
         inline = inline_chat_template(m)
+        gateway, gateway_ns = gateway_ref()
         return render(
             template("llm-inference-service.yaml"), **common, IMAGE=m.image,
-            GATEWAY_NAME=os.environ.get("MM_INFERENCE_GATEWAY") or "ai-gateway",
-            GATEWAY_NAMESPACE=os.environ.get("MM_INFERENCE_GATEWAY_NS") or "llm-inference",
+            GATEWAY_NAME=gateway, GATEWAY_NAMESPACE=gateway_ns,
             CHAT_TEMPLATE_MOUNT=(f"        volumeMounts:\n          - name: chat-template\n"
                                  f"            mountPath: {CHAT_TEMPLATE_DIR}\n            readOnly: true\n") if inline else "",
             CHAT_TEMPLATE_VOLUME=(f"    volumes:\n      - name: chat-template\n        configMap:\n"

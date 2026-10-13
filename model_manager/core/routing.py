@@ -9,18 +9,11 @@ import secrets
 import time
 
 from . import k8s
-from .config import MM_DIR, Model, config_value, global_config, inference_config
+from .config import MM_DIR, Model, config_value, env, gateway_ref, gateway_service, global_config, inference_config
 from .renderer import render, template
 from .ui import BOLD, CYAN, DIM, RESET, info, ok, warn
 
 
-def env(key: str, default: str) -> str:
-    return os.environ.get(key) or default
-
-
-GATEWAY, GATEWAY_NS = env("MM_AI_GATEWAY_NAME", "ai-gateway"), env("MM_AI_GATEWAY_NS", "llm-inference")
-LITELLM_NS, LITELLM_SVC = env("MM_LITELLM_NAMESPACE", "litellm"), env("MM_LITELLM_SERVICE", "litellm")
-LITELLM_KEY_REF = env("MM_LITELLM_SECRET", "litellm-master-key")
 TRUE, FALSE = ("true", "1", "yes"), ("false", "0", "no")
 
 
@@ -87,7 +80,8 @@ def register(m: Model) -> None:
     info(f"Creating {description}")
     k8s.apply(render(template(tmpl), MODEL_NAME=m.name, NAMESPACE=m.namespace, POOL_NAME=f"{m.name}-inference-pool",
                      SERVICE_NAME=svc, SERVICE_PORT=port, ROUTE_TIMEOUT=env("MM_AIGATEWAY_ROUTE_TIMEOUT", "600s"),
-                     AI_GATEWAY_NAME=GATEWAY, AI_GATEWAY_NAMESPACE=GATEWAY_NS), ssa=True)
+                     AI_GATEWAY_NAME=env("MM_AI_GATEWAY_NAME", "ai-gateway"),
+                     AI_GATEWAY_NAMESPACE=env("MM_AI_GATEWAY_NS", "llm-inference")), ssa=True)
 
 
 def deregister(m: Model) -> None:
@@ -108,12 +102,12 @@ def patch_pool_status(m: Model) -> None:
     ref = "jsonpath={.spec.router.gateway.refs[0].%s}"
     gw = k8s.out("get", "llminferenceservice", m.name, "-n", m.namespace, "-o", ref % "name")
     gw_ns = k8s.out("get", "llminferenceservice", m.name, "-n", m.namespace, "-o", ref % "namespace")
+    ref_gw, ref_ns = gateway_ref()
     controller = ("agentgateway.dev/agentgateway" if gateway_provider() == "agentgateway"
                   else "gateway.envoyproxy.io/gatewayclass-controller")
     status = {"parents": [{
         "parentRef": {"group": "gateway.networking.k8s.io", "kind": "Gateway",
-                      "name": gw or env("MM_INFERENCE_GATEWAY", "ai-gateway"),
-                      "namespace": gw_ns or env("MM_INFERENCE_GATEWAY_NS", "llm-inference")},
+                      "name": gw or ref_gw, "namespace": gw_ns or ref_ns},
         "controllerName": controller,
         "conditions": [{"type": "Accepted", "status": "True", "reason": "Accepted", "message": "Patched by model-manager",
                         "lastTransitionTime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}]}]}
@@ -134,24 +128,34 @@ def _internal_url(m: Model) -> str:
     if m.kind == "InferenceService":
         port = k8s.out("get", "svc", f"{m.name}-predictor", "-n", m.namespace, "-o", "jsonpath={.spec.ports[0].port}")
         return f"http://{m.name}-predictor.{m.namespace}.svc.cluster.local:{port or 80}/v1"
-    gw_ns, gw = env("MM_INFERENCE_GATEWAY_NS", "envoy-gateway-system"), env("MM_INFERENCE_GATEWAY", "ai-gateway")
+    gw, gw_ns = gateway_service()
     if k8s.out("get", "svc", gw, "-n", gw_ns, "-o", "jsonpath={.metadata.name}"):
         return f"http://{gw}.{gw_ns}.svc.cluster.local/{m.namespace}/{m.name}/v1"
     warn(f"AI Gateway service '{gw}' not found in {gw_ns} — LiteLLM will bypass gateway for {m.name}")
     return f"http://{m.name}-kserve-workload-svc.{m.namespace}.svc.cluster.local:8000/v1"
 
 
+def litellm_ns() -> str:
+    return env("MM_LITELLM_NAMESPACE", "litellm")
+
+
+def litellm_key_ref() -> str:
+    """Name of the Secret holding the master key (the value itself is never printed)."""
+    return env("MM_LITELLM_SECRET", "litellm-master-key")
+
+
 def _litellm_base() -> str:
     if os.environ.get("MM_LITELLM_URL"):
         return os.environ["MM_LITELLM_URL"].rstrip("/")
-    port = k8s.out("get", "svc", LITELLM_SVC, "-n", LITELLM_NS, "-o", "jsonpath={.spec.ports[0].port}")
-    return f"http://{LITELLM_SVC}.{LITELLM_NS}.svc.cluster.local:{port}" if port else ""
+    svc, ns = env("MM_LITELLM_SERVICE", "litellm"), litellm_ns()
+    port = k8s.out("get", "svc", svc, "-n", ns, "-o", "jsonpath={.spec.ports[0].port}")
+    return f"http://{svc}.{ns}.svc.cluster.local:{port}" if port else ""
 
 
 def _litellm_key() -> str:
     if os.environ.get("MM_LITELLM_MASTER_KEY"):
         return os.environ["MM_LITELLM_MASTER_KEY"]
-    encoded = k8s.out("get", "secret", LITELLM_KEY_REF, "-n", LITELLM_NS, "-o", "jsonpath={.data.master_key}")
+    encoded = k8s.out("get", "secret", litellm_key_ref(), "-n", litellm_ns(), "-o", "jsonpath={.data.master_key}")
     try:
         return base64.b64decode(encoded).decode().strip()
     except (binascii.Error, UnicodeDecodeError):
@@ -169,10 +173,10 @@ def _litellm(method: str, url: str, payload: dict | None = None) -> str | None:
         "securityContext": {"runAsNonRoot": True, "runAsUser": 100, "seccompProfile": {"type": "RuntimeDefault"}},
         "containers": [{"name": pod, "securityContext": {"allowPrivilegeEscalation": False,
                                                          "capabilities": {"drop": ["ALL"]}}}]}}
-    r = k8s.run("run", pod, "--rm", "-i", "--quiet", "--restart=Never", "-n", LITELLM_NS,
+    r = k8s.run("run", pod, "--rm", "-i", "--quiet", "--restart=Never", "-n", litellm_ns(),
                 f"--image={env('MM_CURL_IMAGE', 'curlimages/curl:8.12.1')}", "--override-type=strategic",
                 f"--overrides={json.dumps(restricted)}", "--", *curl, stdin=f"Authorization: Bearer {key}\n" if key else "")
-    return r.stdout[:r.stdout.rfind("}") + 1] if r.returncode == 0 else None
+    return r.stdout if r.returncode == 0 else None  # --quiet: stdout is curl's response only
 
 
 def _litellm_ids(name: str, base: str) -> list[str]:
@@ -264,7 +268,7 @@ def print_endpoints(m: Model) -> None:
     print(f"  {CYAN}{sep}{RESET}")
     if litellm:
         print(f"\n  {BOLD}1. Get your LiteLLM API key:{RESET}")
-        print(f"  {DIM}export LITELLM_VIRTUAL_KEY=$(kubectl get secret {LITELLM_KEY_REF} -n {LITELLM_NS} \\")
+        print(f"  {DIM}export LITELLM_VIRTUAL_KEY=$(kubectl get secret {litellm_key_ref()} -n {litellm_ns()} \\")
         print(f"    -o jsonpath='{{.data.master_key}}' | base64 -d){RESET}")
     else:
         print(f"\n  {BOLD}1. Get a Keycloak token:{RESET}")

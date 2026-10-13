@@ -72,7 +72,7 @@ class NriBalloons(BestEffort):
             for line in NRI_FALLBACK_BOX.splitlines():
                 warn(line)
             return {f"{ANN}/type": "best-effort", f"{ANN}/reason": "nri-resolution-failed"}, m.cpu
-        nri_policy.detect_policy()
+        nri_policy.report_daemonset()
         anns = nri_policy.build_annotations(tp, m.kind)
         cpu = nri_policy.effective_cpu_request(int(m.cpu))
         if cpu > 0 and str(cpu) != m.cpu:

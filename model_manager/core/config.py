@@ -29,6 +29,22 @@ def mm_path(env: str, default: str) -> Path:
     return Path(os.environ.get(env) or MM_DIR / default)
 
 
+def env(key: str, default: str) -> str:
+    """Environment value; unset or empty falls back to the default, like bash ${VAR:-default}."""
+    return os.environ.get(key) or default
+
+
+def gateway_ref() -> tuple[str, str]:
+    """The Gateway an LLMInferenceService attaches its routes to (spec.router.gateway.refs)."""
+    return env("MM_INFERENCE_GATEWAY", "ai-gateway"), env("MM_INFERENCE_GATEWAY_NS", "llm-inference")
+
+
+def gateway_service() -> tuple[str, str]:
+    """That Gateway's in-cluster Service (LiteLLM's api_base), in the gateway controller's namespace."""
+    namespace = env("MM_INFERENCE_GATEWAY_SVC_NS", env("MM_INFERENCE_GATEWAY_NS", "envoy-gateway-system"))
+    return env("MM_INFERENCE_GATEWAY", "ai-gateway"), namespace
+
+
 def text(value: Any) -> str:
     """A YAML value as text, the way `jq -r` prints it (true, 8, 1.5)."""
     return value if isinstance(value, str) else json.dumps(value, separators=(",", ":"), ensure_ascii=False)

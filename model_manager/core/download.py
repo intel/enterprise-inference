@@ -78,8 +78,9 @@ def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
     if token:  # via stdin, so the token never appears in a process listing
         secret = k8s.run("create", "secret", "generic", "hf-token", "-n", m.namespace, "--from-file=token=/dev/stdin",
                          "--dry-run=client", "-o", "yaml", stdin=token)
-        if secret.returncode == 0:
-            k8s.run("apply", "-f", "-", stdin=secret.stdout)
+        if secret.returncode:  # otherwise the Job waits the full timeout for a missing Secret
+            abort(f"Cannot create the hf-token Secret: {secret.stderr.strip()}")
+        k8s.apply(secret.stdout, quiet=True)
 
     env = [("HOME", "/models"), ("HF_HOME", "/models/.hf-cache")]
     env_items = [f"            - name: {k}\n              value: {quote(v)}" for k, v in env]

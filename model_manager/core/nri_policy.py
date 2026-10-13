@@ -47,8 +47,8 @@ def _warn(msg: str) -> None:
 
 # ── kubectl wrapper ──────────────────────────────────────────────────────────
 
-def _kubectl(*args: str, ignore_errors: bool = False) -> str:
-    """Run kubectl and return stdout. Returns '' on error if ignore_errors."""
+def _kubectl(*args: str) -> str:
+    """Run kubectl and return stdout; '' on any error."""
     try:
         # "kubectl" is a fixed argv[0] resolved from the system executable
         # search path (no shell), and args originate from this module's own
@@ -58,18 +58,14 @@ def _kubectl(*args: str, ignore_errors: bool = False) -> str:
             capture_output=True, text=True, timeout=30,
             shell=False,
         )
-        if result.returncode != 0:
-            if ignore_errors:
-                return ""
-            return ""
-        return result.stdout.strip()
+        return result.stdout.strip() if result.returncode == 0 else ""
     except (OSError, subprocess.TimeoutExpired):
         return ""
 
 
 def _kubectl_json(*args: str) -> Any:
     """Run kubectl with -o json and parse the result."""
-    raw = _kubectl(*args, "-o", "json", ignore_errors=True)
+    raw = _kubectl(*args, "-o", "json")
     if not raw:
         return None
     try:
@@ -86,20 +82,12 @@ def _nri_balloons_installed() -> bool:
         "get", "daemonset", _NRI_BALLOONS_DS,
         "-n", _NRI_BALLOONS_NS,
         "-o", "name",
-        ignore_errors=True,
     )
     return bool(raw)
 
 
-def detect_policy(node: str = "") -> str:
-    """Detect the active CPU policy.
-
-    Currently only NRI balloons is supported. This function verifies that
-    the NRI DaemonSet is present and returns the policy string.
-
-    Returns: "nri-balloons" (always — this is the only supported policy).
-    Emits a warning if the NRI DaemonSet is not found.
-    """
+def report_daemonset() -> None:
+    """Log whether the NRI balloons DaemonSet is deployed; pods are annotated either way."""
     if _nri_balloons_installed():
         _info("Detected NRI balloons DaemonSet — using nri-balloons policy")
     else:
@@ -109,7 +97,6 @@ def detect_policy(node: str = "") -> str:
             "until the nri-resource-policy-balloons DaemonSet is deployed. "
             "Run the nri_cpu_balloons Ansible role to install it."
         )
-    return "nri-balloons"
 
 
 # ── Advanced mode + HT detection ────────────────────────────────────────────
@@ -120,7 +107,6 @@ def _read_nri_configmap_data() -> str:
         "get", "configmap", _NRI_POLICY_CONFIGMAP,
         "-n", _NRI_BALLOONS_NS,
         "-o", "jsonpath={.data.values\\.yaml}",
-        ignore_errors=True,
     )
     return raw or ""
 
@@ -237,7 +223,6 @@ def _node_label(node: str, label: str) -> str:
     return _kubectl(
         "get", "node", node,
         "-o", f"jsonpath={{.metadata.labels.{escaped}}}",
-        ignore_errors=True,
     )
 
 
@@ -245,7 +230,6 @@ def _node_allocatable_cpu(node: str) -> int:
     raw = _kubectl(
         "get", "node", node,
         "-o", "jsonpath={.status.allocatable.cpu}",
-        ignore_errors=True,
     )
     return _cpu_to_cores(raw)
 
@@ -321,7 +305,6 @@ def _reserved_cpus_count(node: str) -> int:
         "get", _BALLOONSPOLICY_CRD, policy_name,
         "-n", _NRI_BALLOONS_NS,
         "-o", "jsonpath={.spec.reservedResources.cpu}",
-        ignore_errors=True,
     )
     if not raw:
         # Try default policy
@@ -329,7 +312,6 @@ def _reserved_cpus_count(node: str) -> int:
             "get", _BALLOONSPOLICY_CRD, "default",
             "-n", _NRI_BALLOONS_NS,
             "-o", "jsonpath={.spec.reservedResources.cpu}",
-            ignore_errors=True,
         )
     if not raw:
         return 0
@@ -459,7 +441,6 @@ def _per_numa_capacity(node: str) -> list[int]:
     cap_raw = _kubectl(
         "get", "node", node,
         "-o", "jsonpath={.status.capacity.cpu}",
-        ignore_errors=True,
     )
     total_logical = _cpu_to_cores(cap_raw) if cap_raw else phys * 2
     per_numa = total_logical // numas
@@ -471,7 +452,6 @@ def _node_total_logical_cpu(node: str) -> int:
     raw = _kubectl(
         "get", "node", node,
         "-o", "jsonpath={.status.capacity.cpu}",
-        ignore_errors=True,
     )
     return _cpu_to_cores(raw) if raw else 0
 

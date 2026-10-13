@@ -1,6 +1,7 @@
 """model-manager CLI: deploy, undeploy and cpu-collisions-check."""
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -152,7 +153,7 @@ def parse_args(argv: list[str]) -> Options:
                 abort(f"{a} requires a value")
             i += 1
             value = argv[i]  # taken verbatim, so `--arg --max-model-len=4096` works
-            if a in ("--wait-timeout", "--replicas", "--tp") and not is_uint(value):
+            if a in ("--wait-timeout", "--replicas", "--tp") and not (is_uint(value) and int(value) > 0):
                 abort(f"{a} requires a positive integer, got: {value}")
             if a == "--label":
                 _check_label(value)
@@ -178,7 +179,7 @@ def _engine_cli_args(o: Options) -> tuple[list[str], int]:
     for n, a in enumerate(args):
         if a == "--tensor-parallel-size" or a.startswith("--tensor-parallel-size="):
             tp = a.split("=", 1)[1] if "=" in a else (args[n + 1] if n + 1 < len(args) else "1")
-            if not is_uint(tp):
+            if not (is_uint(tp) and int(tp) > 0):
                 abort(f"--tensor-parallel-size requires a positive integer, got: {tp}")
             return args, int(tp)
     return args, 1
@@ -260,18 +261,28 @@ def _apply_chat_template(m: Model) -> None:
     k8s.apply(json.dumps(cm, indent=2, ensure_ascii=False) + "\n", quiet=True)
 
 
-def _spawn_reconciler(m: Model, timeout: int) -> Path:
-    """Finish routing/LiteLLM registration in the background once the model turns Ready."""
+def _spawn_reconciler(m: Model, timeout: int) -> tuple[Path, bool]:
+    """Finish routing/LiteLLM registration in the background once the model turns Ready.
+
+    The reconciler inherits an exclusive lock on its log, so a second no-wait deploy of the same
+    model finds it running and starts none (two would race on LiteLLM deregister/register).
+    Returns the log path and whether a reconciler was started.
+    """
     log = Path(os.environ.get("MM_RECONCILE_LOG_DIR") or tempfile.gettempdir()) / f"model-manager-reconcile-{m.name}.log"
     try:  # O_NOFOLLOW: never write through a symlink planted at this predictable path
-        fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        fd = os.open(log, os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     except OSError as e:
         abort(f"Cannot write {log} ({e.strerror}); re-run with --wait to finish routing for {m.name}.")
     with os.fdopen(fd, "w") as out:
+        try:
+            fcntl.flock(out, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return log, False
+        out.truncate()
         subprocess.Popen([str(MM_DIR / "model-manager"), "_reconcile", m.name, m.namespace, m.kind,  # nosec B603
                           "--wait-timeout", str(timeout)], stdin=subprocess.DEVNULL, stdout=out, stderr=out,
                          start_new_session=True)
-    return log
+    return log, True
 
 
 def deploy(o: Options, target: str) -> None:
@@ -331,8 +342,10 @@ def deploy(o: Options, target: str) -> None:
         if workload_ready(m) == "True":
             on_ready(m)
         else:
-            log = _spawn_reconciler(m, timeout)
+            log, started = _spawn_reconciler(m, timeout)
             info(f"{m.name} is starting in the background.")
+            if not started:
+                info("  A reconciler from an earlier deploy is still waiting for it; not starting another.")
             info(f"  {YELLOW}Model load + warmup can take a few minutes — try inference after a short while.{RESET}")
             info("  Registration with LiteLLM/gateway completes automatically once it is Ready."
                  if routing.litellm_enabled() else "  AI Gateway routing is reconciled automatically once it is Ready.")
