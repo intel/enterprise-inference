@@ -118,5 +118,6 @@ litellm_multi_node_resources:
     cpu: "4"
     memory: "4Gi"
 
-# Send traces to Langfuse unless it is turned off (langfuse_enabled: false).
+# Trace to Langfuse unless it is turned off (langfuse_enabled: false). The
+# langfuse role supplies host and keys and re-wires this when toggled later.
 _litellm_langfuse: "{{ langfuse_enabled | default(true) | bool }}"

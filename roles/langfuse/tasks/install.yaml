@@ -604,23 +604,10 @@
             LANGFUSE_SECRET_KEY: "{{ _langfuse_secret_key }}"
       failed_when: false
 
-    - name: "langfuse | Patch LiteLLM deployment to use Langfuse API keys"
-      kubernetes.core.k8s:
-        state: patched
-        api_version: apps/v1
-        kind: Deployment
-        name: litellm
-        namespace: "{{ litellm_namespace | default('litellm') }}"
-        definition:
-          spec:
-            template:
-              spec:
-                containers:
-                  - name: litellm
-                    envFrom:
-                      - secretRef:
-                          name: langfuse-api-keys
-      failed_when: false
+    - name: "langfuse | Wire LiteLLM tracing to Langfuse"
+      ansible.builtin.include_tasks: litellm_wiring.yaml
+      vars:
+        _lf_wire: true
 
 # ── Store credentials ─────────────────────────────────────────────────────────
 

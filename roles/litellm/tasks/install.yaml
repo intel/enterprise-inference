@@ -231,8 +231,6 @@
                 secretKeyRef:
                   name: litellm-master-key
                   key: master_key
-            - name: LANGFUSE_HOST
-              value: "{{ 'http://langfuse-web.' + (langfuse_namespace | default('langfuse')) + '.svc.cluster.local:3000' if _litellm_langfuse | bool else '' }}"
           # ── prisma query engine seed ──────────────────────────────────────
           # The prisma engines are baked into the image under /root, which uid
           # 1000 cannot read, so the proxy cannot reach them. An emptyDir over
