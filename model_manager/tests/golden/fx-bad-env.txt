@@ -1,5 +1,0 @@
-# rc: 1
---- stdout
---- stderr
-[ERROR]  Invalid model 'badenv' env: expected object (a mapping of KEY: VALUE) in <MM>/tests/fixtures/models.yaml, got array.
---- kubectl

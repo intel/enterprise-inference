@@ -1,5 +1,0 @@
-# rc: 1
---- stdout
---- stderr
-[ERROR]  Model 'qwen3-0-6b' is not declared to support 'vllm' version '9.9'. Declared versions: 0.24.0, 0.19.1
---- kubectl

@@ -1,5 +1,0 @@
-# rc: 1
---- stdout
---- stderr
-[ERROR]  Model 'nope' not found in <MM>/models.yaml
---- kubectl

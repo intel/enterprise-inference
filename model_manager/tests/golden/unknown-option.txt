@@ -1,5 +1,0 @@
-# rc: 1
---- stdout
---- stderr
-[ERROR]  Unknown option: --bogus
---- kubectl

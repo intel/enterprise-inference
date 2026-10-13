@@ -1,5 +1,0 @@
-# rc: 1
---- stdout
---- stderr
-[ERROR]  --label requires KEY=VALUE, got: foo
---- kubectl

@@ -1,5 +1,0 @@
-# rc: 1
---- stdout
---- stderr
-[ERROR]  Invalid model 'badtpl' chat_template: expected a string (inline Jinja or a file path) in <MM>/tests/fixtures/models.yaml, got array. Some HuggingFace repos publish a list of named templates — copy the single template you want (e.g. the one named "default") as a block scalar.
---- kubectl

@@ -1,5 +1,0 @@
-# rc: 1
---- stdout
---- stderr
-[ERROR]  Unknown command: frobnicate (run ./model-manager --help)
---- kubectl

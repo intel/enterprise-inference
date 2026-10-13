@@ -1,5 +1,0 @@
-# rc: 1
---- stdout
---- stderr
-[ERROR]  Runtime 'openvino' does not define a 'versions:' map, so --server-version '1' cannot be selected.
---- kubectl

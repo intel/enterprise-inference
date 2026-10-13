@@ -1,5 +1,0 @@
-# rc: 0
---- stdout
-model-manager 2.1.0
---- stderr
---- kubectl

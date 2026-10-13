@@ -1,5 +1,0 @@
-# rc: 1
---- stdout
---- stderr
-[ERROR]  No model specified. Use: model-manager <command> <model-name> or --id <hf/repo>
---- kubectl

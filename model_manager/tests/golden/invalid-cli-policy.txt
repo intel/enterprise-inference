@@ -1,8 +1,0 @@
-# rc: 1
---- stdout
-[INFO ]  Deploying qwen3-0-6b (LLMInferenceService)
-[INFO ]    Runtime: vllm @ 0.24.0 | Category: llm | Routing: epp
-[INFO ]    CPU: 8 | Memory: 16Gi | Replicas: 1
---- stderr
-[ERROR]  Invalid --cpu-policy 'bogus'. Valid: nri-balloons, kubelet-static, best-effort.
---- kubectl

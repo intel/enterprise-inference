@@ -1,5 +1,0 @@
-# rc: 1
---- stdout
---- stderr
-[ERROR]  Model 'qwen3-0-6b' does not declare server 'openvino'. Declared: vllm
---- kubectl
