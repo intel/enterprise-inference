@@ -415,6 +415,7 @@
     gateway_listener_name: litellm
     gateway_listener_namespace: "{{ litellm_namespace }}"
     gateway_listener_hosts: [{name: litellm, hostname: "{{ litellm_hostname }}"}]
+    gateway_listener_path: "{{ litellm_path }}"
   when: gateway_create | bool
 
 # API: only the exact inference paths reach LiteLLM, HTTPS listener only.
@@ -430,23 +431,27 @@
         namespace: "{{ litellm_namespace }}"
       spec:
         parentRefs:
-          - "{{ gateway_listener_ref | combine({'sectionName': 'litellm'}) }}"
+          - "{{ gateway_listener_ref }}"
         hostnames:
-          - "{{ litellm_hostname }}"
-        rules:
-          - matches: >-
-              {%- set out = [] -%}
-              {%- for p in litellm_public_paths -%}
-              {%- set _ = out.append({'path': {'type': 'Exact', 'value': p}}) -%}
-              {%- endfor -%}
-              {{ out }}
-            filters:
-              - type: ResponseHeaderModifier
-                responseHeaderModifier:
-                  set: "{{ litellm_route_headers }}"
-            backendRefs:
-              - name: litellm
-                port: 4000
+          - "{{ gateway_listener_publish.host }}"
+        # One host per service: exact paths. Path mode: one rule per path under
+        # litellm_path, rewritten to the path LiteLLM serves.
+        rules: >-
+          {%- set out = [] -%}
+          {%- set hdrs = {'type': 'ResponseHeaderModifier', 'responseHeaderModifier': {'set': litellm_route_headers}} -%}
+          {%- set backend = [{'name': 'litellm', 'port': 4000}] -%}
+          {%- if gateway_listener_publish.mode == 'subdomain' -%}
+          {%- set m = [] -%}
+          {%- for p in litellm_public_paths -%}{%- set _ = m.append({'path': {'type': 'Exact', 'value': p}}) -%}{%- endfor -%}
+          {%- set _ = out.append({'matches': m, 'filters': [hdrs], 'backendRefs': backend}) -%}
+          {%- else -%}
+          {%- for p in litellm_public_paths -%}
+          {%- set _ = out.append({'matches': [{'path': {'type': 'Exact', 'value': litellm_path ~ p}}],
+                                  'filters': [hdrs, {'type': 'URLRewrite', 'urlRewrite': {'path': {'type': 'ReplaceFullPath', 'replaceFullPath': p}}}],
+                                  'backendRefs': backend}) -%}
+          {%- endfor -%}
+          {%- endif -%}
+          {{ out }}
 
 # Programs authenticate with LiteLLM virtual keys, so the gateway's Keycloak
 # JWT default is overridden on the API route only.

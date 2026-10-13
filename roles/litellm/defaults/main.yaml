@@ -5,7 +5,8 @@
 # LiteLLM is an OpenAI-compatible proxy that adds virtual key management,
 # spend tracking, rate limiting, and model routing on top of inference backends.
 #
-# The API is published for programs on litellm.<domain>. Only
+# The API is published for programs on litellm.<domain> (<domain>/litellm in
+#   path mode). Only
 #   litellm_public_paths are routed; LiteLLM validates the virtual key. The
 #   admin UI and admin API are not published.
 #   Client → Envoy Gateway (TLS, path allowlist) → LiteLLM (key check) → KServe
@@ -20,9 +21,15 @@ litellm_valkey_tag: "8.0-alpine"                # valkey/valkey (official upstre
 # Gateway integration
 gateway_create: "{{ envoy_gateway_enabled | default(false) }}"
 litellm_hostname: "litellm.{{ base_domain_name | default('inference-example.com') }}"
-litellm_url: "https://{{ litellm_hostname }}"          # API base URL clients use (+ /v1)
+# Path mode (routing_mode: path): <base>/litellm, each public path rewritten.
+litellm_path: "/litellm"
+_litellm_path_mode: "{{ (routing_mode | default('subdomain')) == 'path' }}"
+litellm_url: >-
+  {{ 'https://' ~ (base_domain_name | default('inference-example.com')) ~ litellm_path
+     if _litellm_path_mode | bool else 'https://' ~ litellm_hostname }}
 
-# Exact paths published on the API route; anything else never reaches LiteLLM.
+# Exact paths published on the API route (under litellm_path in path mode);
+# anything else never reaches LiteLLM.
 litellm_public_paths:
   - /v1/chat/completions
   - /v1/completions

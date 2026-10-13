@@ -103,6 +103,7 @@
         gateway_listener_name: inference
         gateway_listener_namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
         gateway_listener_hosts: [{name: inference, hostname: "{{ inference_hostname }}"}]
+        gateway_listener_path: "{{ inference_path }}"
 
     - name: "envoy_ai_gateway | Find model-manager managed HTTPRoutes on ai-gateway"
       kubernetes.core.k8s_info:

@@ -1,6 +1,7 @@
 ---
-# Platform gateway contract (ai-solutions envoy_gateway). A solution publishes
-# its hosts in a ListenerSet in its own namespace; only these values are shared.
+# Platform gateway contract (ai-solutions envoy_gateway). Subdomain mode: a
+# ListenerSet in the solution's namespace. Path mode: a path grant on the apex
+# host. Only these values are shared.
 gateway_name: "eg-gateway"
 gateway_namespace: "envoy-gateway-system"
 gateway_tls_mode: "selfsigned"                # custom: use the platform certificate
@@ -9,11 +10,22 @@ gateway_issuer: "gateway-issuer"              # ClusterIssuer (selfsigned mode)
 gateway_listeners_label_key: "gateway.ai-solutions.intel.com/listeners"
 gateway_listeners_label_value: "allowed"
 gateway_hostnames_annotation: "gateway.ai-solutions.intel.com/hostnames"
+gateway_apex_label_key: "gateway.ai-solutions.intel.com/apex-routes"
+gateway_apex_label_value: "allowed"
+gateway_path_grants_configmap: "gateway-path-grants"   # key: path without '/' ('/'->'.'), value: namespace
 
-# Inputs: ListenerSet name, owning namespace and [{name, hostname}].
+# Inputs: name, owning namespace, [{name, hostname}] for subdomain mode, and
+# the apex path, route and cookie allowlist ('name*' = prefix, ['*'] = all)
+# for path mode. gateway_listener_mode overrides routing_mode.
 gateway_listener_name: ""
 gateway_listener_namespace: ""
 gateway_listener_hosts: []
+gateway_listener_path: ""
+gateway_listener_route: "{{ gateway_listener_name }}"
+gateway_listener_cookies: []
+gateway_listener_mode: ""
+_gl_mode: "{{ gateway_listener_mode | default(routing_mode | default('subdomain'), true) }}"
+_gl_key: "{{ '_root' if gateway_listener_path == '/' else gateway_listener_path[1:] | replace('/', '.') }}"
 
 _gl_secret: "{{ gateway_listener_name }}-listener-tls"
 _gl_cert_ref: >-

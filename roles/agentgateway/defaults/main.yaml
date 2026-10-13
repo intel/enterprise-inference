@@ -51,6 +51,11 @@ ai_gateway_service_name: "ai-gateway"
 
 # External inference hostname (eg-gateway TLS listener → ai-gateway).
 inference_hostname: "inference.{{ base_domain_name | default('inference-example.com') }}"
+# Path mode (routing_mode: path): <base>/inference, prefix stripped for the AI gateway.
+inference_path: "/inference"
+_inference_strip_prefix: >-
+  {{ [{'type': 'URLRewrite', 'urlRewrite': {'path': {'type': 'ReplacePrefixMatch', 'replacePrefixMatch': '/'}}}]
+     if (routing_mode | default('subdomain')) == 'path' else [] }}
 
 # Edge gateway to bridge from (must match the envoy_gateway role).
 envoy_gateway_name: "eg-gateway"

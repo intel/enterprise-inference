@@ -297,6 +297,7 @@
     gateway_listener_name: inference
     gateway_listener_namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
     gateway_listener_hosts: [{name: inference, hostname: "{{ inference_hostname }}"}]
+    gateway_listener_path: "{{ inference_path }}"
   when:
     - ai_gateway_create | bool
     - auth_provider | default('keycloak') == 'keycloak'
@@ -314,14 +315,16 @@
           app.kubernetes.io/managed-by: envoy-ai-gateway-role
       spec:
         hostnames:
-          - "{{ inference_hostname }}"
+          - "{{ gateway_listener_publish.host }}"
         parentRefs:
-          - "{{ gateway_listener_ref | combine({'sectionName': 'inference'}) }}"
+          - "{{ gateway_listener_ref }}"
         rules:
           - matches:
               - path:
                   type: PathPrefix
-                  value: /
+                  value: "{{ gateway_listener_publish.relative_path }}"
+            # Path mode: the AI gateway serves /v1/..., so strip /inference.
+            filters: "{{ _inference_strip_prefix }}"
             backendRefs:
               - name: "{{ ai_gateway_service_name }}"
                 namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
@@ -354,6 +357,7 @@
     gateway_listener_name: inference
     gateway_listener_namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
     gateway_listener_hosts: [{name: inference, hostname: "{{ inference_hostname }}"}]
+    gateway_listener_path: "{{ inference_path }}"
   when:
     - ai_gateway_create | bool
     - auth_provider | default('keycloak') != 'keycloak'

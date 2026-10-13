@@ -1,0 +1,53 @@
+---
+# =============================================================================
+# gateway_listener — remove a ListenerSet (reverse of listenerset.yaml)
+# =============================================================================
+
+- name: "gateway_listener | Delete ListenerSet and its certificate"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: "{{ item.api }}"
+    kind: "{{ item.kind }}"
+    name: "{{ item.name }}"
+    namespace: "{{ item.namespace }}"
+  loop:
+    - api: gateway.networking.k8s.io/v1
+      kind: ListenerSet
+      name: "{{ gateway_listener_name }}"
+      namespace: "{{ gateway_listener_namespace }}"
+    - api: cert-manager.io/v1
+      kind: Certificate
+      name: "{{ _gl_secret }}"
+      namespace: "{{ gateway_listener_namespace }}"
+    - api: v1
+      kind: Secret
+      name: "{{ _gl_secret }}"
+      namespace: "{{ gateway_listener_namespace }}"
+    - api: gateway.networking.k8s.io/v1beta1
+      kind: ReferenceGrant
+      name: "listenerset-{{ gateway_listener_namespace }}-{{ gateway_listener_name }}"
+      namespace: "{{ gateway_namespace }}"
+  loop_control:
+    label: "{{ item.kind }}/{{ item.name }}"
+  failed_when: false
+
+- name: "gateway_listener | Read namespace grant"
+  kubernetes.core.k8s_info:
+    kind: Namespace
+    name: "{{ gateway_listener_namespace }}"
+  register: _gl_ns
+
+- name: "gateway_listener | Revoke hosts from {{ gateway_listener_namespace }}"
+  vars:
+    _left: >-
+      {{ ((_gl_ns.resources[0].metadata.annotations | default({})).get(gateway_hostnames_annotation, '')).split(',')
+         | map('trim') | select | difference(gateway_listener_hosts | map(attribute='hostname')) | sort }}
+  kubernetes.core.k8s:
+    state: patched
+    kind: Namespace
+    name: "{{ gateway_listener_namespace }}"
+    definition:
+      metadata:
+        annotations: "{{ {gateway_hostnames_annotation: (_left | join(',')) if _left else None} }}"
+        labels: "{{ {gateway_listeners_label_key: gateway_listeners_label_value if _left else None} }}"
+  when: _gl_ns.resources | default([]) | length > 0

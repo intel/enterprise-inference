@@ -1,0 +1,24 @@
+-- Forward only the cookies this route owns ({{ gateway_listener_cookies | join(', ') or 'none' }}).
+local allow = { {% for c in gateway_listener_cookies %}{name = {{ c.rstrip('*') | to_json }}, prefix = {{ c.endswith('*') | lower }}}{{ ', ' if not loop.last }}{% endfor %} }
+
+local function allowed(name)
+  for _, a in ipairs(allow) do
+    if (a.prefix and name:sub(1, #a.name) == a.name) or name == a.name then return true end
+  end
+  return false
+end
+
+function envoy_on_request(handle)
+  local h = handle:headers()
+  local n = h:getNumValues("cookie")
+  if n == 0 then return end
+  local kept = {}
+  for i = 0, n - 1 do
+    for pair in (h:getAtIndex("cookie", i) or ""):gmatch("[^;]+") do
+      local c = pair:match("^%s*(.-)%s*$")
+      if c ~= "" and allowed(c:match("^[^=]*")) then kept[#kept + 1] = c end
+    end
+  end
+  h:remove("cookie")
+  if #kept > 0 then h:add("cookie", table.concat(kept, "; ")) end
+end

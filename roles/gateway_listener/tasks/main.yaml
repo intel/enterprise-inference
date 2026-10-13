@@ -1,154 +1,29 @@
 ---
 # =============================================================================
-# gateway_listener — publish hosts on the platform gateway (ListenerSet)
+# gateway_listener — publish a service in the current routing mode
 # =============================================================================
-# Grants the hosts to the namespace, issues its certificate and attaches a
-# ListenerSet. Routes then use gateway_listener_ref with sectionName set to the
-# listener name. Remove with tasks_from: remove.yaml.
+# subdomain: its hosts on their own listeners (listenerset.yaml)
+# path:      a path on the apex host (apex_path.yaml)
+# The other mode's objects are removed, so switching modes leaves nothing
+# stale. Sets gateway_listener_ref (route parent) and gateway_listener_publish
+# {mode, host, relative_path, frontend_url}. Remove with tasks_from: remove.yaml.
 
-- name: "gateway_listener | Validate input"
-  ansible.builtin.assert:
-    that:
-      - gateway_listener_name | length > 0
-      - gateway_listener_namespace | length > 0
-      - gateway_listener_hosts | length > 0
-      - gateway_listener_hosts | map(attribute='hostname') | select | list | length == gateway_listener_hosts | length
-    fail_msg: "gateway_listener needs gateway_listener_name, _namespace and _hosts [{name, hostname}]."
-    quiet: true
+- name: "gateway_listener | {{ gateway_listener_name ~ ' (' ~ _gl_mode ~ ')' }}"
+  ansible.builtin.include_tasks: "{{ _gl_file }}"
+  loop: "{{ ['listenerset.yaml', 'apex_path_remove.yaml'] if _gl_mode == 'subdomain'
+            else ['apex_path.yaml', 'listenerset_remove.yaml'] }}"
+  loop_control:
+    loop_var: _gl_file      # included files loop over item themselves
 
-- name: "gateway_listener | Read host grants"
-  kubernetes.core.k8s_info:
-    kind: Namespace
-  register: _gl_namespaces
-
-- name: "gateway_listener | Refuse hosts granted to another namespace"
+- name: "gateway_listener | Route parent for {{ gateway_listener_name }}"
   vars:
-    _hosts: "{{ gateway_listener_hosts | map(attribute='hostname') | list }}"
-    _taken: >-
-      {%- set out = [] -%}
-      {%- for ns in _gl_namespaces.resources if ns.metadata.name != gateway_listener_namespace -%}
-      {%- for h in (ns.metadata.annotations | default({})).get(gateway_hostnames_annotation, '').split(',') | map('trim') -%}
-      {%- if h in _hosts -%}{%- set _ = out.append(h ~ ' (' ~ ns.metadata.name ~ ')') -%}{%- endif -%}
-      {%- endfor -%}
-      {%- endfor -%}
-      {{ out }}
-  ansible.builtin.assert:
-    that: _taken | length == 0
-    fail_msg: "Host(s) already granted to another namespace: {{ _taken | join(', ') }}"
-    quiet: true
-
-- name: "gateway_listener | Grant hosts to {{ gateway_listener_namespace }}"
-  vars:
-    _ns: "{{ _gl_namespaces.resources | selectattr('metadata.name', 'eq', gateway_listener_namespace) | first | default({}) }}"
-    _current: >-
-      {{ (_ns.metadata.annotations | default({})).get(gateway_hostnames_annotation, '').split(',')
-         | map('trim') | select | list }}
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: v1
-      kind: Namespace
-      metadata:
-        name: "{{ gateway_listener_namespace }}"
-        labels: "{{ {gateway_listeners_label_key: gateway_listeners_label_value} }}"
-        annotations: >-
-          {{ {gateway_hostnames_annotation:
-              (_current + gateway_listener_hosts | map(attribute='hostname') | list) | unique | sort | join(',')} }}
-
-- name: "gateway_listener | Issue certificate"
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: cert-manager.io/v1
-      kind: Certificate
-      metadata:
-        name: "{{ _gl_secret }}"
-        namespace: "{{ gateway_listener_namespace }}"
-      spec:
-        secretName: "{{ _gl_secret }}"
-        issuerRef:
-          name: "{{ gateway_issuer }}"
-          kind: ClusterIssuer
-        dnsNames: "{{ gateway_listener_hosts | map(attribute='hostname') | list }}"
-  when: gateway_tls_mode == 'selfsigned'
-
-- name: "gateway_listener | Wait for certificate"
-  kubernetes.core.k8s_info:
-    api_version: cert-manager.io/v1
-    kind: Certificate
-    name: "{{ _gl_secret }}"
-    namespace: "{{ gateway_listener_namespace }}"
-  register: _gl_cert
-  until: >-
-    _gl_cert.resources | default([]) | length > 0 and
-    _gl_cert.resources[0].status.conditions | default([])
-      | selectattr('type', 'eq', 'Ready') | selectattr('status', 'eq', 'True') | list | length > 0
-  retries: 30
-  delay: 5
-  when: gateway_tls_mode == 'selfsigned'
-
-# Custom mode: the operator's certificate in the gateway namespace serves the
-# hosts, referenced across namespaces by this ListenerSet only.
-- name: "gateway_listener | Allow use of the operator certificate"
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: gateway.networking.k8s.io/v1beta1
-      kind: ReferenceGrant
-      metadata:
-        name: "listenerset-{{ gateway_listener_namespace }}-{{ gateway_listener_name }}"
-        namespace: "{{ gateway_namespace }}"
-      spec:
-        from:
-          - group: gateway.networking.k8s.io
-            kind: ListenerSet
-            namespace: "{{ gateway_listener_namespace }}"
-        to:
-          - group: ""
-            kind: Secret
-            name: "{{ gateway_tls_secret_name }}"
-  when: gateway_tls_mode == 'custom'
-
-- name: "gateway_listener | Apply ListenerSet"
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: gateway.networking.k8s.io/v1
-      kind: ListenerSet
-      metadata:
-        name: "{{ gateway_listener_name }}"
-        namespace: "{{ gateway_listener_namespace }}"
-      spec:
-        parentRef:
-          name: "{{ gateway_name }}"
-          namespace: "{{ gateway_namespace }}"
-        listeners: >-
-          {%- set out = [] -%}
-          {%- for l in gateway_listener_hosts -%}
-          {%- set _ = out.append({'name': l.name, 'hostname': l.hostname, 'port': 443, 'protocol': 'HTTPS',
-                                  'tls': {'mode': 'Terminate', 'certificateRefs': [_gl_cert_ref]},
-                                  'allowedRoutes': {'namespaces': {'from': 'Same'}}}) -%}
-          {%- endfor -%}
-          {{ out }}
-
-- name: "gateway_listener | Wait for ListenerSet to be programmed"
-  kubernetes.core.k8s_info:
-    api_version: gateway.networking.k8s.io/v1
-    kind: ListenerSet
-    name: "{{ gateway_listener_name }}"
-    namespace: "{{ gateway_listener_namespace }}"
-  register: _gl_status
-  until: >-
-    _gl_status.resources | default([]) | length > 0 and
-    _gl_status.resources[0].status.conditions | default([])
-      | selectattr('type', 'in', ['Accepted', 'Programmed']) | selectattr('status', 'eq', 'True') | list | length == 2
-  retries: 24
-  delay: 5
-
-- name: "gateway_listener | Route parent"
+    _host: "{{ gateway_listener_hosts[0].hostname if _gl_mode == 'subdomain' else base_domain_name }}"
   ansible.builtin.set_fact:
-    gateway_listener_ref:
-      group: gateway.networking.k8s.io
-      kind: ListenerSet
-      name: "{{ gateway_listener_name }}"
-      namespace: "{{ gateway_listener_namespace }}"
+    gateway_listener_ref: >-
+      {{ gateway_listener_ref | combine({'sectionName': gateway_listener_hosts[0].name}) if _gl_mode == 'subdomain'
+         else {'name': gateway_name, 'namespace': gateway_namespace, 'sectionName': 'https-apex'} }}
+    gateway_listener_publish:
+      mode: "{{ _gl_mode }}"
+      host: "{{ _host }}"
+      relative_path: "{{ '/' if _gl_mode == 'subdomain' else gateway_listener_path }}"
+      frontend_url: "https://{{ _host }}{{ '' if _gl_mode == 'subdomain' else gateway_listener_path }}"

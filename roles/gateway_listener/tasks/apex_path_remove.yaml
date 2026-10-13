@@ -1,0 +1,51 @@
+---
+# =============================================================================
+# gateway_listener — release an apex path grant (reverse of apex_path.yaml)
+# =============================================================================
+# Same inputs; no-op without a path. Tolerates missing objects.
+
+- name: "gateway_listener | apex path | Delete cookie allowlist of {{ gateway_listener_route }}"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: gateway.envoyproxy.io/v1alpha1
+    kind: EnvoyExtensionPolicy
+    name: "{{ gateway_listener_route }}-cookies"
+    namespace: "{{ gateway_listener_namespace }}"
+  failed_when: false
+  when: gateway_listener_path | length > 0
+
+- name: "gateway_listener | apex path | Read path grants"
+  kubernetes.core.k8s_info:
+    kind: ConfigMap
+    name: "{{ gateway_path_grants_configmap }}"
+    namespace: "{{ gateway_namespace }}"
+  register: _gl_grants
+  failed_when: false
+  when: gateway_listener_path | length > 0
+
+- name: "gateway_listener | apex path | Release {{ gateway_listener_path }}"
+  vars:
+    _data: "{{ (_gl_grants.resources | default([]) | first | default({})).data | default({}) }}"
+  when: gateway_listener_path | length > 0 and _data.get(_gl_key, '') == gateway_listener_namespace
+  kubernetes.core.k8s:
+    state: patched
+    kind: ConfigMap
+    name: "{{ gateway_path_grants_configmap }}"
+    namespace: "{{ gateway_namespace }}"
+    definition:
+      data: "{{ {_gl_key: None} }}"
+
+# Drop the apex label once the namespace holds no grant.
+- name: "gateway_listener | apex path | Drop the apex label of {{ gateway_listener_namespace }}"
+  vars:
+    _data: "{{ (_gl_grants.resources | default([]) | first | default({})).data | default({}) }}"
+    _left: "{{ _data | dict2items | rejectattr('key', 'eq', _gl_key) | selectattr('value', 'eq', gateway_listener_namespace) | list }}"
+  when: gateway_listener_path | length > 0 and _left | length == 0
+  kubernetes.core.k8s:
+    state: patched
+    kind: Namespace
+    name: "{{ gateway_listener_namespace }}"
+    definition:
+      metadata:
+        labels: "{{ {gateway_apex_label_key: None} }}"
+  failed_when: false

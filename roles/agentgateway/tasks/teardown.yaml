@@ -111,6 +111,7 @@
         gateway_listener_name: inference
         gateway_listener_namespace: "{{ envoy_gateway_namespace }}"
         gateway_listener_hosts: [{name: inference, hostname: "{{ inference_hostname }}"}]
+        gateway_listener_path: "{{ inference_path }}"
 
     - name: "agentgateway | Delete AI Gateway resource"
       kubernetes.core.k8s:

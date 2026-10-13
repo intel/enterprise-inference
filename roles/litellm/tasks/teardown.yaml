@@ -36,6 +36,7 @@
     gateway_listener_name: litellm
     gateway_listener_namespace: "{{ litellm_namespace }}"
     gateway_listener_hosts: [{name: litellm, hostname: "{{ litellm_hostname }}"}]
+    gateway_listener_path: "{{ litellm_path }}"
 
 - name: "litellm | teardown | Remove ConfigMaps"
   kubernetes.core.k8s:
