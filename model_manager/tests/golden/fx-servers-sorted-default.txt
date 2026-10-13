@@ -1,0 +1,52 @@
+# rc: 0
+--- stdout
+[INFO ]  Deploying multi (InferenceService)
+[INFO ]    Runtime: openvino | Category: llm | Routing: aigateway
+[INFO ]    CPU: 6 | Memory: 12Gi | Replicas: 2
+[INFO ]    CPU policy: best-effort
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: multi
+  namespace: ns1
+  labels:
+    app.kubernetes.io/name: multi
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  predictor:
+    annotations:
+      cpu-policy.model-manager.io/type: best-effort
+    minReplicas: 2
+    maxReplicas: 2
+    model:
+      modelFormat:
+        name: openvino
+      runtime: openvino-runtime
+      args: []
+      env: []
+      resources:
+        requests:
+          cpu: 6
+          memory: 12Gi
+        limits:
+          cpu: 6
+          memory: 12Gi
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+          - ALL
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      volumeMounts:
+        - name: model-storage
+          mountPath: /models
+    volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: model-store
+--- stderr
+--- kubectl

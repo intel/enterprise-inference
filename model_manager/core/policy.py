@@ -1,265 +1,223 @@
+"""CPU pinning policies. Precedence: --cpu-policy > MM_CPU_POLICY > MM_NRI_ENABLED=false > cluster auto-detect."""
+from __future__ import annotations
+
+import contextlib
+import io
 import json
 import math
 import os
 import re
-import sys
-from pathlib import Path
-from typing import Any
 
-from .k8s import K8sClient
+from . import k8s, nri_policy
+from .config import Model, is_uint, pick, text, truthy
 from .ui import abort, info, warn
 
-# Import nri_policy from scripts directory
-scripts_dir = str(Path(__file__).resolve().parent.parent / "scripts")
-if scripts_dir not in sys.path:
-    sys.path.insert(0, scripts_dir)
-import nri_policy
+ANN = "cpu-policy.model-manager.io"
+NRI_FALLBACK_BOX = """\
+┌─────────────────────────────────────────────────────────────────────┐
+│  NRI BALLOONS FALLBACK — Model will deploy WITHOUT CPU pinning      │
+├─────────────────────────────────────────────────────────────────────┤
+│  NRI policy resolution failed. Possible causes:                     │
+│    • nri-resource-policy-balloons DaemonSet not deployed             │
+│    • NRI ConfigMap missing or misconfigured                          │
+│    • kubectl connectivity issue to kube-system                       │
+│                                                                     │
+│  Action: Run the nri_cpu_balloons Ansible role, then redeploy.      │
+│  The model is being deployed in best-effort mode (no CPU pinning).  │
+└─────────────────────────────────────────────────────────────────────┘"""
 
-def parse_cpu_quantity(cpu_val: str | int) -> int:
-    """Parse a CPU specification (integer, decimal, or millicpu) and round up."""
-    if isinstance(cpu_val, int):
-        return cpu_val if cpu_val > 0 else 8
-    val_str = str(cpu_val).strip()
-    if val_str.endswith("m"):
-        milli_str = val_str[:-1]
-        if milli_str.isdigit():
-            milli = int(milli_str)
-            return (milli + 999) // 1000
+
+def probe_node(node: str = "") -> str:
+    """The pinned node, else the first worker, else the first node."""
+    jsonpath = "jsonpath={.items[0].metadata.name}"
+    return (node or k8s.out("get", "nodes", "-l", "!node-role.kubernetes.io/control-plane", "-o", jsonpath)
+            or k8s.out("get", "nodes", "-o", jsonpath))
+
+
+def kubelet_config(node: str) -> dict | None:
+    """The node's live kubelet config (needs RBAC on nodes/proxy); None when unreadable."""
     try:
-        f = float(val_str)
-        if f > 0:
-            return math.ceil(f)
+        cfg = json.loads(k8s.out("get", "--raw", f"/api/v1/nodes/{node}/proxy/configz") or "null")
     except ValueError:
-        pass
-    abort(f"Invalid CPU quantity: '{cpu_val}'. Expected positive integer, decimal, or millicores (e.g. 8, 4.5, 8000m).")
-    return 8
+        return None
+    return cfg.get("kubeletconfig") if isinstance(cfg, dict) else None
 
-class CpuPolicyManager:
-    def __init__(self, k8s: K8sClient):
-        self.k8s = k8s
-        self.policy: str = ""
-        self._cached_policy: str = ""
-        self.effective_cpu: int = 0
-        self.balloon_name: str = ""
-        self.annotations: dict[str, str] = {}
-        self.node_selector_term: dict[str, Any] | None = None
-        self._ks_full_pcpus_only: bool = False
-        self._ks_threads_per_core: int = 1
-        self._ks_resources_validated: bool = False
 
-    def probe_node(self, node_pref: str = "") -> str:
-        if node_pref:
-            return node_pref
-        nodes = self.k8s.get_json("nodes", "-l", "!node-role.kubernetes.io/control-plane")
-        if nodes and nodes.get("items"):
-            return nodes["items"][0]["metadata"]["name"]
-        nodes = self.k8s.get_json("nodes")
-        if nodes and nodes.get("items"):
-            return nodes["items"][0]["metadata"]["name"]
+class BestEffort:
+    """No pinning; the CFS scheduler places threads."""
+    name = "best-effort"
+
+    def prepare(self, m: Model) -> None:
+        """Normalise m.cpu/m.memory for the policy; may abort."""
+
+    def annotations(self, m: Model, tp: int) -> tuple[dict, str]:
+        """Pod annotations and the CPU quantity to request."""
+        return {f"{ANN}/type": self.name}, m.cpu
+
+    def preflight(self, m: Model, tp: int) -> list[str]:
+        """Reasons the model cannot be placed (empty when it fits)."""
+        return []
+
+    def failure(self, m: Model, tp: int) -> str:
         return ""
 
-    def get_kubelet_config(self, node: str) -> dict[str, Any] | None:
-        if not node:
-            return None
-        res = self.k8s.run("get", "--raw", f"/api/v1/nodes/{node}/proxy/configz")
-        if res.returncode != 0 or not res.stdout:
-            return None
-        try:
-            return json.loads(res.stdout)
-        except json.JSONDecodeError:
-            return None
 
-    def is_kubelet_static(self, node: str) -> bool:
-        cfg = self.get_kubelet_config(node)
-        if not cfg:
-            return False
-        return cfg.get("kubeletconfig", {}).get("cpuManagerPolicy") == "static"
+class NriBalloons(BestEffort):
+    """NRI balloons plugin: NUMA-aware balloons sized per tensor-parallel shard."""
+    name = "nri-balloons"
+    label = "NRI"
 
-    def is_nri_balloons_present(self) -> bool:
-        res = self.k8s.run("get", "daemonset", "nri-resource-policy-balloons", "-n", "kube-system", "-o", "name")
-        return res.returncode == 0 and bool(res.stdout.strip())
+    def annotations(self, m: Model, tp: int) -> tuple[dict, str]:
+        if not is_uint(m.cpu):
+            for line in NRI_FALLBACK_BOX.splitlines():
+                warn(line)
+            return {f"{ANN}/type": "best-effort", f"{ANN}/reason": "nri-resolution-failed"}, m.cpu
+        nri_policy.detect_policy()
+        anns = nri_policy.build_annotations(tp, m.kind)
+        cpu = nri_policy.effective_cpu_request(int(m.cpu))
+        if cpu > 0 and str(cpu) != m.cpu:
+            info(f"NRI: Effective CPU {m.cpu} → {cpu} (hideHyperthreads active)", err=True)
+        return anns, str(cpu) if cpu > 0 else m.cpu
 
-    def resolve(self, opt_policy: str = "", node_pref: str = "") -> str:
-        if self._cached_policy:
-            self.policy = self._cached_policy
-            return self.policy
+    def preflight(self, m: Model, tp: int) -> list[str]:
+        if not truthy(os.environ.get("MM_NRI_ENABLED", "true")):
+            return []
+        if not is_uint(m.cpu):
+            return [f"nri-balloons needs a whole number of CPUs, got cpu={m.cpu}"]
+        with contextlib.redirect_stderr(io.StringIO()):  # notes are noise here; errors are reported below
+            result = nri_policy.preflight(int(m.cpu), tp, node=m.node, replicas=int(m.replicas))
+        return [] if result["ok"] else result["errors"]
 
-        requested = ""
-        if opt_policy:
-            requested = opt_policy.lower()
-            if requested not in ("nri-balloons", "kubelet-static", "best-effort"):
-                abort(f"Invalid --cpu-policy '{opt_policy}'. Valid: nri-balloons, kubelet-static, best-effort.")
-        elif os.getenv("MM_CPU_POLICY"):
-            env_pol = os.environ["MM_CPU_POLICY"].lower()
-            if env_pol in ("nri-balloons", "kubelet-static", "best-effort"):
-                requested = env_pol
+    def failure(self, m: Model, tp: int) -> str:
+        return (f"NRI pre-flight failed: not enough physical cores to place {m.name} (cpu={m.cpu} tp={tp} "
+                f"replicas={m.replicas}) without spilling onto reserved hyperthread-sibling cores. Lower "
+                "--cpu/--replicas, raise --tp, undeploy a model, or add a node. Override with MM_NRI_PREFLIGHT=warn "
+                "(proceed anyway) or MM_NRI_SKIP_PREFLIGHT=1 (skip check).")
+
+
+class KubeletStatic(BestEffort):
+    """kubelet static CPU manager: Guaranteed-QoS pods (integer cpu, requests == limits) get exclusive cores."""
+    name = label = "kubelet-static"
+    full_pcpus = False
+
+    def prepare(self, m: Model) -> None:
+        cfg = kubelet_config(probe_node(m.node)) or {}
+        self.full_pcpus = text(pick(pick(cfg, "cpuManagerPolicyOptions", {}), "full-pcpus-only")) == "true"
+        # SMT width is not visible through the API; full-pcpus-only implies the x86 norm of 2.
+        tpc = 2 if self.full_pcpus else 1
+        tpc_env = os.environ.get("MM_KUBELET_THREADS_PER_CORE", "")
+        if re.fullmatch(r"[1-9][0-9]*", tpc_env):
+            tpc = int(tpc_env)
+        elif tpc_env:
+            warn(f"Invalid MM_KUBELET_THREADS_PER_CORE='{tpc_env}' — expected a positive integer; using "
+                 "auto-detected default.")
+        cpu = _whole_cpus(m.cpu)
+        if cpu < 1:
+            abort(f"kubelet-static needs a numeric CPU quantity >= 1 for '{m.name}', got '{m.cpu}'. Set an integer "
+                  "cpu in models.yaml or pass --cpu N.")
+        if self.full_pcpus and cpu % tpc:
+            cpu += tpc - cpu % tpc  # kubelet rejects partial cores with SMTAlignmentError
+        if str(cpu) != m.cpu:
+            aligned = f", full-pcpus-only aligned to {tpc}-thread cores" if self.full_pcpus else ""
+            info(f"kubelet-static: CPU {m.cpu} → {cpu} (integer, Guaranteed QoS{aligned})")
+            m.cpu = str(cpu)
+        if not m.memory:
+            abort(f"kubelet-static requires an explicit memory value for '{m.name}' (Guaranteed QoS needs requests "
+                  "== limits). Set memory in models.yaml or pass --memory.")
+
+    def annotations(self, m: Model, tp: int) -> tuple[dict, str]:
+        anns = {f"{ANN}/type": self.name, f"{ANN}/qos": "guaranteed", f"{ANN}/cpus": m.cpu}
+        if self.full_pcpus:
+            anns[f"{ANN}/full-pcpus-only"] = "true"
+        if tp > 1:
+            anns[f"{ANN}/tensor-parallel"] = str(tp)
+        return anns, m.cpu
+
+    def preflight(self, m: Model, tp: int) -> list[str]:
+        node = probe_node(m.node)
+        cfg = kubelet_config(node) if node else {}
+        if node and pick(cfg, "cpuManagerPolicy") != "static":
+            if cfg is None:
+                warn(f"Could not read kubelet config from node '{node}' (needs RBAC on nodes/proxy) — cannot confirm "
+                     "cpuManagerPolicy=static. Proceeding; if the kubelet is not static the model runs without CPU "
+                     "pinning.")
             else:
-                warn(f"Invalid MM_CPU_POLICY='{env_pol}' — ignoring, falling back to auto-detection.")
+                warn(f"Node '{node}' has cpuManagerPolicy={text(pick(cfg, 'cpuManagerPolicy', 'none'))} — not "
+                     f"'static'. {m.name} will run WITHOUT exclusive CPUs. Re-run the solutions install with "
+                     "kubernetes_cpu_policy=kubelet-static to reconfigure kubelet.")
+        nodes = k8s.get_json("node", m.node) if m.node else k8s.get_json("nodes")
+        if not nodes:
+            warn("Could not list nodes to verify CPU capacity — skipping the kubelet-static capacity check.")
+            return []
+        # Allocatable already excludes kube/system-reserved; exclusive CPUs cannot span nodes.
+        alloc = [_whole_cpus(text(pick(pick(n.get("status"), "allocatable", {}), "cpu", "0")), floor=True)
+                 for n in ([nodes] if m.node else nodes.get("items", []))
+                 if not any(t.get("effect") == "NoSchedule" for t in pick(n.get("spec"), "taints", []))]
+        per_pod, replicas, largest = int(m.cpu) * tp, int(m.replicas), max(alloc, default=0)
+        if replicas > 1 and largest and per_pod * replicas > sum(alloc):
+            warn(f"kubelet-static: {replicas} replicas x {per_pod} CPUs = {per_pod * replicas} exceeds the cluster's "
+                 f"{sum(alloc)} allocatable CPUs — some replicas will stay Pending.")
+        if largest and per_pod > largest:
+            return [f"No schedulable node has {per_pod} allocatable CPUs (cpu={m.cpu} x tp={tp}); the largest offers "
+                    f"{largest}. Exclusive CPUs cannot span nodes, so the pod would stay Pending."]
+        return []
 
-        if not requested and os.getenv("MM_NRI_ENABLED", "").lower() in ("false", "0", "no"):
-            requested = "best-effort"
+    def failure(self, m: Model, tp: int) -> str:
+        return (f"kubelet-static pre-flight failed: cannot place {m.name} (cpu={m.cpu} tp={tp} replicas={m.replicas}) "
+                "on any single node. Lower --cpu/--tp/--replicas, or add a larger node. Override with MM_PREFLIGHT=warn "
+                "(proceed anyway) or MM_SKIP_PREFLIGHT=1 (skip check).")
 
-        if requested:
-            self.policy = requested
+
+POLICIES = {p.name: p for p in (NriBalloons, KubeletStatic, BestEffort)}
+
+
+def _whole_cpus(cpu: str, floor: bool = False) -> int:
+    """CPU quantity (8, 7.5, 7500m) in whole CPUs, rounded up (or down); 0 when unparseable."""
+    if cpu.endswith("m") and is_uint(cpu[:-1]):
+        value = int(cpu[:-1]) / 1000
+    elif re.fullmatch(r"[0-9]*\.?[0-9]+", cpu):
+        value = float(cpu)
+    else:
+        return 0
+    return math.floor(value) if floor else math.ceil(value)
+
+
+def resolve_policy(requested: str, node: str) -> BestEffort:
+    if requested and requested not in POLICIES:
+        abort(f"Invalid --cpu-policy '{requested}'. Valid: nri-balloons, kubelet-static, best-effort.")
+    env_policy = os.environ.get("MM_CPU_POLICY", "")
+    if not requested and env_policy:
+        requested = env_policy.lower() if env_policy.lower() in POLICIES else ""
+        if not requested:
+            warn(f"Invalid MM_CPU_POLICY='{env_policy}' — ignoring, falling back to auto-detection.")
+    nri_enabled = os.environ.get("MM_NRI_ENABLED", "")
+    if not requested and nri_enabled and not truthy(nri_enabled):
+        requested = "best-effort"
+        info(f"MM_NRI_ENABLED={nri_enabled} — CPU pinning disabled (best-effort).")
+    if not requested:
+        node = probe_node(node)
+        if node and pick(kubelet_config(node), "cpuManagerPolicy") == "static":
+            requested = "kubelet-static"
+            info(f"Detected kubelet static CPU manager on '{node}' — using kubelet-static.")
+        elif k8s.succeeds("get", "daemonset", "nri-resource-policy-balloons", "-n", "kube-system", "-o", "name"):
+            requested = "nri-balloons"
         else:
-            # Auto-detect
-            probe_node = self.probe_node(node_pref)
-            if self.is_kubelet_static(probe_node):
-                self.policy = "kubelet-static"
-                info(f"Detected kubelet static CPU manager on '{probe_node}' — using kubelet-static.")
-            elif self.is_nri_balloons_present():
-                self.policy = "nri-balloons"
-            else:
-                warn("No CPU-pinning mechanism detected (no NRI balloons DaemonSet, kubelet cpuManagerPolicy is not static) — deploying best-effort, without CPU pinning.")
-                self.policy = "best-effort"
+            requested = "best-effort"
+            warn("No CPU-pinning mechanism detected (no NRI balloons DaemonSet, kubelet cpuManagerPolicy is not "
+                 "static) — deploying best-effort, without CPU pinning.")
+    return POLICIES[requested]()
 
-        self._cached_policy = self.policy
-        return self.policy
 
-    def _kubelet_static_probe(self, node: str) -> None:
-        self._ks_full_pcpus_only = False
-        self._ks_threads_per_core = 1
-
-        cfg = self.get_kubelet_config(node)
-        if cfg:
-            opts = cfg.get("kubeletconfig", {}).get("cpuManagerPolicyOptions", {})
-            if opts.get("full-pcpus-only") == "true":
-                self._ks_full_pcpus_only = True
-
-        env_threads = os.getenv("MM_KUBELET_THREADS_PER_CORE")
-        if env_threads:
-            if env_threads.isdigit() and int(env_threads) > 0:
-                self._ks_threads_per_core = int(env_threads)
-            else:
-                warn(f"Invalid MM_KUBELET_THREADS_PER_CORE='{env_threads}' — expected a positive integer; using auto-detected default.")
-                if self._ks_full_pcpus_only:
-                    self._ks_threads_per_core = 2
-        elif self._ks_full_pcpus_only:
-            self._ks_threads_per_core = 2
-
-    def validate_resources(self, cpu: str | int, memory: str, model_name: str, node: str = "") -> int:
-        parsed_cpu = parse_cpu_quantity(cpu)
-        if self.policy == "kubelet-static":
-            probe_node = self.probe_node(node)
-            self._kubelet_static_probe(probe_node)
-            effective = parsed_cpu
-            tpc = self._ks_threads_per_core
-            if self._ks_full_pcpus_only and tpc > 1 and effective % tpc != 0:
-                effective = ((effective // tpc) + 1) * tpc
-
-            if str(effective) != str(cpu):
-                align_msg = f", full-pcpus-only aligned to {tpc}-thread cores" if self._ks_full_pcpus_only else ""
-                info(f"kubelet-static: CPU {cpu} → {effective} (integer, Guaranteed QoS{align_msg})")
-
-            if not memory:
-                abort(f"kubelet-static requires an explicit memory value for '{model_name}' (Guaranteed QoS needs requests == limits). Set memory in models.yaml or pass --memory.")
-            return effective
-
-        return parsed_cpu
-
-    def build_annotations(self, cpu: int, tp_size: int, node: str, kind: str) -> tuple[dict[str, str], int]:
-        annotations: dict[str, str] = {
-            "cpu-policy.model-manager.io/type": self.policy
-        }
-        effective_cpu = cpu
-
-        if self.policy == "nri-balloons":
-            try:
-                b_annos = nri_policy.build_annotations(tp_size, kind)
-                annotations.update(b_annos)
-                effective_cpu = nri_policy.effective_cpu_request(cpu, node)
-                self.effective_cpu = effective_cpu
-                self.balloon_name = b_annos.get("cpu-policy.model-manager.io/balloon", "")
-                self.node_selector_term = nri_policy.nri_node_selector_term(tp_size)
-            except Exception as e:
-                warn("┌─────────────────────────────────────────────────────────────────────┐")
-                warn("│  NRI BALLOONS FALLBACK — Model will deploy WITHOUT CPU pinning      │")
-                warn("├─────────────────────────────────────────────────────────────────────┤")
-                warn(f"│  NRI policy resolution failed: {e:<52} │")
-                warn("│  Action: Run the nri_cpu_balloons Ansible role, then redeploy.      │")
-                warn("│  The model is being deployed in best-effort mode (no CPU pinning).  │")
-                warn("└─────────────────────────────────────────────────────────────────────┘")
-                annotations = {
-                    "cpu-policy.model-manager.io/type": "best-effort",
-                    "cpu-policy.model-manager.io/reason": "nri-resolution-failed",
-                }
-                effective_cpu = cpu
-                self.balloon_name = ""
-                self.node_selector_term = None
-
-        elif self.policy == "kubelet-static":
-            annotations["cpu-policy.model-manager.io/type"] = "kubelet-static"
-            annotations["cpu-policy.model-manager.io/qos"] = "guaranteed"
-            annotations["cpu-policy.model-manager.io/cpus"] = str(cpu)
-            if self._ks_full_pcpus_only:
-                annotations["cpu-policy.model-manager.io/full-pcpus-only"] = "true"
-            if tp_size > 1:
-                annotations["cpu-policy.model-manager.io/tensor-parallel"] = str(tp_size)
-
-        return annotations, effective_cpu
-
-    def preflight_gate(self, cpu: int, tp: int, node: str, replicas: int, model_name: str) -> None:
-        if os.getenv("MM_SKIP_PREFLIGHT") == "1" or os.getenv("MM_NRI_SKIP_PREFLIGHT") == "1":
-            return
-
-        if self.policy == "nri-balloons":
-            if not os.getenv("MM_NRI_ENABLED", "true").lower() in ("true", "1", "yes"):
-                return
-            result = nri_policy.preflight(cpu, tp, node=node or "", replicas=replicas)
-            if not result.get("ok", False):
-                errors = result.get("errors", [])
-                err_msg = "\n".join(errors)
-                if os.getenv("MM_PREFLIGHT") == "warn" or os.getenv("MM_NRI_PREFLIGHT") == "warn":
-                    warn(f"NRI pre-flight check reported warnings:\n{err_msg}")
-                    return
-                abort(f"NRI pre-flight failed: not enough physical cores to place {model_name} (cpu={cpu} tp={tp} replicas={replicas}) without spilling onto reserved hyperthread-sibling cores.\n{err_msg}")
-
-        elif self.policy == "kubelet-static":
-            probe = node or self.probe_node()
-            if probe and not self.is_kubelet_static(probe):
-                cfg = self.get_kubelet_config(probe)
-                pol = cfg.get("kubeletconfig", {}).get("cpuManagerPolicy", "none") if cfg else "unknown"
-                warn(f"Node '{probe}' has cpuManagerPolicy={pol} — not 'static'. {model_name} will run WITHOUT exclusive CPUs. Re-run the solutions install with kubernetes_cpu_policy=kubelet-static to reconfigure kubelet.")
-
-            per_pod = cpu * tp
-            nodes_data = self.k8s.get_json("node", node) if node else self.k8s.get_json("nodes")
-            items = [nodes_data] if node and nodes_data else (nodes_data.get("items", []) if nodes_data else [])
-
-            schedulable_nodes = []
-            for n in items:
-                taints = n.get("spec", {}).get("taints", [])
-                if not any(t.get("effect") == "NoSchedule" for t in taints):
-                    schedulable_nodes.append(n)
-
-            if not schedulable_nodes:
-                warn("Could not list nodes to verify CPU capacity — skipping the kubelet-static capacity check.")
-                return
-
-            alloc_list = []
-            for n in schedulable_nodes:
-                alloc_cpu = n.get("status", {}).get("allocatable", {}).get("cpu", "0")
-                if str(alloc_cpu).endswith("m"):
-                    alloc_cores = int(str(alloc_cpu)[:-1]) // 1000
-                else:
-                    alloc_cores = int(alloc_cpu) if str(alloc_cpu).isdigit() else 0
-                alloc_list.append(alloc_cores)
-
-            max_alloc = max(alloc_list) if alloc_list else 0
-            total_alloc = sum(alloc_list)
-
-            errors = []
-            if max_alloc > 0 and per_pod > max_alloc:
-                errors.append(f"No schedulable node has {per_pod} allocatable CPUs (cpu={cpu} x tp={tp}); the largest offers {max_alloc}. Exclusive CPUs cannot span nodes, so the pod would stay Pending.")
-
-            if replicas > 1 and max_alloc > 0:
-                want = per_pod * replicas
-                if want > total_alloc:
-                    warn(f"kubelet-static: {replicas} replicas x {per_pod} CPUs = {want} exceeds the cluster's {total_alloc} allocatable CPUs — some replicas will stay Pending.")
-
-            if errors:
-                warn("kubelet-static pre-flight issues detected:")
-                for e in errors:
-                    warn(f"  - {e}")
-                if os.getenv("MM_PREFLIGHT") != "warn" and os.getenv("MM_NRI_PREFLIGHT") != "warn":
-                    abort(f"kubelet-static pre-flight failed: not enough allocatable CPUs to place {model_name}.")
-
+def preflight_gate(policy: BestEffort, m: Model, tp: int) -> None:
+    """Abort a deploy that cannot be placed, before weights are downloaded."""
+    if truthy(os.environ.get("MM_SKIP_PREFLIGHT", "")):
+        return
+    errors = policy.preflight(m, tp)
+    if not errors:
+        return
+    warn(f"{policy.label} pre-flight issues detected:")
+    for e in errors:
+        warn(f"  - {e}")
+    if "warn" in (os.environ.get("MM_PREFLIGHT"), os.environ.get("MM_NRI_PREFLIGHT")):
+        return warn(f"{policy.name} pre-flight failed but MM_PREFLIGHT=warn — proceeding anyway.")
+    abort(policy.failure(m, tp))

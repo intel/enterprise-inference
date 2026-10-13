@@ -1,35 +1,35 @@
+"""Console output: colored status lines (info/ok on stdout, warn/err on stderr)."""
+from __future__ import annotations
+
 import sys
 
-# ANSI Escape Sequences
-_USE_COLOR = sys.stdout.isatty()
+_COLOR = sys.stdout.isatty()
 
-BOLD = "\033[1m" if _USE_COLOR else ""
-RED = "\033[1;31m" if _USE_COLOR else ""
-GREEN = "\033[1;32m" if _USE_COLOR else ""
-YELLOW = "\033[1;33m" if _USE_COLOR else ""
-BLUE = "\033[1;34m" if _USE_COLOR else ""
-CYAN = "\033[1;36m" if _USE_COLOR else ""
-DIM = "\033[90m" if _USE_COLOR else ""
-RESET = "\033[0m" if _USE_COLOR else ""
 
-def info(msg: str) -> None:
-    print(f"{BLUE}[INFO ]{RESET}  {msg}")
+def _c(code: str) -> str:
+    return f"\033[{code}m" if _COLOR else ""
+
+
+BOLD, RED, GREEN, YELLOW, BLUE, CYAN, DIM, RESET = (
+    _c(c) for c in ("1", "1;31", "1;32", "1;33", "1;34", "1;36", "90", "0"))
+
+
+def info(msg: str, err: bool = False) -> None:
+    print(f"{BLUE}[INFO ]{RESET}  {msg}", file=sys.stderr if err else sys.stdout)
+
 
 def ok(msg: str) -> None:
     print(f"{GREEN}[  OK ]{RESET}  {msg}")
 
+
 def warn(msg: str) -> None:
     print(f"{YELLOW}[WARN ]{RESET}  {msg}", file=sys.stderr)
 
-def err(msg: str) -> None:
-    print(f"{RED}[ERROR]{RESET}  {msg}", file=sys.stderr)
 
-def abort(*msgs: str) -> None:
-    for m in msgs:
-        err(m)
+def abort(msg: str):
+    print(f"{RED}[ERROR]{RESET}  {msg}", file=sys.stderr)
     sys.exit(1)
 
+
 def fmt_duration(seconds: int) -> str:
-    if seconds < 60:
-        return f"{seconds}s"
-    return f"{seconds // 60}m {seconds % 60}s"
+    return f"{seconds}s" if seconds < 60 else f"{seconds // 60}m {seconds % 60}s"

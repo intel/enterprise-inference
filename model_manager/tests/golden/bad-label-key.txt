@@ -1,0 +1,5 @@
+# rc: 1
+--- stdout
+--- stderr
+[ERROR]  --label key is not a valid Kubernetes label key: Bad Key
+--- kubectl

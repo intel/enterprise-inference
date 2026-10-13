@@ -1,0 +1,5 @@
+# rc: 1
+--- stdout
+--- stderr
+[ERROR]  --tp requires a positive integer, got: x
+--- kubectl

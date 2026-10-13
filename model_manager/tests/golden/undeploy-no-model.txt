@@ -1,0 +1,5 @@
+# rc: 1
+--- stdout
+--- stderr
+[ERROR]  No model specified. Use: model-manager undeploy <name>|all
+--- kubectl

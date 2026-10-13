@@ -1,401 +1,274 @@
+"""Gateway routes, InferencePool acceptance, LiteLLM registration and endpoint hints."""
+from __future__ import annotations
+
 import base64
+import binascii
 import json
 import os
-import re
+import secrets
 import time
-from pathlib import Path
-from typing import Any
 
-from .config import discover_global_config, discover_inference_config
-from .k8s import K8sClient
-from .ui import abort, info, ok, warn
+from . import k8s
+from .config import MM_DIR, Model, config_value, global_config, inference_config
+from .renderer import render, template
+from .ui import BOLD, CYAN, DIM, RESET, info, ok, warn
 
-class RoutingManager:
-    def __init__(self, k8s: K8sClient, script_dir: Path, templates_dir: Path):
-        self.k8s = k8s
-        self.script_dir = script_dir
-        self.templates_dir = templates_dir
-        self.ai_gateway_name = os.getenv("MM_AI_GATEWAY_NAME", "ai-gateway")
-        self.ai_gateway_ns = os.getenv("MM_AI_GATEWAY_NS", "llm-inference")
-        self.route_timeout = os.getenv("MM_AIGATEWAY_ROUTE_TIMEOUT", "600s")
-        self.litellm_ns = os.getenv("MM_LITELLM_NAMESPACE", "litellm")
-        self.litellm_svc = os.getenv("MM_LITELLM_SERVICE", "litellm")
-        self.litellm_key_ref = os.getenv("MM_LITELLM_SECRET", "litellm-master-key")
 
-    def auth_provider(self) -> str:
-        env_val = os.getenv("MM_LITELLM_ENABLED")
-        if env_val:
-            if env_val.lower() in ("true", "1", "yes"):
-                return "litellm"
-            if env_val.lower() in ("false", "0", "no"):
-                return "keycloak"
+def env(key: str, default: str) -> str:
+    return os.environ.get(key) or default
 
-        gc = discover_global_config(self.script_dir)
-        if gc and gc.is_file():
-            try:
-                import yaml
-                with open(gc, "r", encoding="utf-8") as f:
-                    data = yaml.safe_load(f) or {}
-                if data.get("auth_provider") == "litellm":
-                    return "litellm"
-            except (yaml.YAMLError, OSError) as e:
-                warn(f"Failed to read global config '{gc}': {e}")
-        return "keycloak"
 
-    def ai_gateway_provider(self) -> str:
-        env_val = os.getenv("MM_AI_GATEWAY_PROVIDER")
-        if env_val in ("agentgateway", "envoy"):
-            return env_val
+GATEWAY, GATEWAY_NS = env("MM_AI_GATEWAY_NAME", "ai-gateway"), env("MM_AI_GATEWAY_NS", "llm-inference")
+LITELLM_NS, LITELLM_SVC = env("MM_LITELLM_NAMESPACE", "litellm"), env("MM_LITELLM_SERVICE", "litellm")
+LITELLM_SECRET = env("MM_LITELLM_SECRET", "litellm-master-key")
+TRUE, FALSE = ("true", "1", "yes"), ("false", "0", "no")
 
-        for path_finder in (discover_inference_config, discover_global_config):
-            cfg = path_finder(self.script_dir)
-            if cfg and cfg.is_file():
-                try:
-                    import yaml
-                    with open(cfg, "r", encoding="utf-8") as f:
-                        data = yaml.safe_load(f) or {}
-                    p = data.get("ai_gateway_provider")
-                    if p in ("agentgateway", "envoy"):
-                        return p
-                except (yaml.YAMLError, OSError) as e:
-                    warn(f"Failed to read gateway config '{cfg}': {e}")
-        return "envoy"
 
-    def aigateway_enabled(self) -> bool:
-        val = os.getenv("MM_AIGATEWAY_ENABLED", "")
-        return val.lower() not in ("false", "0", "no")
+def auth_provider() -> str:
+    """litellm or keycloak: MM_LITELLM_ENABLED, else global_config.yaml auth_provider."""
+    v = os.environ.get("MM_LITELLM_ENABLED", "")
+    if v in TRUE or v in FALSE:
+        return "litellm" if v in TRUE else "keycloak"
+    return "litellm" if config_value(global_config(), "auth_provider") == "litellm" else "keycloak"
 
-    def effective_routing(self, routing: str, kind: str) -> str:
-        if routing:
-            return routing
-        return "epp" if kind == "LLMInferenceService" else "direct"
 
-    def gateway_ip(self) -> str:
-        ns = os.getenv("MM_EG_GATEWAY_NS", "envoy-gateway-system")
-        gw = os.getenv("MM_EG_GATEWAY_NAME", "eg-gateway")
-        res = self.k8s.get_json("svc", "-n", ns, "-l", f"gateway.envoyproxy.io/owning-gateway-name={gw}")
-        if res and res.get("items"):
-            try:
-                return res["items"][0]["status"]["loadBalancer"]["ingress"][0]["ip"]
-            except (KeyError, IndexError):
-                return ""
+def gateway_provider() -> str:
+    """envoy (AIGatewayRoute) or agentgateway (HTTPRoute): env, then config.inference.yaml, then global config."""
+    for value in (os.environ.get("MM_AI_GATEWAY_PROVIDER", ""),
+                  *(config_value(c, "ai_gateway_provider") for c in (inference_config(), global_config()))):
+        if value in ("envoy", "agentgateway"):
+            return value
+    return "envoy"
+
+
+def gateway_enabled() -> bool:
+    return os.environ.get("MM_AIGATEWAY_ENABLED", "") not in FALSE
+
+
+def _service(m: Model) -> tuple[str, str]:
+    if m.kind == "InferenceService":
+        return f"{m.name}-predictor", "80"
+    return f"{m.name}-kserve-workload-svc", "8000"
+
+
+def route(m: Model) -> tuple[str, list[tuple[str, str]], str]:
+    """(template, [(kind, name)] it creates, description) for m's routing mode and gateway provider.
+
+    epp       AIGatewayRoute/HTTPRoute -> InferencePool (KV-cache aware endpoint picking)
+    aigateway AIGatewayRoute -> AIServiceBackend (model read from the body); plain HTTPRoute on agentgateway
+    direct    HTTPRoute to the workload service, matched on the model header
+    """
+    routing = m.routing or ("epp" if m.kind == "LLMInferenceService" else "direct")
+    agw, isvc, (svc, port) = gateway_provider() == "agentgateway", m.kind == "InferenceService", _service(m)
+    if routing == "epp":
+        pool = f"{m.name}-inference-pool"
+        if agw:
+            return "agw-route-pool.yaml", [("httproute", f"aigw-{m.name}")], \
+                f"HTTPRoute aigw-{m.name} (agentgateway → InferencePool {pool})"
+        return "aigateway-route.yaml", [("aigatewayroute", f"aigw-{m.name}")], \
+            f"AIGatewayRoute aigw-{m.name} (EPP → {pool})"
+    if routing == "aigateway" and not agw:
+        return "aigateway-route-direct.yaml", [("aigatewayroute", f"aigw-{m.name}"), ("aiservicebackend", m.name),
+                                               ("backend", m.name)], f"AIGatewayRoute aigw-{m.name} (aigateway → {svc}:{port})"
+    if agw:
+        tmpl = f"agw-route-direct-{'isvc' if isvc else 'llm'}.yaml"
+    else:
+        tmpl = f"httproute-direct-{'isvc' if isvc else m.category if m.category in ('embed', 'rerank') else 'llm'}.yaml"
+    via = "agentgateway direct" if routing == "aigateway" else "direct"
+    detail = f"{svc}:{port}" if routing == "aigateway" else f"{svc}:{port}, {m.category or 'llm'}"
+    return tmpl, [("httproute", f"direct-{m.name}")], f"HTTPRoute direct-{m.name} ({via} → {detail})"
+
+
+def register(m: Model) -> None:
+    if not gateway_enabled():
+        return
+    tmpl, _, description = route(m)
+    svc, port = _service(m)
+    info(f"Creating {description}")
+    k8s.apply(render(template(tmpl), MODEL_NAME=m.name, NAMESPACE=m.namespace, POOL_NAME=f"{m.name}-inference-pool",
+                     SERVICE_NAME=svc, SERVICE_PORT=port, ROUTE_TIMEOUT=env("MM_AIGATEWAY_ROUTE_TIMEOUT", "600s"),
+                     AI_GATEWAY_NAME=GATEWAY, AI_GATEWAY_NAMESPACE=GATEWAY_NS), ssa=True)
+
+
+def deregister(m: Model) -> None:
+    if gateway_enabled():
+        for kind, name in route(m)[1]:
+            k8s.delete(kind, name, m.namespace)
+
+
+def patch_pool_status(m: Model) -> None:
+    """Mark the InferencePool Accepted so the gateway route goes live (done at ready time, after KServe creates it)."""
+    pool = f"{m.name}-inference-pool"
+    for _ in range(24):
+        if k8s.succeeds("get", "inferencepool", pool, "-n", m.namespace):
+            break
+        time.sleep(5)
+    else:
+        return
+    ref = "jsonpath={.spec.router.gateway.refs[0].%s}"
+    gw = k8s.out("get", "llminferenceservice", m.name, "-n", m.namespace, "-o", ref % "name")
+    gw_ns = k8s.out("get", "llminferenceservice", m.name, "-n", m.namespace, "-o", ref % "namespace")
+    controller = ("agentgateway.dev/agentgateway" if gateway_provider() == "agentgateway"
+                  else "gateway.envoyproxy.io/gatewayclass-controller")
+    status = {"parents": [{
+        "parentRef": {"group": "gateway.networking.k8s.io", "kind": "Gateway",
+                      "name": gw or env("MM_INFERENCE_GATEWAY", "ai-gateway"),
+                      "namespace": gw_ns or env("MM_INFERENCE_GATEWAY_NS", "llm-inference")},
+        "controllerName": controller,
+        "conditions": [{"type": "Accepted", "status": "True", "reason": "Accepted", "message": "Patched by model-manager",
+                        "lastTransitionTime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}]}]}
+    k8s.run("patch", "inferencepool", pool, "-n", m.namespace, "--type=merge", "--subresource=status",
+            "-p", json.dumps({"status": status}, separators=(",", ":")))
+
+
+# ── LiteLLM ───────────────────────────────────────────────────────────────────
+
+def litellm_enabled() -> bool:
+    return auth_provider() == "litellm"
+
+
+def _internal_url(m: Model) -> str:
+    """api_base LiteLLM calls: the AI Gateway for vLLM (EPP routing), the predictor for OVMS."""
+    if os.environ.get("MM_LITELLM_KSERVE_URL"):
+        return f"{os.environ['MM_LITELLM_KSERVE_URL'].rstrip('/')}/{m.namespace}/{m.name}/v1"
+    if m.kind == "InferenceService":
+        port = k8s.out("get", "svc", f"{m.name}-predictor", "-n", m.namespace, "-o", "jsonpath={.spec.ports[0].port}")
+        return f"http://{m.name}-predictor.{m.namespace}.svc.cluster.local:{port or 80}/v1"
+    gw_ns, gw = env("MM_INFERENCE_GATEWAY_NS", "envoy-gateway-system"), env("MM_INFERENCE_GATEWAY", "ai-gateway")
+    if k8s.out("get", "svc", gw, "-n", gw_ns, "-o", "jsonpath={.metadata.name}"):
+        return f"http://{gw}.{gw_ns}.svc.cluster.local/{m.namespace}/{m.name}/v1"
+    warn(f"AI Gateway service '{gw}' not found in {gw_ns} — LiteLLM will bypass gateway for {m.name}")
+    return f"http://{m.name}-kserve-workload-svc.{m.namespace}.svc.cluster.local:8000/v1"
+
+
+def _litellm_base() -> str:
+    if os.environ.get("MM_LITELLM_URL"):
+        return os.environ["MM_LITELLM_URL"].rstrip("/")
+    port = k8s.out("get", "svc", LITELLM_SVC, "-n", LITELLM_NS, "-o", "jsonpath={.spec.ports[0].port}")
+    return f"http://{LITELLM_SVC}.{LITELLM_NS}.svc.cluster.local:{port}" if port else ""
+
+
+def _litellm_key() -> str:
+    if os.environ.get("MM_LITELLM_MASTER_KEY"):
+        return os.environ["MM_LITELLM_MASTER_KEY"]
+    encoded = k8s.out("get", "secret", LITELLM_SECRET, "-n", LITELLM_NS, "-o", "jsonpath={.data.master_key}")
+    try:
+        return base64.b64decode(encoded).decode().strip()
+    except (binascii.Error, UnicodeDecodeError):
         return ""
 
-    def resolve_inference_hostname(self) -> str:
-        if os.getenv("MM_INFERENCE_HOSTNAME"):
-            return os.environ["MM_INFERENCE_HOSTNAME"]
 
-        gc = discover_global_config(self.script_dir)
-        gc_data = {}
-        if gc and gc.is_file():
-            try:
-                import yaml
-                with open(gc, "r", encoding="utf-8") as f:
-                    gc_data = yaml.safe_load(f) or {}
-            except (yaml.YAMLError, OSError) as e:
-                warn(f"Failed to read global config '{gc}': {e}")
+def _litellm(method: str, url: str, payload: dict | None = None) -> str | None:
+    """Call LiteLLM from a throwaway in-cluster curl pod; the key goes in on stdin, never in the pod spec."""
+    key = _litellm_key()
+    curl = ["curl", "-sf", "-X", method, "-H", "Content-Type: application/json", *(["-H", "@-"] if key else []),
+            *(["-d", json.dumps(payload)] if payload else []), url]
+    r = k8s.run("run", f"mm-curl-{secrets.token_hex(4)}", "--rm", "-i", "--quiet", "--restart=Never",
+                f"--image={env('MM_CURL_IMAGE', 'curlimages/curl:8.12.1')}", "-n", LITELLM_NS, "--", *curl,
+                stdin=f"Authorization: Bearer {key}\n" if key else "")
+    return r.stdout[:r.stdout.rfind("}") + 1] if r.returncode == 0 else None
 
-        prefix = ""
-        if self.auth_provider() == "litellm":
-            ic = discover_inference_config(self.script_dir)
-            for c_path in (ic, gc):
-                if c_path and c_path.is_file():
-                    try:
-                        import yaml
-                        with open(c_path, "r", encoding="utf-8") as f:
-                            d = yaml.safe_load(f) or {}
-                        if d.get("litellm_hostname"):
-                            return d["litellm_hostname"]
-                    except (yaml.YAMLError, OSError) as e:
-                        warn(f"Failed to read litellm config '{c_path}': {e}")
-            prefix = "litellm"
 
-        if gc_data:
-            if not prefix:
-                if gc_data.get("inference_hostname"):
-                    return gc_data["inference_hostname"]
-                prefix = gc_data.get("inference_prefix", "inference")
-            domain = gc_data.get("gateway_domain") or gc_data.get("base_domain_name", "")
-            if domain:
-                return f"{prefix}.{domain}"
+def _litellm_ids(name: str, base: str) -> list[str]:
+    """LiteLLM keys models by the UUID it minted, so map name -> ids via /model/info."""
+    try:
+        data = json.loads(_litellm("GET", f"{base}/model/info") or "{}")
+    except ValueError:
+        return []
+    return [d["model_info"]["id"] for d in data.get("data") or []
+            if d.get("model_name") == name and (d.get("model_info") or {}).get("id")]
 
-        warn("Could not resolve inference hostname — set MM_INFERENCE_HOSTNAME or MM_GLOBAL_CONFIG")
-        return ""
 
-    def build_endpoint_url(self, model_name: str, model_kind: str, category: str, namespace: str = "llm-inference") -> str:
-        host = self.resolve_inference_hostname()
-        if category == "embed":
-            api_path = "v1/embeddings"
-        elif category == "rerank":
-            api_path = "v1/score"
-        else:
-            api_path = "v1/chat/completions"
+def litellm_register(m: Model) -> None:
+    if not litellm_enabled():
+        return
+    base = _litellm_base()
+    if not base:
+        return warn("LiteLLM not reachable — skipping registration")
+    litellm_deregister(m.name)  # /model/new always mints a new id, so clear the name first
+    url = _internal_url(m)
+    payload = {"model_name": m.name, "litellm_params": {"model": f"openai/{m.name}", "api_base": url, "api_key": "unused"}}
+    info(f"Registering {m.name} with LiteLLM (api_base={url})")
+    for attempt in (1, 2, 3):  # the proxy may still be rolling out when the model turns Ready
+        if _litellm("POST", f"{base}/model/new", payload) is not None and _litellm_ids(m.name, base):
+            return ok("Registered with LiteLLM")
+        if attempt < 3:
+            warn(f"LiteLLM registration attempt {attempt} failed — retrying")
+            time.sleep(attempt * 5)
+    warn(f"Could not register {m.name} with LiteLLM after 3 attempts.")
+    warn("  The model is serving but will NOT appear in /v1/models.")
+    warn(f"  Retry with: ./model-manager deploy {m.name}")
 
-        if self.aigateway_enabled():
-            return f"https://{host}/{api_path}"
-        if model_kind == "LLMInferenceService":
-            return f"https://{host}/{namespace}/{model_name}/{api_path}"
-        return f"https://{host}/v2/models/{model_name}/infer"
 
-    def model_internal_url(self, model_name: str, namespace: str, model_kind: str) -> str:
-        api_version = "v1"
-        if os.getenv("MM_LITELLM_KSERVE_URL"):
-            base = os.environ["MM_LITELLM_KSERVE_URL"].rstrip("/")
-            return f"{base}/{namespace}/{model_name}/{api_version}"
+def litellm_deregister(name: str) -> None:
+    base = _litellm_base() if litellm_enabled() else ""
+    if not base:
+        return
+    for model_id in _litellm_ids(name, base) or [name]:  # older entries may be keyed by name
+        _litellm("POST", f"{base}/model/delete", {"id": model_id})
 
-        if model_kind == "InferenceService":
-            res = self.k8s.get_json("svc", f"{model_name}-predictor", "-n", namespace)
-            port = 80
-            if res and res.get("spec", {}).get("ports"):
-                port = res["spec"]["ports"][0]["port"]
-            return f"http://{model_name}-predictor.{namespace}.svc.cluster.local:{port}/{api_version}"
 
-        gw_ns = os.getenv("MM_INFERENCE_GATEWAY_NS", "envoy-gateway-system")
-        gw_name = os.getenv("MM_INFERENCE_GATEWAY", "ai-gateway")
-        svc = self.k8s.get_raw("svc", gw_name, "-n", gw_ns, "-o", "jsonpath={.metadata.name}")
-        if svc:
-            return f"http://{svc}.{gw_ns}.svc.cluster.local/{namespace}/{model_name}/{api_version}"
+# ── Endpoint hints ────────────────────────────────────────────────────────────
 
-        warn(f"AI Gateway service '{gw_name}' not found in {gw_ns} — LiteLLM will bypass gateway for {model_name}")
-        return f"http://{model_name}-kserve-workload-svc.{namespace}.svc.cluster.local:8000/{api_version}"
+def inference_hostname() -> str:
+    """API host: inference.<domain> under keycloak, litellm.<domain> (LiteLLM's own route) under litellm."""
+    if os.environ.get("MM_INFERENCE_HOSTNAME"):
+        return os.environ["MM_INFERENCE_HOSTNAME"]
+    gc, prefix = global_config(), ""
+    if litellm_enabled():
+        for cfg in (inference_config(), gc):
+            if config_value(cfg, "litellm_hostname"):
+                return config_value(cfg, "litellm_hostname")
+        prefix = "litellm"
+    if gc:
+        if not prefix and config_value(gc, "inference_hostname"):
+            return config_value(gc, "inference_hostname")
+        prefix = prefix or config_value(gc, "inference_prefix") or "inference"
+        domain = config_value(gc, "gateway_domain") or config_value(gc, "base_domain_name")
+        if domain:
+            return f"{prefix}.{domain}"
+    warn("Could not resolve inference hostname — set MM_INFERENCE_HOSTNAME or MM_GLOBAL_CONFIG")
+    return ""
 
-    def patch_pool_status(self, model_name: str, namespace: str) -> None:
-        pool = f"{model_name}-inference-pool"
-        for _ in range(24):
-            if self.k8s.run("get", "inferencepool", pool, "-n", namespace).returncode == 0:
-                break
-            time.sleep(5)
-        if self.k8s.run("get", "inferencepool", pool, "-n", namespace).returncode != 0:
-            return
 
-        gw_name = self.k8s.get_raw("llminferenceservice", model_name, "-n", namespace,
-                                   "-o", "jsonpath={.spec.router.gateway.refs[0].name}") or os.getenv("MM_INFERENCE_GATEWAY", "ai-gateway")
-        gw_ns = self.k8s.get_raw("llminferenceservice", model_name, "-n", namespace,
-                                 "-o", "jsonpath={.spec.router.gateway.refs[0].namespace}") or os.getenv("MM_INFERENCE_GATEWAY_NS", "llm-inference")
-
-        controller = "gateway.envoyproxy.io/gatewayclass-controller"
-        if self.ai_gateway_provider() == "agentgateway":
-            controller = "agentgateway.dev/agentgateway"
-
-        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        patch_body = json.dumps({
-            "status": {
-                "parents": [{
-                    "parentRef": {
-                        "group": "gateway.networking.k8s.io",
-                        "kind": "Gateway",
-                        "name": gw_name,
-                        "namespace": gw_ns
-                    },
-                    "controllerName": controller,
-                    "conditions": [{
-                        "type": "Accepted",
-                        "status": "True",
-                        "reason": "Accepted",
-                        "message": "Patched by model-manager",
-                        "lastTransitionTime": now
-                    }]
-                }]
-            }
-        })
-        self.k8s.run("patch", "inferencepool", pool, "-n", namespace,
-                     "--type=merge", "--subresource=status", "-p", patch_body)
-
-    def _render_template(self, tmpl_name: str, vars_dict: dict[str, str]) -> str:
-        tmpl_file = self.templates_dir / tmpl_name
-        if not tmpl_file.is_file():
-            abort(f"Template not found: {tmpl_file}")
-        content = tmpl_file.read_text(encoding="utf-8")
-        for k, v in vars_dict.items():
-            content = content.replace(f"{{{{{k}}}}}", v)
-        return content
-
-    def aigateway_register(self, model_name: str, namespace: str, kind: str, routing: str, category: str) -> None:
-        if not self.aigateway_enabled():
-            return
-        eff_routing = self.effective_routing(routing, kind)
-        provider = self.ai_gateway_provider()
-
-        if eff_routing == "epp":
-            pool_name = f"{model_name}-inference-pool"
-            if provider == "agentgateway":
-                tmpl = "agw-route-pool.yaml"
-                info(f"Creating HTTPRoute aigw-{model_name} (agentgateway → InferencePool {pool_name})")
-            else:
-                tmpl = "aigateway-route.yaml"
-                info(f"Creating AIGatewayRoute aigw-{model_name} (EPP → {pool_name})")
-            manifest = self._render_template(tmpl, {
-                "MODEL_NAME": model_name,
-                "NAMESPACE": namespace,
-                "POOL_NAME": pool_name,
-                "ROUTE_TIMEOUT": self.route_timeout,
-                "AI_GATEWAY_NAME": self.ai_gateway_name,
-                "AI_GATEWAY_NAMESPACE": self.ai_gateway_ns
-            })
-            self.k8s.apply_ssa(manifest)
-
-        elif eff_routing == "aigateway":
-            if kind == "InferenceService":
-                svc_name, svc_port = f"{model_name}-predictor", "80"
-            else:
-                svc_name, svc_port = f"{model_name}-kserve-workload-svc", "8000"
-
-            if provider == "agentgateway":
-                tmpl = "agw-route-direct-isvc.yaml" if kind == "InferenceService" else "agw-route-direct-llm.yaml"
-                info(f"Creating HTTPRoute direct-{model_name} (agentgateway direct → {svc_name}:{svc_port})")
-            else:
-                tmpl = "aigateway-route-direct.yaml"
-                info(f"Creating AIGatewayRoute aigw-{model_name} (aigateway → {svc_name}:{svc_port})")
-
-            manifest = self._render_template(tmpl, {
-                "MODEL_NAME": model_name,
-                "NAMESPACE": namespace,
-                "SERVICE_NAME": svc_name,
-                "SERVICE_PORT": svc_port,
-                "ROUTE_TIMEOUT": self.route_timeout,
-                "AI_GATEWAY_NAME": self.ai_gateway_name,
-                "AI_GATEWAY_NAMESPACE": self.ai_gateway_ns
-            })
-            self.k8s.apply_ssa(manifest)
-
-        else: # direct
-            if kind == "InferenceService":
-                svc_name, svc_port = f"{model_name}-predictor", "80"
-                tmpl = "httproute-direct-isvc.yaml"
-            else:
-                svc_name, svc_port = f"{model_name}-kserve-workload-svc", "8000"
-                if category == "embed":
-                    tmpl = "httproute-direct-embed.yaml"
-                elif category == "rerank":
-                    tmpl = "httproute-direct-rerank.yaml"
-                else:
-                    tmpl = "httproute-direct-llm.yaml"
-
-            info(f"Creating HTTPRoute direct-{model_name} (direct → {svc_name}:{svc_port}, {category or 'llm'})")
-            manifest = self._render_template(tmpl, {
-                "MODEL_NAME": model_name,
-                "NAMESPACE": namespace,
-                "SERVICE_NAME": svc_name,
-                "SERVICE_PORT": svc_port,
-                "ROUTE_TIMEOUT": self.route_timeout,
-                "AI_GATEWAY_NAME": self.ai_gateway_name,
-                "AI_GATEWAY_NAMESPACE": self.ai_gateway_ns
-            })
-            self.k8s.apply_ssa(manifest)
-
-    def aigateway_deregister(self, model_name: str, namespace: str, kind: str, routing: str) -> None:
-        if not self.aigateway_enabled():
-            return
-        eff_routing = self.effective_routing(routing, kind)
-        provider = self.ai_gateway_provider()
-
-        if eff_routing == "epp":
-            cr = "httproute" if provider == "agentgateway" else "aigatewayroute"
-            self.k8s.delete(cr, f"aigw-{model_name}", namespace)
-        elif eff_routing == "aigateway":
-            if provider == "agentgateway":
-                self.k8s.delete("httproute", f"direct-{model_name}", namespace)
-            else:
-                self.k8s.delete("aigatewayroute", f"aigw-{model_name}", namespace)
-                self.k8s.delete("aiservicebackend", model_name, namespace)
-                self.k8s.delete("backend", model_name, namespace)
-        else:
-            self.k8s.delete("httproute", f"direct-{model_name}", namespace)
-
-    # ── LiteLLM support ──
-
-    def litellm_url(self) -> str:
-        if os.getenv("MM_LITELLM_URL"):
-            return os.environ["MM_LITELLM_URL"].rstrip("/")
-        port = self.k8s.get_raw("svc", self.litellm_svc, "-n", self.litellm_ns, "-o", "jsonpath={.spec.ports[0].port}")
-        if port:
-            return f"http://{self.litellm_svc}.{self.litellm_ns}.svc.cluster.local:{port}"
-        return ""
-
-    def litellm_key(self) -> str:
-        if os.getenv("MM_LITELLM_MASTER_KEY"):
-            return os.environ["MM_LITELLM_MASTER_KEY"]
-        enc = self.k8s.get_raw("secret", self.litellm_key_ref, "-n", self.litellm_ns, "-o", "jsonpath={.data.master_key}")
-        if enc:
-            try:
-                return base64.b64decode(enc).decode("utf-8")
-            except (ValueError, UnicodeDecodeError) as e:
-                warn(f"Failed to decode LiteLLM master key: {e}")
-        return ""
-
-    def litellm_curl(self, method: str, url: str, data: str | None = None) -> str:
-        key = self.litellm_key()
-        curl_cmd = ["curl", "-sf", "-X", method, "-H", "Content-Type: application/json"]
-        if key:
-            curl_cmd.extend(["-H", f"Authorization: Bearer {key}"])
-        if data:
-            curl_cmd.extend(["-d", data])
-        curl_cmd.append(url)
-
-        pod_name = f"mm-curl-{int(time.time() * 1000) % 100000}"
-        run_args = [
-            "run", pod_name, "--rm", "-i", "--restart=Never",
-            f"--image={os.getenv('MM_CURL_IMAGE', 'curlimages/curl:8.12.1')}",
-            "-n", self.litellm_ns, "--"
-        ] + curl_cmd
-
-        res = self.k8s.run(*run_args)
-        out = res.stdout.strip()
-        idx = out.rfind("}")
-        return out[:idx+1] if idx != -1 else out
-
-    def litellm_model_ids(self, model_name: str, base_url: str) -> list[str]:
-        raw = self.litellm_curl("GET", f"{base_url}/model/info")
-        if not raw:
-            return []
-        try:
-            data = json.loads(raw)
-            return [
-                m["model_info"]["id"]
-                for m in data.get("data", [])
-                if m.get("model_name") == model_name and m.get("model_info", {}).get("id")
-            ]
-        except (json.JSONDecodeError, KeyError) as e:
-            warn(f"Failed to parse LiteLLM model info: {e}")
-            return []
-
-    def litellm_register(self, model_name: str, model_url: str) -> None:
-        if self.auth_provider() != "litellm":
-            return
-        base = self.litellm_url()
-        if not base:
-            warn("LiteLLM not reachable — skipping registration")
-            return
-
-        self.litellm_deregister(model_name)
-        payload = json.dumps({
-            "model_name": model_name,
-            "litellm_params": {
-                "model": f"openai/{model_name}",
-                "api_base": model_url,
-                "api_key": "unused"
-            }
-        })
-        info(f"Registering {model_name} with LiteLLM (api_base={model_url})")
-        for attempt in range(1, 4):
-            self.litellm_curl("POST", f"{base}/model/new", payload)
-            if self.litellm_model_ids(model_name, base):
-                ok("Registered with LiteLLM")
-                return
-            if attempt < 3:
-                warn(f"LiteLLM registration attempt {attempt} failed — retrying")
-                time.sleep(attempt * 5)
-        warn(f"Could not register {model_name} with LiteLLM after 3 attempts.")
-
-    def litellm_deregister(self, model_name: str) -> None:
-        if self.auth_provider() != "litellm":
-            return
-        base = self.litellm_url()
-        if not base:
-            return
-        ids = self.litellm_model_ids(model_name, base)
-        if not ids:
-            self.litellm_curl("POST", f"{base}/model/delete", json.dumps({"id": model_name}))
-            return
-        for mid in ids:
-            self.litellm_curl("POST", f"{base}/model/delete", json.dumps({"id": mid}))
+def print_endpoints(m: Model) -> None:
+    host, litellm = inference_hostname(), litellm_enabled()
+    gw_ip = k8s.out("get", "svc", "-n", env("MM_EG_GATEWAY_NS", "envoy-gateway-system"), "-l",
+                    f"gateway.envoyproxy.io/owning-gateway-name={env('MM_EG_GATEWAY_NAME', 'eg-gateway')}",
+                    "-o", "jsonpath={.items[0].status.loadBalancer.ingress[0].ip}")
+    api = {"embed": "v1/embeddings", "rerank": "v1/score"}.get(m.category, "v1/chat/completions")
+    if gateway_enabled():
+        endpoint = f"https://{host}/{api}"
+    elif m.kind == "LLMInferenceService":
+        endpoint = f"https://{host}/{m.namespace}/{m.name}/{api}"
+    else:
+        endpoint = f"https://{host}/v2/models/{m.name}/infer"
+    body = {"embed": {"model": m.name, "input": ["Hello world"]},
+            "rerank": {"model": m.name, "text_1": "query", "text_2": ["doc1", "doc2"]}}.get(
+        m.category, {"model": m.name, "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 16})
+    sep = "─" * 56
+    print(f"\n  {CYAN}{sep}{RESET}")
+    print(f"  {BOLD}Model:{RESET}    {m.name}  |  {BOLD}Kind:{RESET} {m.kind}  |  {BOLD}Category:{RESET} {m.category}")
+    print(f"  {BOLD}Auth:{RESET}     {'litellm' if litellm else 'keycloak'}")
+    if gw_ip:
+        print(f"  {BOLD}Gateway:{RESET}  {gw_ip}  (resolve {host} → {gw_ip})")
+    print(f"  {BOLD}Endpoint:{RESET} {endpoint}")
+    if gateway_enabled():
+        print(f'  {BOLD}Note:{RESET}     Pass "model": "{m.name}" in the request body')
+    print(f"  {CYAN}{sep}{RESET}")
+    if litellm:
+        print(f"\n  {BOLD}1. Get your LiteLLM API key:{RESET}")
+        print(f"  {DIM}export LITELLM_VIRTUAL_KEY=$(kubectl get secret {LITELLM_SECRET} -n {LITELLM_NS} \\")
+        print(f"    -o jsonpath='{{.data.master_key}}' | base64 -d){RESET}")
+    else:
+        print(f"\n  {BOLD}1. Get a Keycloak token:{RESET}")
+        print(f"  {DIM}source {MM_DIR}/scripts/get-keycloak-token.sh{RESET}")
+        print(f"  {DIM}# exports TOKEN, GATEWAY_IP, GATEWAY_DOMAIN{RESET}")
+    print(f"\n  {BOLD}2. Call the model:{RESET}")
+    print(f'  {DIM}curl -sk --noproxy "*" \\')
+    print(f'    -H "Authorization: Bearer {"$LITELLM_VIRTUAL_KEY" if litellm else "$TOKEN"}" '
+          '-H "Content-Type: application/json" \\')
+    if gw_ip:
+        print(f'    --resolve "{host}:443:{gw_ip}" \\')
+    print(f"    -d '{json.dumps(body, separators=(',', ':'))}' \\")
+    print(f"    {endpoint}{RESET}\n")

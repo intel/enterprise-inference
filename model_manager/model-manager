@@ -2,23 +2,25 @@
 # Copyright (C) 2025-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
-# model-manager entrypoint forwarding to Python core package.
+# model-manager — deploy LLM inference models on Kubernetes.
+# Runs the Python package in core/ with the first Python >= 3.9 that has PyYAML:
+# the active virtualenv, a .venv in this or a parent directory, then python3.
 set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-export PYTHONPATH="${SCRIPT_DIR}:${SCRIPT_DIR}/scripts:${PYTHONPATH:-}"
+MM_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
-PY_BIN="python3"
-if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python3" ]]; then
-    PY_BIN="${VIRTUAL_ENV}/bin/python3"
-else
-    dir="$SCRIPT_DIR"
-    while [[ "$dir" != "/" && -n "$dir" ]]; do
-        if [[ -x "$dir/.venv/bin/python3" ]]; then
-            PY_BIN="$dir/.venv/bin/python3"
-            break
-        fi
-        dir=$(dirname "$dir")
-    done
-fi
+candidates=("${VIRTUAL_ENV:+$VIRTUAL_ENV/bin/python3}")
+dir="$MM_DIR"
+while [[ "$dir" != "/" ]]; do
+    candidates+=("$dir/.venv/bin/python3")
+    dir="$(dirname "$dir")"
+done
+candidates+=(python3)
 
-exec "$PY_BIN" -m core "$@"
+for py in "${candidates[@]}"; do
+    if [[ -n "$py" ]] && "$py" -c 'import sys, yaml; sys.exit(sys.version_info < (3, 9))' 2>/dev/null; then
+        # Under -c, sys.path[0] is the caller's cwd; point it at this directory so core/ resolves here.
+        exec "$py" -c 'import sys; sys.path[0] = sys.argv.pop(1); from core.cli import main; main()' "$MM_DIR" "$@"
+    fi
+done
+echo "[ERROR]  model-manager needs Python >= 3.9 with PyYAML: pip install -r $MM_DIR/requirements.txt" >&2
+exit 1

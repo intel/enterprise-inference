@@ -71,9 +71,6 @@ jobs:
       # demonstrably reads that variable. The check applies to SHOUTY_CASE names of
       # 3+ characters only: those are the cross-file globals by convention, and a
       # short lowercase name like a loop's `i` collides textually with unrelated files.
-      # The check applies to SHOUTY_CASE names of 3+ characters only: those are
-      # the cross-file globals by convention, and a short lowercase name like a
-      # loop's `i` collides textually with unrelated files.
       - name: Run ShellCheck
         continue-on-error: true
         run: |

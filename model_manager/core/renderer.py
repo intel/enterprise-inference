@@ -1,160 +1,143 @@
-import json
-from pathlib import Path
-from typing import Any
+"""Serving manifests rendered from templates/ ({{KEY}} placeholders)."""
+from __future__ import annotations
 
-from .config import ModelConfig
+import json
+import os
+import re
+from pathlib import Path
+
+from .config import Catalog, Model, mm_path, pick, text
 from .ui import abort
 
-class ManifestRenderer:
-    def __init__(self, templates_dir: Path):
-        self.templates_dir = templates_dir
+CHAT_TEMPLATE_DIR = "/etc/chat-template"
 
-    def _render(self, tmpl_name: str, vars_dict: dict[str, str]) -> str:
-        tmpl_file = self.templates_dir / tmpl_name
-        if not tmpl_file.is_file():
-            abort(f"Template not found: {tmpl_file}")
-        content = tmpl_file.read_text(encoding="utf-8")
-        for k, v in vars_dict.items():
-            content = content.replace(f"{{{{{k}}}}}", v)
-        return content
 
-    @staticmethod
-    def dedupe_args(args_list: list[str]) -> list[str]:
-        # Emulates vLLM last-wins CLI parsing
-        # Items can be --flag=val, or --flag followed by val, or --flag
-        entries: list[tuple[str, list[str]]] = []
-        i = 0
-        n = len(args_list)
-        while i < n:
-            token = args_list[i]
-            if "=" in token and token.startswith("--"):
-                flag_name = token.split("=")[0]
-                entries.append((flag_name, [token]))
-                i += 1
-            elif token.startswith("--"):
-                if i + 1 < n and not args_list[i + 1].startswith("--"):
-                    entries.append((token, [token, args_list[i + 1]]))
-                    i += 2
-                else:
-                    entries.append((token, [token]))
-                    i += 1
-            else:
-                entries.append((token, [token]))
-                i += 1
+def render(path: Path, **values: str) -> str:
+    if not path.is_file():
+        abort(f"Template not found: {path}")
+    out = path.read_text(encoding="utf-8")
+    for key, value in values.items():
+        out = out.replace("{{" + key + "}}", value)
+    return out.rstrip("\n") + "\n"
 
-        seen = set()
-        final_tokens: list[str] = []
-        for key, tokens in reversed(entries):
-            if key not in seen:
-                seen.add(key)
-                final_tokens = tokens + final_tokens
-        return final_tokens
 
-    def build_env_block(self, env_dict: dict[str, str], runtime: str, http_proxy: str, https_proxy: str, no_proxy: str, hf_token: str) -> str:
-        out_lines = []
-        for k, v in env_dict.items():
-            out_lines.append(f"        - name: {k}\n          value: \"{v}\"")
+def template(name: str) -> Path:
+    return mm_path("MM_TEMPLATES", "templates") / name
 
-        if runtime == "openvino":
-            for k, v in [
-                ("HTTP_PROXY", http_proxy), ("http_proxy", http_proxy),
-                ("HTTPS_PROXY", https_proxy), ("https_proxy", https_proxy),
-                ("NO_PROXY", no_proxy), ("no_proxy", no_proxy)
-            ]:
-                if v:
-                    out_lines.append(f"        - name: {k}\n          value: \"{v}\"")
-            if hf_token:
-                out_lines.append(
-                    "        - name: HF_TOKEN\n"
-                    "          valueFrom:\n"
-                    "            secretKeyRef:\n"
-                    "              name: hf-token\n"
-                    "              key: token"
-                )
 
-        if not out_lines:
-            return "[]"
-        return "\n" + "\n".join(out_lines)
+def quote(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
 
-    def build_args_block(self, args_list: list[str]) -> str:
-        if not args_list:
-            return "[]"
-        deduped = self.dedupe_args(args_list)
-        out_lines = []
-        for a in deduped:
-            out_lines.append(f"        - {json.dumps(a)}")
-        return "\n" + "\n".join(out_lines)
 
-    def build_labels_block(self, extra_labels: dict[str, str]) -> str:
-        if not extra_labels:
-            return ""
-        out = ""
-        for k, v in extra_labels.items():
-            out += f"\n    {k}: {json.dumps(v)}"
-        return out
+def _list(items: list[str]) -> str:
+    """Block-list items for a `key: {{X}}` placeholder; `[]` when empty (k8s rejects null)."""
+    return "\n" + "\n".join(items) if items else "[]"
 
-    def build_affinity_block(
-        self,
-        node: str = "",
-        require_amx: bool = False,
-        nri_node_selector_term: dict[str, Any] | None = None
-    ) -> str:
-        has_node_pref = bool(node)
-        has_nri_req = bool(nri_node_selector_term)
-        has_amx_req = bool(require_amx)
 
-        if not has_node_pref and not has_nri_req and not has_amx_req:
-            return ""
+def inline_chat_template(m: Model) -> bool:
+    """Inline Jinja ships in a ConfigMap: KServe runs the spec through Go templates and rejects {{ }}."""
+    return bool(m.chat_template) and not m.chat_template.startswith("/")
 
-        lines = [
-            "    affinity:",
-            "      nodeAffinity:"
-        ]
-        if has_nri_req or has_amx_req:
-            lines.extend([
-                "        requiredDuringSchedulingIgnoredDuringExecution:",
-                "          nodeSelectorTerms:",
-                "            - matchExpressions:"
-            ])
-            if has_nri_req and nri_node_selector_term:
-                match_exprs = nri_node_selector_term.get("matchExpressions", [])
-                tp_val = match_exprs[0].get("values", ["0"])[0] if match_exprs else "0"
-                lines.extend([
-                    "                - key: nri.intel.com/max-tp",
-                    "                  operator: Gt",
-                    "                  values:",
-                    f'                    - "{tp_val}"'
-                ])
-            if has_amx_req:
-                lines.extend([
-                    "                - key: feature.node.kubernetes.io/cpu-cpuid.AMXBF16",
-                    "                  operator: In",
-                    "                  values:",
-                    '                    - "true"'
-                ])
 
-        if has_node_pref:
-            lines.extend([
-                "        preferredDuringSchedulingIgnoredDuringExecution:",
-                "          - weight: 100",
-                "            preference:",
-                "              matchExpressions:",
-                "                - key: kubernetes.io/hostname",
-                "                  operator: In",
-                "                  values:",
-                f"                    - {node}",
-                "          - weight: 50",
-                "            preference:",
-                "              matchExpressions:",
-                "                - key: node-role.kubernetes.io/control-plane",
-                "                  operator: DoesNotExist"
-            ])
-        return "\n".join(lines)
+def engine_args(m: Model) -> list[str]:
+    """Category args < version delta < per-model args (CLI --arg is appended by the caller)."""
+    return [text(a) for a in (*pick(m.cat, "args", []), *pick(m.ver, "args", []), *m.args)]
 
-    def build_annotations_block(self, annotations: dict[str, str], indent: str = "    ") -> str:
-        if not annotations:
-            return ""
-        lines = [f"{indent}annotations:"]
-        for k, v in annotations.items():
-            lines.append(f"{indent}  {k}: {v}")
-        return "\n".join(lines) + "\n"
+
+def trust_remote_code(m: Model, cli_args: list[str]) -> bool:
+    return "--trust-remote-code" in (*engine_args(m), *cli_args)
+
+
+def dedupe_args(args: list[str]) -> list[str]:
+    """Keep the last occurrence of each flag (--k=v, --k v, --k), matching vLLM's last-wins parsing."""
+    entries, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if re.match(r"--[^=]+=", a):
+            entries.append((a.split("=", 1)[0], [a]))
+        elif a.startswith("--") and i + 1 < len(args) and not args[i + 1].startswith("--"):
+            entries.append((a, [a, args[i + 1]]))
+            i += 1
+        else:
+            entries.append((a, [a]))
+        i += 1
+    last = {key: n for n, (key, _) in enumerate(entries)}
+    return [t for n, (key, tokens) in enumerate(entries) if last[key] == n for t in tokens]
+
+
+def _env(m: Model, catalog: Catalog, cli_args: list[str], cli_env: list[str]) -> str:
+    """Env, lowest to highest: trust-remote-code offline < runtime < category < version < model < --env."""
+    merged = {"HF_HUB_OFFLINE": "1"} if trust_remote_code(m, cli_args) else {}
+    for layer in (pick(m.rt, "env", {}), pick(m.cat, "env", {}), pick(m.ver, "env", {}), m.env,
+                  dict((p.split("=", 1)[0], p.split("=", 1)[-1]) for p in cli_env)):
+        merged.update(layer)
+    kv_gb = text(pick(pick(m.cat, "defaults", {}), "kv_cache_gb", 8))
+    items = [f"        - name: {k}\n          value: {quote(text(v).replace('${KV_CACHE_GB}', kv_gb))}"
+             for k, v in sorted(merged.items())]
+    if m.runtime == "openvino":  # OVMS fetches inside the serving pod, so it needs proxy + token there
+        items += [f"        - name: {k}\n          value: {quote(v)}" for k, v in proxy_env(catalog)]
+        if os.environ.get("HF_TOKEN"):
+            items.append("        - name: HF_TOKEN\n          valueFrom:\n            secretKeyRef:\n"
+                         "              name: hf-token\n              key: token")
+    return _list(items)
+
+
+def proxy_env(catalog: Catalog) -> list[tuple[str, str]]:
+    pairs = (("HTTP_PROXY", catalog.http_proxy), ("HTTPS_PROXY", catalog.https_proxy), ("NO_PROXY", catalog.no_proxy))
+    return [(k, v) for key, v in pairs if v for k in (key, key.lower())]
+
+
+def _affinity(node: str, require_amx: bool) -> str:
+    lines = ["    affinity:", "      nodeAffinity:"] if node or require_amx else []
+    if require_amx:
+        lines += ["        requiredDuringSchedulingIgnoredDuringExecution:", "          nodeSelectorTerms:",
+                  "            - matchExpressions:", "                - key: feature.node.kubernetes.io/cpu-cpuid.AMXBF16",
+                  "                  operator: In", "                  values:", '                    - "true"']
+    if node:
+        lines += ["        preferredDuringSchedulingIgnoredDuringExecution:", "          - weight: 100",
+                  "            preference:", "              matchExpressions:",
+                  "                - key: kubernetes.io/hostname", "                  operator: In",
+                  "                  values:", f"                    - {node}", "          - weight: 50",
+                  "            preference:", "              matchExpressions:",
+                  "                - key: node-role.kubernetes.io/control-plane",
+                  "                  operator: DoesNotExist"]
+    return "\n".join(lines)
+
+
+def _annotations(annotations: dict, kind: str) -> str:
+    pad = "  " if kind == "LLMInferenceService" else "    "
+    return f"{pad}annotations:\n" + "".join(
+        f"{pad}  {k}: {quote(v) if v.isdigit() or v in ('true', 'false') else v}\n" for k, v in annotations.items())
+
+
+def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_args: list[str]) -> str:
+    """The LLMInferenceService / InferenceService for m. cli_args already carries any --tp injection."""
+    args = engine_args(m)
+    if m.kind == "LLMInferenceService":
+        args += ["--served-model-name", m.name]
+        if m.chat_template:
+            path = f"{CHAT_TEMPLATE_DIR}/chat_template.jinja" if inline_chat_template(m) else m.chat_template
+            args += ["--chat-template", path]
+    common = {
+        "MODEL_NAME": m.name, "NAMESPACE": m.namespace, "MODEL_URI": m.uri, "CPU": cpu, "MEMORY": m.memory,
+        "REPLICAS": m.replicas, "ARGS": _list([f"        - {quote(a)}" for a in dedupe_args(args + cli_args)]),
+        "ENV": _env(m, catalog, cli_args, o.env), "NRI_ANNOTATIONS": _annotations(annotations, m.kind),
+        "AFFINITY": _affinity(m.node, catalog.require_amx),
+        "EXTRA_LABELS": "".join(f"\n    {p.split('=', 1)[0]}: {quote(p.split('=', 1)[1])}" for p in o.label),
+    }
+    if m.kind == "LLMInferenceService":
+        inline = inline_chat_template(m)
+        return render(
+            template("llm-inference-service.yaml"), **common, IMAGE=m.image,
+            GATEWAY_NAME=os.environ.get("MM_INFERENCE_GATEWAY") or "ai-gateway",
+            GATEWAY_NAMESPACE=os.environ.get("MM_INFERENCE_GATEWAY_NS") or "llm-inference",
+            CHAT_TEMPLATE_MOUNT=(f"        volumeMounts:\n          - name: chat-template\n"
+                                 f"            mountPath: {CHAT_TEMPLATE_DIR}\n            readOnly: true\n") if inline else "",
+            CHAT_TEMPLATE_VOLUME=(f"    volumes:\n      - name: chat-template\n        configMap:\n"
+                                  f"          name: {m.name}-chat-template\n") if inline else "")
+    if m.kind == "InferenceService":
+        name = "inference-service-ovms.yaml" if m.runtime == "openvino" else "inference-service.yaml"
+        return render(template(name), **common, MODEL_ID=m.model_id, PVC_NAME=catalog.pvc,
+                      MODEL_FORMAT=text(pick(m.rt, "format")) or "openvino",
+                      RUNTIME_NAME=text(pick(m.rt, "runtime_name")) or f"{m.runtime}-runtime")
+    abort(f"Unknown model kind: {m.kind}")

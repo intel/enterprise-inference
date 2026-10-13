@@ -1,102 +1,75 @@
+"""kubectl wrapper. Arguments are passed as argv (never through a shell)."""
+from __future__ import annotations
+
 import json
-import os
 import subprocess  # nosec B404
 from typing import Any
 
-from .ui import abort, err, ok
+from .ui import abort, ok
 
-class K8sClient:
-    def __init__(self, kubeconfig: str | None = None, context: str | None = None):
-        self.kubeconfig = kubeconfig or os.getenv("KUBECONFIG")
-        self.context = context
+SSA = ("--server-side", "--field-manager=model-manager", "--force-conflicts")
 
-    def _cmd(self, *args: str) -> list[str]:
-        cmd = ["kubectl"]
-        if self.kubeconfig:
-            cmd.extend(["--kubeconfig", self.kubeconfig])
-        if self.context:
-            cmd.extend(["--context", self.context])
-        cmd.extend(args)
-        return cmd
 
-    def run(self, *args: str, check: bool = False, capture_output: bool = True) -> subprocess.CompletedProcess[str]:
-        cmd = self._cmd(*args)
-        try:
-            res = subprocess.run(cmd, text=True, capture_output=capture_output, check=check)  # nosec B603
-            return res
-        except subprocess.CalledProcessError as e:
-            if check:
-                raise
-            return subprocess.CompletedProcess(cmd, e.returncode, e.stdout or "", e.stderr or "")
+def run(*args: str, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["kubectl", *args], input=stdin, text=True,  # nosec B603 B607
+                          capture_output=True, check=False)
 
-    def get_raw(self, *args: str) -> str:
-        res = self.run("get", *args)
-        return res.stdout.strip() if res.returncode == 0 else ""
 
-    def get_json(self, *args: str) -> Any:
-        res = self.run("get", *args, "-o", "json")
-        if res.returncode != 0 or not res.stdout.strip():
-            return None
-        try:
-            return json.loads(res.stdout)
-        except json.JSONDecodeError:
-            return None
+def out(*args: str) -> str:
+    """Trimmed stdout, or '' when kubectl fails."""
+    r = run(*args)
+    return r.stdout.strip() if r.returncode == 0 else ""
 
-    def apply_ssa(self, manifest: str, field_manager: str = "model-manager") -> bool:
-        cmd = self._cmd("apply", "--server-side", f"--field-manager={field_manager}", "--force-conflicts", "-f", "-")
-        res = subprocess.run(cmd, input=manifest, text=True, capture_output=True)  # nosec B603
-        if res.returncode != 0:
-            abort(f"Server-side apply failed:\n{res.stderr}")
-        return True
 
-    def diff_ssa(self, manifest: str, field_manager: str = "model-manager") -> int:
-        cmd = self._cmd("diff", "--server-side", f"--field-manager={field_manager}", "--force-conflicts", "-f", "-")
-        res = subprocess.run(cmd, input=manifest, text=True, capture_output=True)  # nosec B603
-        return res.returncode
+def succeeds(*args: str) -> bool:
+    return run(*args).returncode == 0
 
-    def apply(self, manifest: str) -> bool:
-        cmd = self._cmd("apply", "-f", "-")
-        res = subprocess.run(cmd, input=manifest, text=True, capture_output=True)  # nosec B603
-        if res.returncode != 0:
-            abort(f"kubectl apply failed:\n{res.stderr}")
-        return True
 
-    def delete(self, kind: str, name: str, namespace: str | None = None) -> bool:
-        args = ["delete", kind, name, "--ignore-not-found"]
-        if namespace:
-            args.extend(["-n", namespace])
-        res = self.run(*args)
-        return res.returncode == 0
+def get_json(*args: str) -> Any:
+    try:
+        return json.loads(out("get", *args, "-o", "json") or "null")
+    except ValueError:
+        return None
 
-    def ensure_namespace(self, namespace: str) -> None:
-        if not self.get_raw("namespace", namespace):
-            self.run("create", "namespace", namespace)
 
-    def ensure_storage(self, namespace: str, pvc_name: str = "model-store") -> None:
-        self.ensure_namespace(namespace)
-        phase = self.get_raw("pvc", pvc_name, "-n", namespace, "-o", "jsonpath={.status.phase}")
-        if not phase:
-            abort(f"PVC '{pvc_name}' not found in namespace '{namespace}'. Provision storage with the infrastructure playbook before deploying models.")
-        elif phase == "Bound":
-            ok(f"Storage ready: {pvc_name} ({phase})")
-        elif phase == "Pending":
-            sc = self.get_raw("pvc", pvc_name, "-n", namespace, "-o", "jsonpath={.spec.storageClassName}")
-            binding_mode = self.get_raw("storageclass", sc, "-o", "jsonpath={.volumeBindingMode}")
-            if binding_mode == "WaitForFirstConsumer":
-                ok(f"Storage ready: {pvc_name} (Pending — binds on first consumer, StorageClass '{sc}' uses WaitForFirstConsumer)")
-            else:
-                abort(f"PVC '{pvc_name}' in namespace '{namespace}' is not ready (phase: Pending, StorageClass '{sc}' binding '{binding_mode}'). Check your storage provisioner.")
-        else:
-            abort(f"PVC '{pvc_name}' in namespace '{namespace}' is not ready (phase: {phase}). Wait for it to become Bound or check your storage provisioner.")
+def apply(manifest: str, ssa: bool = False, quiet: bool = False) -> None:
+    r = run("apply", *(SSA if ssa else ()), "-f", "-", stdin=manifest)
+    if r.returncode:
+        abort(r.stderr.strip() or "kubectl apply failed")
+    if not quiet:
+        print(r.stdout, end="")
 
-    def ensure_cluster_reachable(self) -> None:
-        res = self.run("get", "--raw=/readyz", "--request-timeout=5s")
-        if res.returncode != 0:
-            err("kubectl cannot reach the Kubernetes API server.")
-            if self.kubeconfig:
-                err(f"  Current KUBECONFIG: {self.kubeconfig}")
-            else:
-                err("  KUBECONFIG is not set and $HOME/.kube/config does not exist.")
-            err("  Export a valid kubeconfig, e.g.:")
-            err("    export KUBECONFIG=<repo-root>/env/local/kubeconfig.yaml")
-            abort("kubectl is not connected to a cluster")
+
+def delete(kind: str, name: str, namespace: str, quiet: bool = False) -> None:
+    r = run("delete", kind, name, "-n", namespace, "--ignore-not-found")
+    if not quiet:
+        print(r.stdout, end="")
+
+
+def ensure_namespace(namespace: str) -> None:
+    if succeeds("get", "namespace", namespace):
+        return
+    r = run("create", "namespace", namespace)
+    if r.returncode:
+        abort(r.stderr.strip())
+    print(r.stdout, end="")
+
+
+def ensure_storage(namespace: str, pvc: str) -> None:
+    ensure_namespace(namespace)
+    phase = out("get", "pvc", pvc, "-n", namespace, "-o", "jsonpath={.status.phase}")
+    if phase == "Bound":
+        return ok(f"Storage ready: {pvc} ({phase})")
+    if not phase:
+        abort(f"PVC '{pvc}' not found in namespace '{namespace}'. Provision storage with the infrastructure "
+              "playbook before deploying models.")
+    if phase != "Pending":
+        abort(f"PVC '{pvc}' in namespace '{namespace}' is not ready (phase: {phase}). Wait for it to become "
+              "Bound or check your storage provisioner.")
+    # Pending is expected under WaitForFirstConsumer: the volume binds once the model pod schedules.
+    sc = out("get", "pvc", pvc, "-n", namespace, "-o", "jsonpath={.spec.storageClassName}")
+    mode = out("get", "storageclass", sc, "-o", "jsonpath={.volumeBindingMode}")
+    if mode != "WaitForFirstConsumer":
+        abort(f"PVC '{pvc}' in namespace '{namespace}' is not ready (phase: Pending, StorageClass '{sc or '?'}' "
+              f"binding '{mode or 'Immediate'}'). Check your storage provisioner.")
+    ok(f"Storage ready: {pvc} (Pending — binds on first consumer, StorageClass '{sc}' uses WaitForFirstConsumer)")

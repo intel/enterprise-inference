@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # Copyright (C) 2025-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
@@ -10,21 +9,12 @@ Implements the proven release-1 NRI balloon policy approach:
   - Effective CPU request with hyperthread-hiding doubling
   - Comprehensive pre-flight validation (per-NUMA shard placement)
 
-This module assumes NRI balloons is the only supported CPU policy.
-No pip dependencies — uses kubectl subprocess calls for all K8s access.
-
-CLI usage (called from nri.sh / model-manager):
-  python3 nri_policy.py detect   [--node NODE]
-  python3 nri_policy.py resolve  --cpu CPU --tp TP [--node NODE] [--kind KIND] \
-                                 [--balloon NAME]
-  python3 nri_policy.py preflight --cpu CPU --tp TP [--node NODE]
-
-All output is JSON on stdout; diagnostics go to stderr.
+Used by core/policy.py for the nri-balloons CPU policy. No pip dependencies —
+uses kubectl subprocess calls for all K8s access; diagnostics go to stderr.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import os
@@ -120,24 +110,6 @@ def detect_policy(node: str = "") -> str:
             "Run the nri_cpu_balloons Ansible role to install it."
         )
     return "nri-balloons"
-
-
-def verify_nri_installed() -> bool:
-    """Verify that the NRI balloons plugin is deployed.
-
-    Returns True if installed. Emits a warning if not found — deployment
-    will proceed (annotations are still applied) but pods may not get
-    CPU pinning until the NRI DaemonSet is available.
-    """
-    installed = _nri_balloons_installed()
-    if not installed:
-        _warn(
-            "NRI balloons DaemonSet not found in kube-system. "
-            "Pods will be annotated for NRI but will not receive CPU pinning "
-            "until the nri-resource-policy-balloons DaemonSet is deployed. "
-            "Run the nri_cpu_balloons Ansible role to install it."
-        )
-    return installed
 
 
 # ── Advanced mode + HT detection ────────────────────────────────────────────
@@ -256,27 +228,6 @@ def build_annotations(
     }
     _info(f"Binding pods to NRI balloon '{bname}'")
     return annotations
-
-
-# ── Hard node affinity (advanced NRI + TP>1) ─────────────────────────────────
-
-def nri_node_selector_term(tp: int) -> dict | None:
-    """Return a requiredDuringScheduling nodeSelectorTerm for NRI TP>1.
-
-    In advanced mode, pods with TP>1 must land on nodes whose
-    nri.intel.com/max-tp >= TP. Returns None when not applicable.
-    """
-    if tp <= 1:
-        return None
-    if not advanced_mode_active():
-        return None
-    return {
-        "matchExpressions": [{
-            "key": _NRI_MAX_TP_LABEL,
-            "operator": "Gt",
-            "values": [str(tp - 1)],
-        }],
-    }
 
 
 # ── NUMA topology helpers ───────────────────────────────────────────────────
@@ -779,86 +730,3 @@ def preflight(cpu: int, tp: int, node: str = "", replicas: int = 1) -> dict:
         "effective_cpu": eff_cpu,
         "balloon": bname,
     }
-
-
-# ── CLI entry point ──────────────────────────────────────────────────────────
-
-def cmd_detect(args: argparse.Namespace) -> None:
-    policy = detect_policy(node=args.node or "")
-    result = {
-        "policy": policy,
-        "nri_installed": _nri_balloons_installed(),
-        "advanced_mode": advanced_mode_active(),
-        "hide_hyperthreads": hyperthreads_hidden(),
-    }
-    print(json.dumps(result))
-
-
-def cmd_resolve(args: argparse.Namespace) -> None:
-    detect_policy(node=args.node or "")
-    cpu = int(args.cpu or 0)
-    tp = int(args.tp or 1)
-    eff_cpu = effective_cpu_request(cpu, args.node or "")
-    bname = balloon_name(tp, args.balloon or "")
-    anns = build_annotations(tp, args.kind or "LLMInferenceService", args.balloon or "")
-    nst = nri_node_selector_term(tp)
-
-    result = {
-        "policy": "nri-balloons",
-        "balloon": bname,
-        "effective_cpu": eff_cpu,
-        "annotations": anns,
-        "node_selector_term": nst,
-        "advanced_mode": advanced_mode_active(),
-        "hide_hyperthreads": hyperthreads_hidden(),
-    }
-    print(json.dumps(result))
-
-
-def cmd_preflight(args: argparse.Namespace) -> None:
-    result = preflight(
-        cpu=int(args.cpu or 0),
-        tp=int(args.tp or 1),
-        node=args.node or "",
-        replicas=int(args.replicas or 1),
-    )
-    print(json.dumps(result))
-    if not result["ok"]:
-        sys.exit(1)
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="NRI balloon policy helper")
-    sub = parser.add_subparsers(dest="command")
-
-    p_detect = sub.add_parser("detect", help="Verify NRI balloons status")
-    p_detect.add_argument("--node", default="")
-
-    p_resolve = sub.add_parser("resolve", help="Resolve NRI settings for a deployment")
-    p_resolve.add_argument("--cpu", required=True)
-    p_resolve.add_argument("--tp", default="1")
-    p_resolve.add_argument("--node", default="")
-    p_resolve.add_argument("--kind", default="LLMInferenceService")
-    p_resolve.add_argument("--balloon", default="")
-
-    p_preflight = sub.add_parser("preflight", help="Pre-deploy NRI validation")
-    p_preflight.add_argument("--cpu", required=True)
-    p_preflight.add_argument("--tp", default="1")
-    p_preflight.add_argument("--node", default="")
-    p_preflight.add_argument("--replicas", default="1")
-
-    args = parser.parse_args()
-    if not args.command:
-        parser.print_help()
-        sys.exit(1)
-
-    if args.command == "detect":
-        cmd_detect(args)
-    elif args.command == "resolve":
-        cmd_resolve(args)
-    elif args.command == "preflight":
-        cmd_preflight(args)
-
-
-if __name__ == "__main__":
-    main()
