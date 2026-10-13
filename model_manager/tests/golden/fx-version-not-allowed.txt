@@ -1,0 +1,5 @@
+# rc: 1
+--- stdout
+--- stderr
+[ERROR]  Model 'multi' is not declared to support 'vllm' version '0.30.0'. Declared versions: 0.24.0
+--- kubectl

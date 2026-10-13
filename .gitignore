@@ -15,4 +15,3 @@ venv/
 
 # Test scripts
 model_manager/test-all-commands.sh
-model_manager/tests/

@@ -1,0 +1,5 @@
+# rc: 1
+--- stdout
+--- stderr
+[ERROR]  No catalog entry or deployed resource named 'ghost' found.
+--- kubectl
