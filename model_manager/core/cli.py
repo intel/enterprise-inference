@@ -417,7 +417,10 @@ def cpu_collisions_check(o: Options, target: str) -> None:
         abort(f"nri-cpu-report.py not found at {report}")
     namespace = Catalog.load().namespace
     info(f"Running CPU pinning & collision report (namespace: {namespace})")
-    sys.exit(subprocess.run([sys.executable, str(report), "--namespace", namespace], check=False).returncode)  # nosec B603
+    # The kubernetes client ignores NO_PROXY and would tunnel API calls through the corporate proxy.
+    env = {k: v for k, v in os.environ.items() if k.lower() not in ("http_proxy", "https_proxy")}
+    sys.exit(subprocess.run([sys.executable, str(report), "--namespace", namespace],  # nosec B603
+                            env=env, check=False).returncode)
 
 
 COMMANDS = {"deploy": deploy, "undeploy": undeploy, "cpu-collisions-check": cpu_collisions_check, "_reconcile": reconcile}
