@@ -46,7 +46,7 @@
             template:
               metadata:
                 annotations:
-                  inference.intel.com/langfuse-callbacks: "{{ _cb | join(',') or 'none' }}"
+                  litellm.enterprise-ai/tracing: "{{ _cb | join(',') or 'none' }}"
               spec:
                 containers:
                   - name: litellm
