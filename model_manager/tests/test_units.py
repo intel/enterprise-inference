@@ -122,3 +122,16 @@ def test_one_reconciler_per_model(monkeypatch, tmp_path):
     assert len(held) == 1
     os.close(held[0])
     assert cli._spawn_reconciler(m, 5)[1]  # lock released once the reconciler exits
+
+
+def test_proxy_precedence(monkeypatch, tmp_path):
+    for var in ("MM_HTTPS_PROXY", "HTTPS_PROXY", "https_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    catalog = tmp_path / "models.yaml"
+    catalog.write_text("models: []\n")
+    monkeypatch.setenv("https_proxy", "http://std:1")
+    assert Catalog(catalog).https_proxy == "http://std:1"
+    monkeypatch.setenv("MM_HTTPS_PROXY", "http://mm:2")  # the Ansible install sets this one
+    assert Catalog(catalog).https_proxy == "http://mm:2"
+    catalog.write_text("network: {https_proxy: 'http://cfg:3'}\nmodels: []\n")
+    assert Catalog(catalog).https_proxy == "http://cfg:3"

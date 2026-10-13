@@ -105,8 +105,10 @@ class Catalog:
         self.require_amx = truthy(pick(d, "require_amx", False))
         self.pvc = text(pick(pick(self.data, "storage", {}), "pvc_name", "model-store"))
         net = pick(self.data, "network", {})
+        # models.yaml network:, then MM_*_PROXY (set by the Ansible install), then the standard variables.
         self.http_proxy, self.https_proxy, self.no_proxy = (
-            text(pick(net, f"{p}_proxy")) or os.environ.get(f"{p.upper()}_PROXY") or os.environ.get(f"{p}_proxy") or ""
+            text(pick(net, f"{p}_proxy")) or next(
+                (os.environ[v] for v in (f"MM_{p.upper()}_PROXY", f"{p.upper()}_PROXY", f"{p}_proxy") if os.environ.get(v)), "")
             for p in ("http", "https", "no"))
         self.connectivity_url = text(pick(net, "connectivity_check", "https://huggingface.co"))
         self.models = [m for m in pick(self.data, "models", []) if isinstance(m, dict)]
