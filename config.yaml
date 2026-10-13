@@ -23,7 +23,7 @@ keycloak_client_id: "inference-client"
 ai_gateway_provider: "envoy"              # envoy | agentgateway
 
 # --- Envoy AI Gateway (used when ai_gateway_provider=envoy) ---
-envoy_ai_gateway_version: "0.6.0"
+# envoy_ai_gateway_version: "1.2.0"
 envoy_ai_gateway_namespace: "envoy-ai-gateway-system"
 # inference_hostname: "inference.{{ base_domain_name }}"  # defaults to inference.<base_domain_name>
 # inference_prefix: "inference"                           # prefix prepended to base_domain_name if inference_hostname not set
@@ -33,7 +33,7 @@ envoy_ai_gateway_namespace: "envoy-ai-gateway-system"
 # agentgateway_namespace: "agentgateway-system"
 
 # --- KServe ---
-# kserve_version: "0.15.1"
+# kserve_version: "0.18.0"
 # kserve_deploy_mode: "Standard"         # Standard | Knative
 # kserve_namespace: "kserve"
 # kserve_llmisvc_epp_image: "ghcr.io/llm-d/llm-d-router-endpoint-picker:v0.9.0"
