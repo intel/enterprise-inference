@@ -273,6 +273,7 @@ def _spawn_reconciler(m: Model, timeout: int) -> tuple[Path, bool]:
         fd = os.open(log, os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     except OSError as e:
         abort(f"Cannot write {log} ({e.strerror}); re-run with --wait to finish routing for {m.name}.")
+    os.fchmod(fd, 0o600)  # also for a log left by an older run
     with os.fdopen(fd, "w") as out:
         try:
             fcntl.flock(out, fcntl.LOCK_EX | fcntl.LOCK_NB)
