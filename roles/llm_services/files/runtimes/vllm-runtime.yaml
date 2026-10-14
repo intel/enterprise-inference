@@ -3,6 +3,8 @@ apiVersion: serving.kserve.io/v1alpha1
 kind: ServingRuntime
 metadata:
   name: vllm-runtime
+  labels:
+    enterprise-inference/owner: llm_services
 spec:
   annotations:
     prometheus.kserve.io/port: "8080"

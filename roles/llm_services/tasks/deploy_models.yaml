@@ -119,6 +119,9 @@
         MM_HTTP_PROXY: "{{ http_proxy | default(lookup('env', 'http_proxy')) | default('') }}"
         MM_HTTPS_PROXY: "{{ https_proxy | default(lookup('env', 'https_proxy')) | default('') }}"
         MM_NO_PROXY: "{{ no_proxy | default(lookup('env', 'no_proxy')) | default('') }}"
+        # Platform resolved by the inference_platform role, so the CLI does not
+        # probe the cluster a second time.
+        MM_PLATFORM: "{{ inference_platform_resolved | default('auto') }}"
         # CPU pinning. MM_CPU_POLICY is the switch the CLI reads (nri-balloons |
         # kubelet-static | best-effort); it mirrors the cluster-wide
         # kubernetes_cpu_policy resolved in the solutions preflight, so the

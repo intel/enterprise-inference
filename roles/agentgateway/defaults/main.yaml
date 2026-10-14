@@ -54,3 +54,20 @@ inference_hostname: "inference.{{ base_domain_name | default('inference-example.
 # Edge gateway to bridge from (must match the envoy_gateway role).
 envoy_gateway_name: "eg-gateway"
 envoy_gateway_namespace: "envoy-gateway-system"
+
+# Owned objects — what teardown removes (see roles/inference_ownership).
+# Only objects labelled enterprise-inference/owner (agentgateway, or
+# model-manager for its per-model routes) are deleted, so the Envoy AI
+# Gateway's objects of the same name are safe. The agentgateway-crds chart
+# templates its CRDs, so helm uninstall removes them. The llm-inference
+# namespace (llm_services) and the Gateway API CRDs (shared) are never owned.
+agentgateway_owned_objects:
+  - {helm: agentgateway, namespace: "{{ agentgateway_namespace }}"}
+  - {helm: agentgateway-crds, namespace: "{{ agentgateway_namespace }}"}
+  - {kind: HTTPRoute, api_version: gateway.networking.k8s.io/v1, namespace: "{{ ai_gateway_namespace }}", owner: model-manager}
+  - {kind: HTTPRoute, api_version: gateway.networking.k8s.io/v1, namespace: "{{ envoy_gateway_namespace }}"}
+  - {kind: ReferenceGrant, api_version: gateway.networking.k8s.io/v1beta1, namespace: "{{ ai_gateway_namespace }}"}
+  - {kind: AgentgatewayPolicy, api_version: agentgateway.dev/v1alpha1, namespace: "{{ ai_gateway_namespace }}"}
+  - {kind: Gateway, api_version: gateway.networking.k8s.io/v1, namespace: "{{ ai_gateway_namespace }}"}
+  - {kind: GatewayClass, api_version: gateway.networking.k8s.io/v1}
+  - {kind: Namespace, api_version: v1, name: "{{ agentgateway_namespace }}"}

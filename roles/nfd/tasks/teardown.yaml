@@ -2,22 +2,15 @@
 # =============================================================================
 # NFD — Teardown
 # =============================================================================
+# Removes only what this role installed (see nfd_owned_objects).
 
-- name: "nfd | teardown | Remove Helm release"
-  kubernetes.core.helm:
-    name: node-feature-discovery
-    release_namespace: "{{ nfd_namespace }}"
-    state: absent
-    wait: true
-  failed_when: false
-
-- name: "nfd | teardown | Remove namespace"
-  kubernetes.core.k8s:
-    state: absent
-    api_version: v1
-    kind: Namespace
-    name: "{{ nfd_namespace }}"
-  failed_when: false
+- name: "nfd | teardown | Remove owned objects"
+  ansible.builtin.include_role:
+    name: inference_ownership
+    tasks_from: delete
+  vars:
+    ownership_name: nfd
+    ownership_items: "{{ nfd_owned_objects }}"
 
 - name: "nfd | teardown | Remove Helm repo"
   kubernetes.core.helm_repository:
@@ -27,4 +20,4 @@
 
 - name: "nfd | teardown | Complete"
   ansible.builtin.debug:
-    msg: "NFD removed from namespace '{{ nfd_namespace }}'"
+    msg: "NFD teardown done for namespace '{{ nfd_namespace }}' (only objects this role installed)"

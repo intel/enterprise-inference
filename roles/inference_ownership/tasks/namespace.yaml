@@ -1,0 +1,32 @@
+---
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+# =============================================================================
+# Create a namespace with the ownership label — only if it does not exist.
+#
+# An existing namespace is left as it is: one this role created earlier keeps
+# its label (a rerun stays ours), one created by someone else stays unlabelled,
+# so teardown never deletes it.
+#
+# Inputs: ownership_name, ownership_namespace,
+#         ownership_owner (label value; default ownership_name — set it when
+#         the namespace belongs to another role, e.g. llm-inference created
+#         early by a gateway role but owned by llm_services)
+# =============================================================================
+- name: "{{ ownership_name }} | Check namespace {{ ownership_namespace }}"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Namespace
+    name: "{{ ownership_namespace }}"
+  register: _own_ns
+
+- name: "{{ ownership_name }} | Create namespace {{ ownership_namespace }} (owned)"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ ownership_namespace }}"
+        labels: "{{ {ownership_label_key: ownership_owner | default(ownership_name)} }}"
+  when: _own_ns.resources | length == 0

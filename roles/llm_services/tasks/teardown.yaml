@@ -1,60 +1,17 @@
 ---
 # =============================================================================
-# LLM Services — teardown all inference workloads + namespace
+# LLM Services — teardown inference workloads + namespace
 # =============================================================================
+# Removes only objects in llm_services_owned_objects that carry the ownership
+# label: models and routes model-manager deployed, this role's runtime,
+# dashboards and ServiceMonitor, the model-store PVC and the namespace.
+# PersistentVolumes are not deleted directly: removing the PVC lets the
+# StorageClass reclaim policy decide, so a Retain volume keeps its data.
 
-- name: "llm_services | Delete all LLMInferenceServices"
-  kubernetes.core.k8s:
-    api_version: serving.kserve.io/v1alpha2
-    kind: LLMInferenceService
-    namespace: "{{ llm_services_namespace }}"
-    state: absent
-    delete_all: true
-  failed_when: false
-
-- name: "llm_services | Delete all InferenceServices"
-  kubernetes.core.k8s:
-    api_version: serving.kserve.io/v1beta1
-    kind: InferenceService
-    namespace: "{{ llm_services_namespace }}"
-    state: absent
-    delete_all: true
-  failed_when: false
-
-- name: "llm_services | Delete all ServingRuntimes"
-  kubernetes.core.k8s:
-    api_version: serving.kserve.io/v1alpha1
-    kind: ServingRuntime
-    namespace: "{{ llm_services_namespace }}"
-    state: absent
-    delete_all: true
-  failed_when: false
-
-- name: "llm_services | Find PVs bound to namespace"
-  kubernetes.core.k8s_info:
-    api_version: v1
-    kind: PersistentVolume
-  register: _llm_pvs
-  failed_when: false
-
-- name: "llm_services | Delete stale PVs"
-  kubernetes.core.k8s:
-    api_version: v1
-    kind: PersistentVolume
-    name: "{{ item.metadata.name }}"
-    state: absent
-  loop: >-
-    {{ _llm_pvs.resources | default([])
-       | selectattr('spec.claimRef', 'defined')
-       | selectattr('spec.claimRef.namespace', 'equalto', llm_services_namespace)
-       | list }}
-  loop_control:
-    label: "{{ item.metadata.name }}"
-  failed_when: false
-
-- name: "llm_services | Delete namespace"
-  kubernetes.core.k8s:
-    kind: Namespace
-    name: "{{ llm_services_namespace }}"
-    state: absent
-  failed_when: false
+- name: "llm_services | Remove owned objects"
+  ansible.builtin.include_role:
+    name: inference_ownership
+    tasks_from: delete
+  vars:
+    ownership_name: llm_services
+    ownership_items: "{{ llm_services_owned_objects }}"

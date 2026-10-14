@@ -1,0 +1,139 @@
+---
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+# =============================================================================
+# Delete — remove only objects whose ownership label names this role.
+#
+# Inputs:
+#   ownership_name   owning role; the default label value
+#   ownership_items  the role's owned-objects list. Each entry is one of:
+#     {helm: <release>, namespace: <ns>}
+#         uninstalled only if it is ours: <ns> carries the label, or the
+#         release's Helm record (Secret owner=helm,name=<release>) does.
+#         A release that was there before install is left alone.
+#     {kind, api_version, name, [namespace]}
+#         that one object, if owned
+#     {kind, api_version, [namespace]}
+#         every owned object of that kind (in that namespace)
+#   Optional on any entry: owner: <label value> (default ownership_name).
+#
+# Order: other objects (while their controllers still run and can clear
+# finalizers), then Helm releases, then CRDs, then namespaces.
+#
+# The label is checked on every object before it is deleted. k8s_info ignores
+# label_selectors when a name is given, so a named lookup returns the object
+# whoever owns it; only nameless lookups rely on the selector.
+#
+# Errors are not suppressed: a teardown that cannot read the cluster must fail,
+# not report success having deleted nothing. (A kind whose CRD is absent is not
+# an error: k8s_info returns api_found: false and no resources.)
+# On OpenShift a KServe CRD or webhook is never deleted, labelled or not.
+# =============================================================================
+- name: "{{ ownership_name }} | teardown | Look up owned objects"
+  kubernetes.core.k8s_info:
+    api_version: "{{ item.api_version }}"
+    kind: "{{ item.kind }}"
+    name: "{{ item.name | default(omit) }}"
+    namespace: "{{ item.namespace | default(omit) }}"
+    label_selectors: >-
+      {{ omit if item.name is defined
+         else [ownership_label_key ~ '=' ~ (item.owner | default(ownership_name))] }}
+  loop: "{{ ownership_items | selectattr('kind', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.kind }}/{{ item.name | default('*') }}"
+  register: _own_lookup
+
+- name: "{{ ownership_name }} | teardown | Look up Helm release namespaces"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Namespace
+    name: "{{ item.namespace }}"
+  loop: "{{ ownership_items | selectattr('helm', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.helm }} ({{ item.namespace }})"
+  register: _own_helm_ns
+
+# Nameless lookup, so the selector applies.
+- name: "{{ ownership_name }} | teardown | Look up owned Helm release records"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    namespace: "{{ item.namespace }}"
+    label_selectors:
+      - owner=helm
+      - "name={{ item.helm }}"
+      - "{{ ownership_label_key }}={{ item.owner | default(ownership_name) }}"
+  loop: "{{ ownership_items | selectattr('helm', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.helm }} ({{ item.namespace }})"
+  register: _own_helm_rec
+
+# [lookup result (its .item is the list entry), object] pairs, kept only when
+# the object carries this role's label and is not an OpenShift AI KServe
+# CRD/webhook. Helm release records (Secrets owner=helm) are skipped: they only
+# mark a release as ours, and deleting one first would leave helm uninstall
+# with no release to remove — orphaning the chart's objects.
+- name: "{{ ownership_name }} | teardown | Select owned objects"
+  ansible.builtin.set_fact:
+    _own_pairs: >-
+      {%- set out = [] -%}
+      {%- for pair in _own_lookup.results | default([]) | subelements('resources', skip_missing=True) -%}
+        {%- if (pair.1.metadata.labels | default({}))[ownership_label_key] | default('')
+               == pair.0.item.owner | default(ownership_name)
+            and not (pair.1.kind == 'Secret' and (pair.1.metadata.labels | default({})).owner | default('') == 'helm')
+            and not (inference_platform_resolved | default('kubernetes') == 'openshift'
+                     and pair.1.kind in ['CustomResourceDefinition', 'MutatingWebhookConfiguration', 'ValidatingWebhookConfiguration']
+                     and 'kserve' in pair.1.metadata.name) -%}
+          {%- set _ = out.append(pair.1) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: "{{ ownership_name }} | teardown | Delete owned objects"
+  kubernetes.core.k8s:
+    api_version: "{{ obj.apiVersion }}"
+    kind: "{{ obj.kind }}"
+    name: "{{ obj.metadata.name }}"
+    namespace: "{{ obj.metadata.namespace | default(omit) }}"
+    state: absent
+  loop: "{{ _own_pairs | from_json | rejectattr('kind', 'in', ['CustomResourceDefinition', 'Namespace']) | list }}"
+  loop_control:
+    loop_var: obj
+    label: "{{ obj.kind }}/{{ obj.metadata.name }}"
+
+- name: "{{ ownership_name }} | teardown | Uninstall owned Helm releases"
+  kubernetes.core.helm:
+    name: "{{ item.0.item.helm }}"
+    release_namespace: "{{ item.0.item.namespace }}"
+    state: absent
+    wait: true
+  loop: "{{ _own_helm_ns.results | default([]) | zip(_own_helm_rec.results | default([])) | list }}"
+  loop_control:
+    label: "{{ item.0.item.helm }} ({{ item.0.item.namespace }})"
+  when: >-
+    (item.1.resources | default([]) | length > 0)
+    or ((item.0.resources | default([]) | map(attribute='metadata.labels', default={})
+         | first | default({}))[ownership_label_key] | default('')
+        == item.0.item.owner | default(ownership_name))
+
+- name: "{{ ownership_name }} | teardown | Delete owned CRDs"
+  kubernetes.core.k8s:
+    api_version: "{{ obj.apiVersion }}"
+    kind: "{{ obj.kind }}"
+    name: "{{ obj.metadata.name }}"
+    state: absent
+  loop: "{{ _own_pairs | from_json | selectattr('kind', 'equalto', 'CustomResourceDefinition') | list }}"
+  loop_control:
+    loop_var: obj
+    label: "{{ obj.metadata.name }}"
+
+- name: "{{ ownership_name }} | teardown | Delete owned namespaces"
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: Namespace
+    name: "{{ obj.metadata.name }}"
+    state: absent
+  loop: "{{ _own_pairs | from_json | selectattr('kind', 'equalto', 'Namespace') | list }}"
+  loop_control:
+    loop_var: obj
+    label: "{{ obj.metadata.name }}"

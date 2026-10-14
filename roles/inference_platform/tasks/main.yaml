@@ -1,0 +1,20 @@
+---
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+# =============================================================================
+# inference_platform — decide once per run which platform the cluster is.
+#
+# Not a component (no install/teardown): every inference role includes it as
+# its first task, so the result exists even under `--only`. The first role to
+# run detects; later roles in the same play reuse the fact.
+#
+# Sets:
+#   inference_platform_resolved  a platform name from the registry
+#                                (model_manager/platforms.yaml) or kubernetes
+# Roles branch on it, e.g.  when: inference_platform_resolved == 'openshift'
+# =============================================================================
+# include_tasks (not a block) so the `when` is evaluated once: a block's `when`
+# is re-checked per task and would skip the rest once the fact is set.
+- name: "inference_platform | Detect platform"
+  ansible.builtin.include_tasks: detect.yaml
+  when: inference_platform_resolved is not defined

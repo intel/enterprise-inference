@@ -29,13 +29,12 @@
       block:
 
         - name: "nfd | Create namespace"
-          kubernetes.core.k8s:
-            state: present
-            definition:
-              apiVersion: v1
-              kind: Namespace
-              metadata:
-                name: "{{ nfd_namespace }}"
+          ansible.builtin.include_role:
+            name: inference_ownership
+            tasks_from: namespace
+          vars:
+            ownership_name: nfd
+            ownership_namespace: "{{ nfd_namespace }}"
 
         - name: "nfd | Add Helm repo"
           kubernetes.core.helm_repository:

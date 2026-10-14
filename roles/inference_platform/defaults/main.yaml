@@ -1,0 +1,14 @@
+---
+# =============================================================================
+# inference_platform — which Kubernetes platform is the cluster?
+# =============================================================================
+#   auto        detect from the cluster (default)
+#   kubernetes  skip detection, treat the cluster as plain Kubernetes
+#   <name>      skip detection, use a platform from the registry (e.g. openshift)
+# Override in config.inference.yaml or global_config.yaml.
+# =============================================================================
+inference_platform: "auto"
+
+# Platform registry shared with model-manager (lib/platform.sh). Add new
+# platforms there, not here.
+inference_platform_registry: "{{ role_path }}/../../model_manager/platforms.yaml"

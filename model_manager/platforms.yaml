@@ -1,0 +1,33 @@
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+# =============================================================================
+# Kubernetes platforms the inference layer recognises.
+#
+# Read by both detectors:
+#   - Ansible:       roles/inference_platform (sets inference_platform_resolved)
+#   - model-manager: lib/platform.sh          (sets PLATFORM)
+#
+# Platforms are checked in order and the first match wins; no match means
+# plain "kubernetes". A probe that errors (unreachable, Unauthorized,
+# Forbidden) before a match stops the run rather than guessing.
+#
+# Each entry:
+#   name:   id used everywhere (inference_platform / MM_PLATFORM value,
+#           and what roles compare against). Lowercase, no spaces.
+#   label:  display name.
+#   probe:  how to recognise the platform — exactly one of:
+#     api:      an API path only this platform serves, checked with
+#               `kubectl get --raw <path>`. NotFound = not this platform.
+#     version:  a regex matched against the server gitVersion
+#               (`kubectl version`). Keep it simple: it runs as both a bash
+#               ERE and a Python regex.
+#
+# To support a new platform: add an entry. Put a platform before any platform
+# it is built on, so the more specific one matches first.
+# =============================================================================
+platforms:
+  - name: openshift
+    label: OpenShift
+    probe:
+      # Security Context Constraints — served only by OpenShift.
+      api: /apis/security.openshift.io/v1

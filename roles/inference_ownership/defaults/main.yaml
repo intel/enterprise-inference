@@ -1,0 +1,9 @@
+---
+# =============================================================================
+# inference_ownership — which cluster objects this layer owns
+# =============================================================================
+# Install labels everything it creates with <key>: <owning role> (or
+# model-manager); teardown deletes only objects with its own value. The same
+# literal is used in role definitions and model-manager templates — change
+# them together.
+ownership_label_key: "enterprise-inference/owner"

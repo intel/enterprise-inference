@@ -131,7 +131,8 @@ apply_chat_template_cm() {
     jq -n --arg n "$name" --arg ns "$namespace" --arg v "$template" \
         '{apiVersion:"v1", kind:"ConfigMap",
           metadata:{name:$n, namespace:$ns,
-                    labels:{"app.kubernetes.io/managed-by":"model-manager"}},
+                    labels:{"app.kubernetes.io/managed-by":"model-manager",
+                            "enterprise-inference/owner":"model-manager"}},
           data:{"chat_template.jinja":$v}}' \
       | kubectl apply -f - >/dev/null
 }
@@ -139,7 +140,13 @@ apply_chat_template_cm() {
 kube_apply() { kubectl apply -f - <<< "$1"; }
 kube_ssa()   { kubectl apply --server-side --field-manager=model-manager --force-conflicts -f - <<< "$1"; }
 
-ensure_namespace() { kubectl get namespace "$1" &>/dev/null || kubectl create namespace "$1"; }
+# A namespace this creates is labelled as ours, so teardown may remove it; an
+# existing one is left unlabelled.
+ensure_namespace() {
+    kubectl get namespace "$1" &>/dev/null && return 0
+    kubectl create namespace "$1"
+    kubectl label namespace "$1" enterprise-inference/owner=model-manager >/dev/null
+}
 
 crd_ready() {
     local kind="$1" namespace="$2" name="$3"
