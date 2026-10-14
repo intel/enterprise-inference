@@ -1055,7 +1055,7 @@ resolve_inference_hostname() {
     local gc cfg h domain prefix=""
     gc=$(discover_global_config)
 
-    if [[ "$(auth_provider)" == "litellm" ]]; then
+    if [[ "$(auth_type)" == "litellm_vkey" ]]; then
         for cfg in "$(discover_inference_config 2>/dev/null)" "$gc"; do
             [[ -n "$cfg" && -f "$cfg" ]] || continue
             h=$(yq e '.litellm_hostname // ""' "$cfg" 2>/dev/null)
@@ -1116,13 +1116,13 @@ print_endpoints() {
     host=$(resolve_inference_hostname)
     gw_ip=$(gateway_ip)
     endpoint=$(build_endpoint_url)
-    auth=$(auth_provider)
+    auth=$(auth_type)
     unified=false
     aigateway_enabled && unified=true
 
     # Auth mode drives the credential type — both hit the same unified URL.
     # token_hint is the shell variable the credential command below populates.
-    if [[ "$auth" == "litellm" ]]; then
+    if [[ "$auth" == "litellm_vkey" ]]; then
         token_hint="\$LITELLM_VIRTUAL_KEY"
     else
         token_hint="\$TOKEN"
@@ -1138,7 +1138,7 @@ print_endpoints() {
     echo -e "  ${CYAN}${sep}${RESET}"
 
     # Step 1 — how to obtain the credential for this auth mode.
-    if [[ "$auth" == "litellm" ]]; then
+    if [[ "$auth" == "litellm_vkey" ]]; then
         echo -e "\n  ${BOLD}1. Get your LiteLLM API key:${RESET}"
         echo -e "  ${DIM}export LITELLM_VIRTUAL_KEY=\$(kubectl get secret $LITELLM_SECRET -n $LITELLM_NAMESPACE \\"
         echo -e "    -o jsonpath='{.data.master_key}' | base64 -d)${RESET}"
@@ -1335,8 +1335,8 @@ cmd_deploy() {
             # — without it a not-yet-ready model reads as a failed deploy.
             info "  ${YELLOW}Model load + warmup can take a few minutes — try inference after a short while.${RESET}"
             # Name only what actually happens in this auth mode: LiteLLM
-            # registration is gated on auth_provider=litellm (see
-            # litellm_register), so under keycloak only the gateway route is
+            # registration is gated on auth_type=litellm_vkey (see
+            # litellm_register), so under jwt only the gateway route is
             # reconciled and mentioning LiteLLM sends the operator hunting for
             # a registration that will never appear.
             if litellm_enabled; then

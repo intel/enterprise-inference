@@ -558,7 +558,7 @@
                 port: 3000
 
 - name: "langfuse | Create no-auth SecurityPolicy (Langfuse has its own login)"
-  when: gateway_create | bool and auth_provider | default('none') in ['keycloak', 'litellm']
+  when: gateway_create | bool
   kubernetes.core.k8s:
     state: present
     definition:
@@ -576,7 +576,7 @@
 # ── Wire LiteLLM → Langfuse callback ─────────────────────────────────────────
 
 - name: "langfuse | Configure LiteLLM to send traces to Langfuse"
-  when: (auth_provider | default('keycloak')) == 'litellm' or (litellm_enabled | default(false) | bool)
+  when: (auth_type | default('jwt')) == 'litellm_vkey' or (litellm_enabled | default(false) | bool)
   block:
     - name: "langfuse | Get Langfuse public key from API"
       ansible.builtin.uri:

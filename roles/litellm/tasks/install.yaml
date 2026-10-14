@@ -426,7 +426,7 @@
                 port: 4000
 
 - name: "litellm | Create no-auth SecurityPolicy (LiteLLM handles its own auth)"
-  when: gateway_create | bool and auth_provider | default('none') == 'litellm'
+  when: gateway_create | bool and auth_type | default('jwt') == 'litellm_vkey'
   kubernetes.core.k8s:
     state: present
     definition:

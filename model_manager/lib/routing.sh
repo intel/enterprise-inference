@@ -5,29 +5,30 @@
 #
 # Auth-mode detection (precedence):
 #   1. MM_LITELLM_ENABLED=true env var → litellm mode
-#   2. global_config.yaml auth_provider field → keycloak | litellm
-#   3. Default → keycloak
+#   2. global_config.yaml auth_type → jwt | litellm_vkey
+#      (deprecated auth_provider: keycloak | litellm)
+#   3. Default → jwt
 #
 # Both modes route through the same AI Gateway unified URL.
 
 # ── Auth / Provider detection ──
 
-auth_provider() {
+auth_type() {
     # Env override takes precedence
     local val="${MM_LITELLM_ENABLED:-}"
-    [[ "$val" =~ ^(true|1|yes)$ ]] && { echo "litellm"; return; }
-    [[ "$val" =~ ^(false|0|no)$ ]] && { echo "keycloak"; return; }
+    [[ "$val" =~ ^(true|1|yes)$ ]] && { echo "litellm_vkey"; return; }
+    [[ "$val" =~ ^(false|0|no)$ ]] && { echo "jwt"; return; }
 
     # Read from global_config.yaml
     local gc
     gc=$(discover_global_config 2>/dev/null)
     if [[ -n "$gc" && -f "$gc" ]]; then
         local provider
-        provider=$(yq e '.auth_provider // ""' "$gc" 2>/dev/null)
-        [[ "$provider" == "litellm" ]] && { echo "litellm"; return; }
+        provider=$(yq e '.auth_type // .auth_provider // ""' "$gc" 2>/dev/null)
+        [[ "$provider" =~ ^(litellm_vkey|litellm)$ ]] && { echo "litellm_vkey"; return; }
     fi
 
-    echo "keycloak"
+    echo "jwt"
 }
 
 # ── LiteLLM ──
@@ -37,7 +38,7 @@ LITELLM_SERVICE="${MM_LITELLM_SERVICE:-litellm}"
 LITELLM_SECRET="${MM_LITELLM_SECRET:-litellm-master-key}"
 
 litellm_enabled() {
-    [[ "$(auth_provider)" == "litellm" ]]
+    [[ "$(auth_type)" == "litellm_vkey" ]]
 }
 
 litellm_url() {

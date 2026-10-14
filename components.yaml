@@ -42,13 +42,13 @@ components:
   - name: litellm
     layer: inference
     # Required in litellm auth mode; an optional add-on with Keycloak auth.
-    enabled: "{{ (auth_provider | default('keycloak')) == 'litellm' or (litellm_enabled | default(false) | bool) }}"
+    enabled: "{{ (auth_type | default('jwt')) == 'litellm_vkey' or (litellm_enabled | default(false) | bool) }}"
     depends_on: []
 
   - name: langfuse
     layer: inference
     # Optional tracing for LiteLLM: on with LiteLLM unless langfuse_enabled: false.
-    enabled: "{{ ((auth_provider | default('keycloak')) == 'litellm' or (litellm_enabled | default(false) | bool)) and (langfuse_enabled | default(true) | bool) }}"
+    enabled: "{{ ((auth_type | default('jwt')) == 'litellm_vkey' or (litellm_enabled | default(false) | bool)) and (langfuse_enabled | default(true) | bool) }}"
     depends_on: [litellm]
 
   - name: llm_services
