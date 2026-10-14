@@ -1,0 +1,59 @@
+---
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+# =============================================================================
+# KServe on OpenShift — check only. OpenShift AI provides KServe; this role
+# never installs or patches it. Used for both install and validate.
+#
+# Passes when the DataScienceCluster's kserve component is Managed and the
+# InferenceService and LLMInferenceService CRDs are present. Read-only.
+# =============================================================================
+# kubectl rather than k8s_info: it picks whichever DataScienceCluster API
+# version the cluster serves (v2 on OpenShift AI 3.x, v1 on 2.x).
+- name: "kserve | OpenShift | Read DataScienceCluster"
+  ansible.builtin.command:
+    cmd: kubectl get datasciencecluster -o json
+  register: _kserve_dsc
+  changed_when: false
+  # Without OpenShift AI the kind does not exist; the check below reports it.
+  failed_when: false
+  check_mode: false
+
+- name: "kserve | OpenShift | Read KServe CRDs"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: "{{ item }}"
+  loop:
+    - inferenceservices.serving.kserve.io
+    - llminferenceservices.serving.kserve.io
+  register: _kserve_ocp_crds
+
+- name: "kserve | OpenShift | Check OpenShift AI KServe"
+  ansible.builtin.assert:
+    that:
+      - _dsc | length == 1
+      - _dsc[0].spec.components.kserve.managementState | default('') == 'Managed'
+      - _missing_crds | length == 0
+    fail_msg: >-
+      OpenShift AI KServe is not ready for the inference layer: {{ _problems | select | join('; ') }}.
+      Ask the cluster owner to install OpenShift AI and set
+      spec.components.kserve.managementState: Managed in the DataScienceCluster.
+      This role does not install or patch KServe on OpenShift.
+    success_msg: >-
+      OpenShift AI KServe: DataScienceCluster {{ _dsc[0].metadata.name | default('?') }} kserve Managed,
+      InferenceService and LLMInferenceService CRDs present
+      (KserveReady={{ _dsc[0].status.conditions | default([]) | selectattr('type', 'equalto', 'KserveReady')
+                      | map(attribute='status') | first | default('unknown') }}).
+  vars:
+    # ['items'], not .items: on a dict, .items is the items() method.
+    _dsc: "{{ (_kserve_dsc.stdout | from_json)['items'] if _kserve_dsc.rc == 0 else [] }}"
+    _missing_crds: >-
+      {{ _kserve_ocp_crds.results | rejectattr('resources') | map(attribute='item') | list }}
+    _kserve_state: "{{ _dsc[0].spec.components.kserve.managementState | default('unset') if _dsc | length == 1 else '' }}"
+    # One entry per failed check; empty strings are dropped when joining.
+    _problems:
+      - "{{ 'cannot read DataScienceCluster (' ~ (_kserve_dsc.stderr | trim) ~ ')' if _kserve_dsc.rc != 0 else '' }}"
+      - "{{ 'expected one DataScienceCluster, found ' ~ (_dsc | length) if _kserve_dsc.rc == 0 and _dsc | length != 1 else '' }}"
+      - "{{ 'DataScienceCluster kserve managementState is ' ~ _kserve_state ~ ', expected Managed' if _kserve_state not in ['', 'Managed'] else '' }}"
+      - "{{ 'missing CRDs: ' ~ (_missing_crds | join(', ')) if _missing_crds | length > 0 else '' }}"

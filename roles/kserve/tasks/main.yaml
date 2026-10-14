@@ -3,5 +3,10 @@
   ansible.builtin.include_role:
     name: inference_platform
 
+# On OpenShift, OpenShift AI provides KServe: install and validate only check it.
 - name: "kserve | Dispatch action: {{ component_action }}"
-  ansible.builtin.include_tasks: "{{ component_action }}.yaml"
+  ansible.builtin.include_tasks:
+    file: >-
+      {{ 'openshift.yaml'
+         if inference_platform_resolved == 'openshift' and component_action in ['install', 'validate']
+         else component_action ~ '.yaml' }}
