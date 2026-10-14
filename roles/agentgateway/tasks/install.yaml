@@ -252,11 +252,12 @@
 # HTTPRoutes to reference the Service (Gateway API blocks cross-ns refs by default).
 - name: "agentgateway | Publish the inference host"
   ansible.builtin.include_role:
-    name: gateway_listener
+    name: envoy_gateway
+    tasks_from: listenerset.yaml
   vars:
-    gateway_listener_name: inference
-    gateway_listener_namespace: "{{ envoy_gateway_namespace }}"
-    gateway_listener_hosts: [{name: inference, hostname: "{{ inference_hostname }}"}]
+    gateway_listenerset_name: inference
+    gateway_listenerset_namespace: "{{ envoy_gateway_namespace }}"
+    gateway_listenerset_listeners: [{name: inference, hostname: "{{ inference_hostname }}"}]
   when:
     - ai_gateway_create | bool
 
@@ -275,7 +276,7 @@
         hostnames:
           - "{{ inference_hostname }}"
         parentRefs:
-          - "{{ gateway_listener_ref | combine({'sectionName': 'inference'}) }}"
+          - "{{ gateway_listenerset_ref | combine({'sectionName': 'inference'}) }}"
         rules:
           - matches:
               - path:

@@ -533,11 +533,12 @@
 
 - name: "langfuse | Publish the langfuse host"
   ansible.builtin.include_role:
-    name: gateway_listener
+    name: envoy_gateway
+    tasks_from: listenerset.yaml
   vars:
-    gateway_listener_name: langfuse
-    gateway_listener_namespace: "{{ langfuse_namespace }}"
-    gateway_listener_hosts: [{name: langfuse, hostname: "{{ langfuse_hostname }}"}]
+    gateway_listenerset_name: langfuse
+    gateway_listenerset_namespace: "{{ langfuse_namespace }}"
+    gateway_listenerset_listeners: [{name: langfuse, hostname: "{{ langfuse_hostname }}"}]
   when: gateway_create | bool
 
 - name: "langfuse | Create HTTPRoute"
@@ -552,7 +553,7 @@
         namespace: "{{ langfuse_namespace }}"
       spec:
         parentRefs:
-          - "{{ gateway_listener_ref | combine({'sectionName': 'langfuse'}) }}"
+          - "{{ gateway_listenerset_ref | combine({'sectionName': 'langfuse'}) }}"
         hostnames:
           - "{{ langfuse_hostname }}"
         rules:

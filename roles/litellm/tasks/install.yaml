@@ -414,11 +414,12 @@
 
 - name: "litellm | Publish the litellm host"
   ansible.builtin.include_role:
-    name: gateway_listener
+    name: envoy_gateway
+    tasks_from: listenerset.yaml
   vars:
-    gateway_listener_name: litellm
-    gateway_listener_namespace: "{{ litellm_namespace }}"
-    gateway_listener_hosts: [{name: litellm, hostname: "{{ litellm_hostname }}"}]
+    gateway_listenerset_name: litellm
+    gateway_listenerset_namespace: "{{ litellm_namespace }}"
+    gateway_listenerset_listeners: [{name: litellm, hostname: "{{ litellm_hostname }}"}]
   when: gateway_create | bool
 
 - name: "litellm | Create HTTPRoute"
@@ -433,7 +434,7 @@
         namespace: "{{ litellm_namespace }}"
       spec:
         parentRefs:
-          - "{{ gateway_listener_ref | combine({'sectionName': 'litellm'}) }}"
+          - "{{ gateway_listenerset_ref | combine({'sectionName': 'litellm'}) }}"
         hostnames:
           - "{{ litellm_hostname }}"
         rules:

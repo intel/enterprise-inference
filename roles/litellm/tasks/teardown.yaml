@@ -22,12 +22,12 @@
 
 - name: "litellm | Unpublish the litellm host"
   ansible.builtin.include_role:
-    name: gateway_listener
-    tasks_from: remove.yaml
+    name: envoy_gateway
+    tasks_from: listenerset_remove.yaml
   vars:
-    gateway_listener_name: litellm
-    gateway_listener_namespace: "{{ litellm_namespace }}"
-    gateway_listener_hosts: [{name: litellm, hostname: "{{ litellm_hostname }}"}]
+    gateway_listenerset_name: litellm
+    gateway_listenerset_namespace: "{{ litellm_namespace }}"
+    gateway_listenerset_listeners: [{name: litellm, hostname: "{{ litellm_hostname }}"}]
 
 - name: "litellm | teardown | Remove SecurityPolicy"
   kubernetes.core.k8s:
