@@ -1,0 +1,9 @@
+# rc: 1
+--- stdout
+[INFO ]  Deploying llama3-8b-awq (LLMInferenceService)
+[INFO ]    Runtime: vllm @ 0.24.0 | Category: llm | Routing: epp
+[INFO ]    CPU: abc | Memory: 32Gi | Replicas: 1
+[INFO ]    CPU policy: kubelet-static
+--- stderr
+[ERROR]  kubelet-static needs a numeric CPU quantity >= 1 for 'llama3-8b-awq', got 'abc'. Set an integer cpu in models.yaml or pass --cpu N.
+--- kubectl
