@@ -5,8 +5,8 @@
 #
 # Auth-mode detection (precedence):
 #   1. MM_LITELLM_ENABLED=true env var → litellm mode
-#   2. global_config.yaml auth_type → jwt | litellm_vkey
-#      (deprecated auth_provider: keycloak | litellm)
+#   2. auth_type → jwt | litellm_vkey (or deprecated auth_provider: keycloak | litellm),
+#      global_config.yaml first then config.inference.yaml, as the installer loads them
 #   3. Default → jwt
 #
 # Both modes route through the same AI Gateway unified URL.
@@ -19,14 +19,13 @@ auth_type() {
     [[ "$val" =~ ^(true|1|yes)$ ]] && { echo "litellm_vkey"; return; }
     [[ "$val" =~ ^(false|0|no)$ ]] && { echo "jwt"; return; }
 
-    # Read from global_config.yaml
-    local gc
-    gc=$(discover_global_config 2>/dev/null)
-    if [[ -n "$gc" && -f "$gc" ]]; then
-        local provider
-        provider=$(yq e '.auth_type // .auth_provider // ""' "$gc" 2>/dev/null)
+    local cfg provider
+    for cfg in "$(discover_global_config 2>/dev/null)" "$(discover_inference_config 2>/dev/null)"; do
+        [[ -n "$cfg" && -f "$cfg" ]] || continue
+        provider=$(yq e '.auth_type // .auth_provider // ""' "$cfg" 2>/dev/null)
         [[ "$provider" =~ ^(litellm_vkey|litellm)$ ]] && { echo "litellm_vkey"; return; }
-    fi
+        [[ "$provider" =~ ^(jwt|keycloak)$ ]] && { echo "jwt"; return; }
+    done
 
     echo "jwt"
 }
