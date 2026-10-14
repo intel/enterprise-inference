@@ -5,7 +5,7 @@
 
 - name: "envoy_ai_gateway | Load the platform Envoy Gateway"
   ansible.builtin.include_role:
-    name: envoy_gateway
+    name: gateway
     tasks_from: platform.yaml
   vars:
     _eg_detect_strict: false
@@ -104,7 +104,7 @@
 
     - name: "envoy_ai_gateway | Unpublish the inference host"
       ansible.builtin.include_role:
-        name: envoy_gateway
+        name: gateway
         tasks_from: unpublish.yaml
       vars:
         gateway_publish_name: inference

@@ -6,8 +6,16 @@
 # Version, controller namespace and controllerName follow the platform controller.
 - name: "envoy_ai_gateway | Load the platform Envoy Gateway"
   ansible.builtin.include_role:
-    name: envoy_gateway
+    name: gateway
     tasks_from: platform.yaml
+
+- name: "envoy_ai_gateway | Platform gateway is Envoy Gateway"
+  ansible.builtin.assert:
+    that: gateway_platform.provider | default('envoy') == 'envoy'
+    fail_msg: >-
+      Envoy AI Gateway extends Envoy Gateway, but the platform gateway is
+      '{{ gateway_platform.provider }}'. Use ai_gateway_provider: agentgateway.
+    quiet: true
 
 - name: "envoy_ai_gateway | Release for Envoy Gateway {{ _eag_eg_minor }}"
   ansible.builtin.assert:
@@ -306,7 +314,7 @@
 
 - name: "envoy_ai_gateway | Publish the inference host"
   ansible.builtin.include_role:
-    name: envoy_gateway
+    name: gateway
     tasks_from: publish.yaml
   vars:
     gateway_publish_name: inference
@@ -366,7 +374,7 @@
 
 - name: "envoy_ai_gateway | Unpublish the inference host when not keycloak"
   ansible.builtin.include_role:
-    name: envoy_gateway
+    name: gateway
     tasks_from: unpublish.yaml
   vars:
     gateway_publish_name: inference

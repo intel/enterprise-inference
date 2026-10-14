@@ -17,7 +17,7 @@
 # Gateway class, controller namespace and version follow the platform Gateway.
 - name: "kserve | Load the platform Envoy Gateway"
   ansible.builtin.include_role:
-    name: envoy_gateway
+    name: gateway
     tasks_from: platform.yaml
   when: kserve_enable_gateway_api | bool or kserve_llmisvc_enabled | bool
 

@@ -11,6 +11,21 @@
     wait: true
   failed_when: false
 
+- name: "litellm | teardown | Drop the gateway auth exemption and rate limit"
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: "{{ item.hook }}"
+  loop:
+    - {hook: route_auth_exempt.yaml, policy: litellm-no-auth}
+    - {hook: route_rate_limit.yaml, policy: litellm-rate-limit}
+  loop_control:
+    label: "{{ item.policy }}"
+  vars:
+    gateway_route_name: litellm
+    gateway_route_namespace: "{{ litellm_namespace }}"
+    gateway_route_policy_name: "{{ item.policy }}"
+    gateway_route_state: absent
+
 - name: "litellm | teardown | Remove gateway and mesh resources"
   kubernetes.core.k8s:
     state: absent
@@ -19,8 +34,6 @@
     name: "{{ item.name }}"
     namespace: "{{ litellm_namespace }}"
   loop:
-    - { api: gateway.envoyproxy.io/v1alpha1, kind: SecurityPolicy, name: litellm-no-auth }
-    - { api: gateway.envoyproxy.io/v1alpha1, kind: BackendTrafficPolicy, name: litellm-rate-limit }
     - { api: gateway.networking.k8s.io/v1, kind: HTTPRoute, name: litellm }
     - { api: security.istio.io/v1, kind: AuthorizationPolicy, name: litellm-ingress }
     - { api: security.istio.io/v1, kind: AuthorizationPolicy, name: litellm-redis }
@@ -30,7 +43,7 @@
 
 - name: "litellm | Unpublish the litellm host"
   ansible.builtin.include_role:
-    name: envoy_gateway
+    name: gateway
     tasks_from: unpublish.yaml
   vars:
     gateway_publish_name: litellm

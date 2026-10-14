@@ -241,7 +241,7 @@
 
 - name: "agentgateway | Load the platform Envoy Gateway"
   ansible.builtin.include_role:
-    name: envoy_gateway
+    name: gateway
     tasks_from: platform.yaml
 
 # ── 7. External ingress: eg-gateway → ai-gateway HTTPRoute ───────────────────
@@ -257,11 +257,11 @@
 # HTTPRoutes to reference the Service (Gateway API blocks cross-ns refs by default).
 - name: "agentgateway | Publish the inference host"
   ansible.builtin.include_role:
-    name: envoy_gateway
+    name: gateway
     tasks_from: publish.yaml
   vars:
     gateway_publish_name: inference
-    gateway_publish_namespace: "{{ envoy_gateway_namespace }}"
+    gateway_publish_namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
     gateway_publish_host: "{{ inference_hostname }}"
     gateway_publish_path: "{{ inference_path }}"
   when:
@@ -275,7 +275,7 @@
       kind: HTTPRoute
       metadata:
         name: inference-external
-        namespace: "{{ envoy_gateway_namespace }}"
+        namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
         labels:
           app.kubernetes.io/managed-by: agentgateway-role
       spec:
@@ -296,7 +296,7 @@
                 port: 80
   when: ai_gateway_create | bool
 
-# Allow the edge HTTPRoute (in envoy_gateway_namespace) to target the ai-gateway
+# Allow the edge HTTPRoute (in gateway_namespace) to target the ai-gateway
 # Service in ai_gateway_namespace. Without this, the ref is silently rejected and
 # the edge returns HTTP 500 (direct_response, no upstream cluster).
 - name: "agentgateway | Allow edge → ai-gateway cross-namespace Service ref (ReferenceGrant)"
@@ -314,7 +314,7 @@
         from:
           - group: gateway.networking.k8s.io
             kind: HTTPRoute
-            namespace: "{{ envoy_gateway_namespace }}"
+            namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
         to:
           - group: ""
             kind: Service
@@ -326,4 +326,4 @@
     msg: >-
       agentgateway ready — public Gateway '{{ ai_gateway_name }}'
       (class {{ ai_gateway_class_name }}) in {{ ai_gateway_namespace }},
-      bridged from {{ envoy_gateway_name }} at host {{ inference_hostname }}.
+      bridged from {{ gateway_name | default('eg-gateway') }} at host {{ inference_hostname }}.

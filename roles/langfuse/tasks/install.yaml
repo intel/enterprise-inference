@@ -533,7 +533,7 @@
 
 - name: "langfuse | Publish the langfuse host"
   ansible.builtin.include_role:
-    name: envoy_gateway
+    name: gateway
     tasks_from: publish.yaml
   vars:
     gateway_publish_name: langfuse
@@ -566,21 +566,15 @@
               - name: langfuse-web
                 port: 3000
 
-- name: "langfuse | Create no-auth SecurityPolicy (Langfuse has its own login)"
+- name: "langfuse | Exempt the route from gateway auth (Langfuse has its own login)"
   when: gateway_create | bool and auth_provider | default('none') in ['keycloak', 'litellm']
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: gateway.envoyproxy.io/v1alpha1
-      kind: SecurityPolicy
-      metadata:
-        name: langfuse-no-auth
-        namespace: "{{ langfuse_namespace }}"
-      spec:
-        targetRefs:
-          - group: gateway.networking.k8s.io
-            kind: HTTPRoute
-            name: langfuse
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: route_auth_exempt.yaml
+  vars:
+    gateway_route_name: langfuse
+    gateway_route_namespace: "{{ langfuse_namespace }}"
+    gateway_route_policy_name: langfuse-no-auth
 
 # ── Wire LiteLLM → Langfuse callback ─────────────────────────────────────────
 

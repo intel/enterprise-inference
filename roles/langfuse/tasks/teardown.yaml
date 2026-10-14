@@ -22,21 +22,23 @@
 
 - name: "langfuse | Unpublish the langfuse host"
   ansible.builtin.include_role:
-    name: envoy_gateway
-    tasks_from: listenerset_remove.yaml
+    name: gateway
+    tasks_from: unpublish.yaml
   vars:
-    gateway_listenerset_name: langfuse
-    gateway_listenerset_namespace: "{{ langfuse_namespace }}"
-    gateway_listenerset_listeners: [{name: langfuse, hostname: "{{ langfuse_hostname }}"}]
+    gateway_publish_name: langfuse
+    gateway_publish_namespace: "{{ langfuse_namespace }}"
+    gateway_publish_host: "{{ langfuse_hostname }}"
+    gateway_publish_mode: subdomain
 
-- name: "langfuse | teardown | Remove SecurityPolicy"
-  kubernetes.core.k8s:
-    state: absent
-    api_version: gateway.envoyproxy.io/v1alpha1
-    kind: SecurityPolicy
-    name: langfuse-no-auth
-    namespace: "{{ langfuse_namespace }}"
-  failed_when: false
+- name: "langfuse | teardown | Drop the gateway auth exemption"
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: route_auth_exempt.yaml
+  vars:
+    gateway_route_name: langfuse
+    gateway_route_namespace: "{{ langfuse_namespace }}"
+    gateway_route_policy_name: langfuse-no-auth
+    gateway_route_state: absent
 
 - name: "langfuse | teardown | Remove Langfuse API keys from LiteLLM namespace"
   kubernetes.core.k8s:

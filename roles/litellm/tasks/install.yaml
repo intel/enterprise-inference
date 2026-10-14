@@ -410,7 +410,7 @@
 
 - name: "litellm | Publish the litellm host"
   ansible.builtin.include_role:
-    name: envoy_gateway
+    name: gateway
     tasks_from: publish.yaml
   vars:
     gateway_publish_name: litellm
@@ -458,39 +458,31 @@
 
 # Programs authenticate with LiteLLM virtual keys, so the gateway's Keycloak
 # JWT default is overridden on the API route only.
-- name: "litellm | Create no-auth SecurityPolicy (LiteLLM checks virtual keys)"
+- name: "litellm | Exempt the route from gateway auth (LiteLLM checks virtual keys)"
   when: gateway_create | bool
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: gateway.envoyproxy.io/v1alpha1
-      kind: SecurityPolicy
-      metadata:
-        name: litellm-no-auth
-        namespace: "{{ litellm_namespace }}"
-      spec:
-        targetRefs:
-          - group: gateway.networking.k8s.io
-            kind: HTTPRoute
-            name: litellm
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: route_auth_exempt.yaml
+  vars:
+    gateway_route_name: litellm
+    gateway_route_namespace: "{{ litellm_namespace }}"
+    gateway_route_policy_name: litellm-no-auth
 
 # ── Edge rate limit ───────────────────────────────────────────────────────────
-- name: "litellm | Create edge rate-limit BackendTrafficPolicy"
-  when: gateway_create | bool and litellm_rate_limit_enabled | default(true) | bool
-  kubernetes.core.k8s:
-    state: present
-    template: rate-limit.yaml.j2
-
-# Remove the policy if rate limiting is turned off on a re-run (drift cleanup).
-- name: "litellm | Remove edge rate-limit BackendTrafficPolicy when disabled"
-  when: gateway_create | bool and not (litellm_rate_limit_enabled | default(true) | bool)
-  kubernetes.core.k8s:
-    state: absent
-    api_version: gateway.envoyproxy.io/v1alpha1
-    kind: BackendTrafficPolicy
-    name: litellm-rate-limit
-    namespace: "{{ litellm_namespace }}"
-  failed_when: false
+# Per client IP, blunting key brute-force; removed again when turned off.
+- name: "litellm | Edge rate limit"
+  when: gateway_create | bool
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: route_rate_limit.yaml
+  vars:
+    gateway_route_name: litellm
+    gateway_route_namespace: "{{ litellm_namespace }}"
+    gateway_route_policy_name: litellm-rate-limit
+    gateway_route_state: "{{ 'present' if litellm_rate_limit_enabled | default(true) | bool else 'absent' }}"
+    gateway_rate_limit_requests: "{{ litellm_rate_limit_requests }}"
+    gateway_rate_limit_unit: "{{ litellm_rate_limit_unit | default('Minute') }}"
+    gateway_rate_limit_client_header: "{{ litellm_rate_limit_client_header | default('x-forwarded-for') }}"
 
 # ── In-cluster lockdown (Istio ambient, L4) ───────────────────────────────────
 # Mesh mTLS gives every caller an identity; only the allowed namespaces may

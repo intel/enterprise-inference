@@ -16,7 +16,7 @@
 # emit an informative "nothing to do" note.
 - name: "agentgateway | Load the platform Envoy Gateway"
   ansible.builtin.include_role:
-    name: envoy_gateway
+    name: gateway
     tasks_from: platform.yaml
   vars:
     _eg_detect_strict: false
@@ -106,17 +106,17 @@
         api_version: gateway.networking.k8s.io/v1
         kind: HTTPRoute
         name: inference-external
-        namespace: "{{ envoy_gateway_namespace }}"
+        namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
         state: absent
       failed_when: false
 
     - name: "agentgateway | Unpublish the inference host"
       ansible.builtin.include_role:
-        name: envoy_gateway
+        name: gateway
         tasks_from: unpublish.yaml
       vars:
         gateway_publish_name: inference
-        gateway_publish_namespace: "{{ envoy_gateway_namespace }}"
+        gateway_publish_namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
         gateway_publish_host: "{{ inference_hostname }}"
         gateway_publish_path: "{{ inference_path }}"
 
