@@ -135,3 +135,18 @@ def test_proxy_precedence(monkeypatch, tmp_path):
     assert Catalog(catalog).https_proxy == "http://mm:2"
     catalog.write_text("network: {https_proxy: 'http://cfg:3'}\nmodels: []\n")
     assert Catalog(catalog).https_proxy == "http://cfg:3"
+
+
+@pytest.mark.parametrize("global_cfg, inference_cfg, want", [
+    ("", "", "keycloak"),
+    ("", "auth_type: litellm_vkey", "litellm"),
+    ("auth_provider: litellm", "", "litellm"),  # legacy key
+    ("auth_type: jwt", "auth_type: litellm_vkey", "keycloak"),  # global_config.yaml wins, as in the installer
+])
+def test_auth_mode_from_configs(monkeypatch, tmp_path, global_cfg, inference_cfg, want):
+    monkeypatch.delenv("MM_LITELLM_ENABLED", raising=False)
+    for var, name, body in (("MM_GLOBAL_CONFIG", "global.yaml", global_cfg),
+                            ("MM_INFERENCE_CONFIG", "inference.yaml", inference_cfg)):
+        (tmp_path / name).write_text(body + "\n")
+        monkeypatch.setenv(var, str(tmp_path / name))
+    assert routing.auth_provider() == want

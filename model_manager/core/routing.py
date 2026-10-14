@@ -18,11 +18,18 @@ TRUE, FALSE = ("true", "1", "yes"), ("false", "0", "no")
 
 
 def auth_provider() -> str:
-    """litellm or keycloak: MM_LITELLM_ENABLED, else global_config.yaml auth_provider."""
+    """litellm or keycloak: MM_LITELLM_ENABLED, else auth_type (or legacy auth_provider)
+    from global_config.yaml then config.inference.yaml, the installer's precedence."""
     v = os.environ.get("MM_LITELLM_ENABLED", "")
     if v in TRUE or v in FALSE:
         return "litellm" if v in TRUE else "keycloak"
-    return "litellm" if config_value(global_config(), "auth_provider") == "litellm" else "keycloak"
+    for c in (global_config(), inference_config()):
+        value = config_value(c, "auth_type") or config_value(c, "auth_provider")
+        if value in ("litellm_vkey", "litellm"):
+            return "litellm"
+        if value in ("jwt", "keycloak"):
+            return "keycloak"
+    return "keycloak"
 
 
 def gateway_provider() -> str:
