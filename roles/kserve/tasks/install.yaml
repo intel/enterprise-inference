@@ -21,6 +21,39 @@
     tasks_from: platform.yaml
   when: kserve_enable_gateway_api | bool or kserve_llmisvc_enabled | bool
 
+# A controller the platform did not install is never upgraded here; it must
+# already point its extension manager at the AI Gateway controller. Checked
+# live, before any change.
+- name: "kserve | Read the existing Envoy Gateway configuration"
+  kubernetes.core.k8s_info:
+    kind: ConfigMap
+    name: envoy-gateway-config
+    namespace: "{{ kserve_envoy_gateway_namespace }}"
+  register: _kserve_eg_cfg
+  when:
+    - kserve_llmisvc_enabled | bool
+    - (ai_gateway_provider | default('envoy')) == 'envoy'
+    - not gateway_platform.controller_managed | bool
+
+- name: "kserve | Existing Envoy Gateway carries the AI integration"
+  vars:
+    _want: "{{ kserve_envoy_ai_controller_service }}.{{ kserve_envoy_ai_controller_namespace }}.svc.cluster.local"
+    _cfg: >-
+      {{ ((_kserve_eg_cfg.resources | first | default({})).data | default({})).get('envoy-gateway.yaml', '{}')
+         | from_yaml | default({}, true) }}
+  ansible.builtin.assert:
+    that: (((_cfg.extensionManager | default({})).service | default({})).fqdn | default({})).hostname | default('') == _want
+    fail_msg: >-
+      The Envoy Gateway in {{ kserve_envoy_gateway_namespace }} was not installed by this platform, so it is not
+      upgraded. Add the AI Gateway extension to its configuration (Helm values as in
+      roles/kserve/templates/envoy-gateway-ai-values.yaml.j2: extensionManager service {{ _want }}:1063,
+      backendResources InferencePool, extensionApis enableBackend and enableEnvoyPatchPolicy), then re-run.
+    quiet: true
+  when:
+    - kserve_llmisvc_enabled | bool
+    - (ai_gateway_provider | default('envoy')) == 'envoy'
+    - not gateway_platform.controller_managed | bool
+
 # ── 1. cert-manager (installed by cert_manager role — just verify it's up) ───
 
 - name: "kserve | Verify cert-manager is running"
@@ -639,24 +672,6 @@
 #   extensionManager at the Envoy AI Gateway controller so it can resolve
 #   InferencePool backends. agentgateway reads InferencePool natively through
 #   its own control plane, so this step is skipped for that provider.
-
-# A controller the platform did not install is never upgraded here; it must
-# already point its extension manager at the AI Gateway controller.
-- name: "kserve | Existing Envoy Gateway carries the AI integration"
-  vars:
-    _want: "{{ kserve_envoy_ai_controller_service }}.{{ kserve_envoy_ai_controller_namespace }}.svc.cluster.local"
-  ansible.builtin.assert:
-    that: gateway_platform.extension_manager_host == _want
-    fail_msg: >-
-      The Envoy Gateway in {{ kserve_envoy_gateway_namespace }} was not installed by this platform, so it is not
-      upgraded. Add the AI Gateway extension to its configuration (Helm values as in
-      roles/kserve/templates/envoy-gateway-ai-values.yaml.j2: extensionManager service {{ _want }}:1063,
-      backendResources InferencePool, extensionApis enableBackend and enableEnvoyPatchPolicy), then re-run.
-    quiet: true
-  when:
-    - kserve_llmisvc_enabled | bool
-    - (ai_gateway_provider | default('envoy')) == 'envoy'
-    - not gateway_platform.controller_managed | bool
 
 - name: "kserve | Envoy Gateway AI integration upgrade"
   when:
