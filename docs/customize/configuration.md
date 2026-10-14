@@ -225,12 +225,14 @@ Disabling NFD means those affinity rules cannot be satisfied.
 | `MM_CONFIG` | Path to the model catalog (`models.yaml`) |
 | `MM_GLOBAL_CONFIG` | Path to the platform's `global_config.yaml` |
 | `MM_INFERENCE_HOSTNAME` | Override the resolved endpoint hostname in either auth mode |
+| `MM_INFERENCE_GATEWAY` / `MM_INFERENCE_GATEWAY_NS` | Gateway a model's routes attach to (default `ai-gateway` in `llm-inference`) |
+| `MM_INFERENCE_GATEWAY_SVC_NS` | Namespace of that gateway's Service, which LiteLLM calls (default: `MM_INFERENCE_GATEWAY_NS`, else `envoy-gateway-system`) |
 | `MM_CPU_POLICY` | Override `kubernetes_cpu_policy` for one invocation |
 | `MM_NRI_ENABLED` | Set `false` to skip NRI CPU-pinning annotations |
 | `MM_NRI_PREFLIGHT` | `warn` — report a capacity shortfall but proceed |
 | `MM_NRI_SKIP_PREFLIGHT` | `1` — skip the capacity check entirely |
 | `MM_FORCE_REDEPLOY` | `1` — re-apply a model even if its rendered spec is unchanged |
-| `MM_HTTP_PROXY` / `MM_HTTPS_PROXY` / `MM_NO_PROXY` | Proxy settings for the download job |
+| `MM_HTTP_PROXY` / `MM_HTTPS_PROXY` / `MM_NO_PROXY` | Proxy for reaching Hugging Face (Hub checks, the download job, OVMS pods). `models.yaml` `network:` takes precedence; `HTTP_PROXY` / `http_proxy` etc. are the fallback |
 | `SKIP_MODEL_DEPLOYMENT` | `true` — skip the auto-deploy phase for one install run |
 
 Run `./model-manager --help` for the full surface.
