@@ -410,12 +410,13 @@
 
 - name: "litellm | Publish the litellm host"
   ansible.builtin.include_role:
-    name: gateway_listener
+    name: envoy_gateway
+    tasks_from: publish.yaml
   vars:
-    gateway_listener_name: litellm
-    gateway_listener_namespace: "{{ litellm_namespace }}"
-    gateway_listener_hosts: [{name: litellm, hostname: "{{ litellm_hostname }}"}]
-    gateway_listener_path: "{{ litellm_path }}"
+    gateway_publish_name: litellm
+    gateway_publish_namespace: "{{ litellm_namespace }}"
+    gateway_publish_host: "{{ litellm_hostname }}"
+    gateway_publish_path: "{{ litellm_path }}"
   when: gateway_create | bool
 
 # API: only the exact inference paths reach LiteLLM, HTTPS listener only.
@@ -431,9 +432,9 @@
         namespace: "{{ litellm_namespace }}"
       spec:
         parentRefs:
-          - "{{ gateway_listener_ref }}"
+          - "{{ gateway_publish.parent_ref }}"
         hostnames:
-          - "{{ gateway_listener_publish.host }}"
+          - "{{ gateway_publish.host }}"
         # One host per service: exact paths. Path mode: one rule per path under
         # litellm_path, rewritten to the path LiteLLM serves; the shared host's
         # cookies are dropped (the API takes virtual keys).
@@ -442,7 +443,7 @@
           {%- set hdrs = {'type': 'ResponseHeaderModifier', 'responseHeaderModifier': {'set': litellm_route_headers}} -%}
           {%- set backend = [{'name': 'litellm', 'port': 4000}] -%}
           {%- set nocookie = {'type': 'RequestHeaderModifier', 'requestHeaderModifier': {'remove': ['Cookie']}} -%}
-          {%- if gateway_listener_publish.mode == 'subdomain' -%}
+          {%- if gateway_publish.mode == 'subdomain' -%}
           {%- set m = [] -%}
           {%- for p in litellm_public_paths -%}{%- set _ = m.append({'path': {'type': 'Exact', 'value': p}}) -%}{%- endfor -%}
           {%- set _ = out.append({'matches': m, 'filters': [hdrs], 'backendRefs': backend}) -%}

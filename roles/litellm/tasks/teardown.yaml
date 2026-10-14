@@ -30,13 +30,13 @@
 
 - name: "litellm | Unpublish the litellm host"
   ansible.builtin.include_role:
-    name: gateway_listener
-    tasks_from: remove.yaml
+    name: envoy_gateway
+    tasks_from: unpublish.yaml
   vars:
-    gateway_listener_name: litellm
-    gateway_listener_namespace: "{{ litellm_namespace }}"
-    gateway_listener_hosts: [{name: litellm, hostname: "{{ litellm_hostname }}"}]
-    gateway_listener_path: "{{ litellm_path }}"
+    gateway_publish_name: litellm
+    gateway_publish_namespace: "{{ litellm_namespace }}"
+    gateway_publish_host: "{{ litellm_hostname }}"
+    gateway_publish_path: "{{ litellm_path }}"
 
 - name: "litellm | teardown | Remove ConfigMaps"
   kubernetes.core.k8s:

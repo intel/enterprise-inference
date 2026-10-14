@@ -252,12 +252,13 @@
 # HTTPRoutes to reference the Service (Gateway API blocks cross-ns refs by default).
 - name: "agentgateway | Publish the inference host"
   ansible.builtin.include_role:
-    name: gateway_listener
+    name: envoy_gateway
+    tasks_from: publish.yaml
   vars:
-    gateway_listener_name: inference
-    gateway_listener_namespace: "{{ envoy_gateway_namespace }}"
-    gateway_listener_hosts: [{name: inference, hostname: "{{ inference_hostname }}"}]
-    gateway_listener_path: "{{ inference_path }}"
+    gateway_publish_name: inference
+    gateway_publish_namespace: "{{ envoy_gateway_namespace }}"
+    gateway_publish_host: "{{ inference_hostname }}"
+    gateway_publish_path: "{{ inference_path }}"
   when:
     - ai_gateway_create | bool
 
@@ -274,14 +275,14 @@
           app.kubernetes.io/managed-by: agentgateway-role
       spec:
         hostnames:
-          - "{{ gateway_listener_publish.host }}"
+          - "{{ gateway_publish.host }}"
         parentRefs:
-          - "{{ gateway_listener_ref }}"
+          - "{{ gateway_publish.parent_ref }}"
         rules:
           - matches:
               - path:
                   type: PathPrefix
-                  value: "{{ gateway_listener_publish.relative_path }}"
+                  value: "{{ gateway_publish.relative_path }}"
             # Path mode: the AI gateway serves /v1/..., so strip /inference.
             filters: "{{ _inference_strip_prefix }}"
             backendRefs:

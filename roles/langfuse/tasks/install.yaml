@@ -533,12 +533,13 @@
 
 - name: "langfuse | Publish the langfuse host"
   ansible.builtin.include_role:
-    name: gateway_listener
+    name: envoy_gateway
+    tasks_from: publish.yaml
   vars:
-    gateway_listener_name: langfuse
-    gateway_listener_namespace: "{{ langfuse_namespace }}"
-    gateway_listener_hosts: [{name: langfuse, hostname: "{{ langfuse_hostname }}"}]
-    gateway_listener_mode: subdomain   # Langfuse cannot run under a path
+    gateway_publish_name: langfuse
+    gateway_publish_namespace: "{{ langfuse_namespace }}"
+    gateway_publish_host: "{{ langfuse_hostname }}"
+    gateway_publish_mode: subdomain   # Langfuse cannot run under a path
   when: gateway_create | bool
 
 - name: "langfuse | Create HTTPRoute"
@@ -553,7 +554,7 @@
         namespace: "{{ langfuse_namespace }}"
       spec:
         parentRefs:
-          - "{{ gateway_listener_ref }}"
+          - "{{ gateway_publish.parent_ref }}"
         hostnames:
           - "{{ langfuse_hostname }}"
         rules:

@@ -97,13 +97,13 @@
 
     - name: "envoy_ai_gateway | Unpublish the inference host"
       ansible.builtin.include_role:
-        name: gateway_listener
-        tasks_from: remove.yaml
+        name: envoy_gateway
+        tasks_from: unpublish.yaml
       vars:
-        gateway_listener_name: inference
-        gateway_listener_namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
-        gateway_listener_hosts: [{name: inference, hostname: "{{ inference_hostname }}"}]
-        gateway_listener_path: "{{ inference_path }}"
+        gateway_publish_name: inference
+        gateway_publish_namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
+        gateway_publish_host: "{{ inference_hostname }}"
+        gateway_publish_path: "{{ inference_path }}"
 
     - name: "envoy_ai_gateway | Find model-manager managed HTTPRoutes on ai-gateway"
       kubernetes.core.k8s_info:
