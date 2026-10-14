@@ -276,12 +276,14 @@
           # cache Helm maps kinds through, which can predate these CRDs.
           kubectl wait --for=condition=Established -f "$f" --timeout=120s >/dev/null
           kinds=$(yq -N 'select(.kind == "CustomResourceDefinition") | .spec.names.plural + "." + .spec.group' "$f")
-          for _ in $(seq 1 30); do
+          # Up to 3 minutes: a busy API server can take a while to list them.
+          for i in $(seq 1 90); do
             missing=$(grep -vxF -f <(kubectl api-resources -o name 2>/dev/null) <<< "$kinds" || true)
             [[ -z "$missing" ]] && break
+            (( i % 15 == 0 )) && echo "waiting for API discovery to list: $(paste -sd' ' <<< "$missing")"
             sleep 2
           done
-          [[ -z "$missing" ]] || { echo "API discovery does not list: $missing" >&2; exit 1; }
+          [[ -z "$missing" ]] || { echo "API discovery does not list after 3 minutes: $(paste -sd' ' <<< "$missing")" >&2; exit 1; }
         executable: /bin/bash
       register: _kserve_crd
       changed_when: "'serverside-applied' in _kserve_crd.stdout"
@@ -601,7 +603,7 @@
         cmd: kubectl api-resources -o name
       register: _kserve_llmisvc_kinds
       until: "'llminferenceserviceconfigs.serving.kserve.io' in _kserve_llmisvc_kinds.stdout_lines"
-      retries: 30
+      retries: 90
       delay: 2
       # A partially unavailable aggregated API makes api-resources exit 1; only
       # the listed kinds matter here.
