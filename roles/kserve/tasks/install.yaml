@@ -266,8 +266,11 @@
           existing=$(kubectl get -f "$f" --ignore-not-found -o name | sed 's#^.*/##')
           new=$(yq -N 'select(.kind == "CustomResourceDefinition") | .metadata.name' "$f" \
                 | { grep -vxF -f <(printf '%s\n' "$existing") || true; } | paste -sd, -)
-          NEW="$new" yq -i '(select(.kind == "CustomResourceDefinition")
-            | select(.metadata.name as $n | strenv(NEW) | split(",") | any_c(. == $n))
+          # CRDs already ours keep the label in every apply: server-side apply
+          # removes a field its own earlier apply set but this one omits.
+          ours=$(kubectl get crd -l enterprise-inference/owner=kserve -o name | sed 's#^.*/##' | paste -sd, -)
+          OURS="$new,$ours" yq -i '(select(.kind == "CustomResourceDefinition")
+            | select(.metadata.name as $n | strenv(OURS) | split(",") | any_c(. == $n))
             | .metadata.labels."enterprise-inference/owner") = "kserve"' "$f"
           echo "new CRDs (labelled as ours): ${new:-none}"
           kubectl apply --server-side -f "$f"
