@@ -14,6 +14,13 @@
       Valid values: Standard, Knative.
     success_msg: "Deploy mode: {{ kserve_deploy_mode }}"
 
+# Gateway class, controller namespace and version follow the platform Gateway.
+- name: "kserve | Load the platform Envoy Gateway"
+  ansible.builtin.include_role:
+    name: envoy_gateway
+    tasks_from: platform.yaml
+  when: kserve_enable_gateway_api | bool or kserve_llmisvc_enabled | bool
+
 # ── 1. cert-manager (installed by cert_manager role — just verify it's up) ───
 
 - name: "kserve | Verify cert-manager is running"
@@ -394,8 +401,8 @@
       kubernetes.core.k8s_info:
         api_version: apps/v1
         kind: Deployment
-        name: envoy-gateway
         namespace: "{{ kserve_envoy_gateway_namespace }}"
+        label_selectors: [control-plane=envoy-gateway]
       register: _eg_check
       failed_when: _eg_check.resources | length == 0
 
@@ -633,10 +640,29 @@
 #   InferencePool backends. agentgateway reads InferencePool natively through
 #   its own control plane, so this step is skipped for that provider.
 
+# A controller the platform did not install is never upgraded here; it must
+# already point its extension manager at the AI Gateway controller.
+- name: "kserve | Existing Envoy Gateway carries the AI integration"
+  vars:
+    _want: "{{ kserve_envoy_ai_controller_service }}.{{ kserve_envoy_ai_controller_namespace }}.svc.cluster.local"
+  ansible.builtin.assert:
+    that: gateway_platform.extension_manager_host == _want
+    fail_msg: >-
+      The Envoy Gateway in {{ kserve_envoy_gateway_namespace }} was not installed by this platform, so it is not
+      upgraded. Add the AI Gateway extension to its configuration (Helm values as in
+      roles/kserve/templates/envoy-gateway-ai-values.yaml.j2: extensionManager service {{ _want }}:1063,
+      backendResources InferencePool, extensionApis enableBackend and enableEnvoyPatchPolicy), then re-run.
+    quiet: true
+  when:
+    - kserve_llmisvc_enabled | bool
+    - (ai_gateway_provider | default('envoy')) == 'envoy'
+    - not gateway_platform.controller_managed | bool
+
 - name: "kserve | Envoy Gateway AI integration upgrade"
   when:
     - kserve_llmisvc_enabled | bool
     - (ai_gateway_provider | default('envoy')) == 'envoy'
+    - gateway_platform.controller_managed | bool
   block:
     - name: "kserve | Ensure temp directory exists"
       ansible.builtin.file:
@@ -652,10 +678,14 @@
 
     - name: "kserve | Upgrade Envoy Gateway with AI integration"
       kubernetes.core.helm:
-        name: envoy-gateway
+        name: "{{ kserve_envoy_gateway_release_name }}"
         chart_ref: "{{ kserve_envoy_gateway_helm_repo }}"
         release_namespace: "{{ kserve_envoy_gateway_namespace }}"
         chart_version: "v{{ kserve_envoy_gateway_version }}"
+        # CRDs come from the platform; keeps the platform's own values.
+        skip_crds: true
+        reset_values: false
+        reset_then_reuse_values: true
         values_files:
           - "{{ ansible_env.HOME }}/.cache/kserve/eg-ai-gateway-values.yaml"
         wait: true
@@ -665,8 +695,8 @@
       kubernetes.core.k8s_info:
         api_version: apps/v1
         kind: Deployment
-        name: envoy-gateway
         namespace: "{{ kserve_envoy_gateway_namespace }}"
+        label_selectors: [control-plane=envoy-gateway]
       register: _eg_upgraded
       until:
         - _eg_upgraded.resources | length > 0

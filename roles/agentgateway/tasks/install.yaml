@@ -239,6 +239,11 @@
                   value: 'string(json(request.body).model)'
   when: ai_gateway_create | bool
 
+- name: "agentgateway | Load the platform Envoy Gateway"
+  ansible.builtin.include_role:
+    name: envoy_gateway
+    tasks_from: platform.yaml
+
 # ── 7. External ingress: eg-gateway → ai-gateway HTTPRoute ───────────────────
 # Bridge the edge eg-gateway to the AI gateway, forwarding all inference.<domain>
 # traffic to the ai-gateway data-plane Service.

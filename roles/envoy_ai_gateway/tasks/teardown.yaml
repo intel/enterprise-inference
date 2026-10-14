@@ -3,6 +3,13 @@
 # Envoy AI Gateway — Teardown
 # =============================================================================
 
+- name: "envoy_ai_gateway | Load the platform Envoy Gateway"
+  ansible.builtin.include_role:
+    name: envoy_gateway
+    tasks_from: platform.yaml
+  vars:
+    _eg_detect_strict: false
+
 - name: "envoy_ai_gateway | Check if Helm release exists"
   kubernetes.core.helm_info:
     name: aieg

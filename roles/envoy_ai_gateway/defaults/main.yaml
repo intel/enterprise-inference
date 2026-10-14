@@ -1,5 +1,14 @@
 ---
-envoy_ai_gateway_version: "1.2.0"
+# Each release is built against one Envoy Gateway minor (upstream go.mod), so
+# the version follows the platform controller; set it to pin one.
+envoy_ai_gateway_versions:
+  "1.9": "1.2.0"
+  "1.8": "1.1.0"
+  "1.7": "0.6.0"
+envoy_ai_gateway_version: "{{ envoy_ai_gateway_versions[_eag_eg_minor] | default('') }}"
+_eag_eg_minor: >-
+  {{ ((gateway_platform | default({})).version | default(envoy_gateway_version | default('1.9.2'), true)
+      | string).split('.')[:2] | join('.') }}
 envoy_ai_gateway_namespace: "envoy-ai-gateway-system"
 envoy_ai_gateway_helm_repo: "oci://docker.io/envoyproxy"
 envoy_ai_gateway_wait_timeout: "300s"

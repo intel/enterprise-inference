@@ -3,6 +3,20 @@
 # Envoy AI Gateway — Install / Upgrade CRDs + Controller via Helm (OCI)
 # =============================================================================
 
+# Version, controller namespace and controllerName follow the platform controller.
+- name: "envoy_ai_gateway | Load the platform Envoy Gateway"
+  ansible.builtin.include_role:
+    name: envoy_gateway
+    tasks_from: platform.yaml
+
+- name: "envoy_ai_gateway | Release for Envoy Gateway {{ _eag_eg_minor }}"
+  ansible.builtin.assert:
+    that: envoy_ai_gateway_version | length > 0
+    fail_msg: >-
+      No Envoy AI Gateway release is known for Envoy Gateway {{ _eag_eg_minor }}
+      (known: {{ envoy_ai_gateway_versions.keys() | join(', ') }}). Set envoy_ai_gateway_version.
+    quiet: true
+
 - name: "envoy_ai_gateway | Check for existing Helm release"
   kubernetes.core.helm_info:
     name: aieg
@@ -189,7 +203,7 @@
       metadata:
         name: "{{ ai_gateway_class_name }}"
       spec:
-        controllerName: gateway.envoyproxy.io/gatewayclass-controller
+        controllerName: "{{ gateway_platform.controller_name }}"
         parametersRef:
           group: gateway.envoyproxy.io
           kind: EnvoyProxy
