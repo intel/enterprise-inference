@@ -2,72 +2,18 @@
 # =============================================================================
 # Langfuse — Teardown
 # =============================================================================
+# Removes only what this role installed (see langfuse_owned_objects).
+# langfuse-db-secret and, normally, the langfuse namespace belong to the
+# postgresql role and are left alone. The LiteLLM Deployment patch is not
+# reverted.
 
-- name: "langfuse | teardown | Remove Helm release"
-  kubernetes.core.helm:
-    name: langfuse
-    release_namespace: "{{ langfuse_namespace }}"
-    state: absent
-    wait: true
-  failed_when: false
-
-- name: "langfuse | teardown | Remove HTTPRoute"
-  kubernetes.core.k8s:
-    state: absent
-    api_version: gateway.networking.k8s.io/v1
-    kind: HTTPRoute
-    name: langfuse
-    namespace: "{{ langfuse_namespace }}"
-  failed_when: false
-
-- name: "langfuse | teardown | Remove SecurityPolicy"
-  kubernetes.core.k8s:
-    state: absent
-    api_version: gateway.envoyproxy.io/v1alpha1
-    kind: SecurityPolicy
-    name: langfuse-no-auth
-    namespace: "{{ langfuse_namespace }}"
-  failed_when: false
-
-- name: "langfuse | teardown | Remove Langfuse API keys from LiteLLM namespace"
-  kubernetes.core.k8s:
-    state: absent
-    api_version: v1
-    kind: Secret
-    name: langfuse-api-keys
-    namespace: "{{ litellm_namespace | default('litellm') }}"
-  failed_when: false
-
-- name: "langfuse | teardown | Remove ConfigMaps"
-  kubernetes.core.k8s:
-    state: absent
-    api_version: v1
-    kind: ConfigMap
-    name: "{{ item }}"
-    namespace: "{{ langfuse_namespace }}"
-  loop:
-    - langfuse-credentials
-  failed_when: false
-
-- name: "langfuse | teardown | Remove Secrets"
-  kubernetes.core.k8s:
-    state: absent
-    api_version: v1
-    kind: Secret
-    name: "{{ item }}"
-    namespace: "{{ langfuse_namespace }}"
-  loop:
-    - langfuse-secrets
-    - langfuse-db-secret
-  failed_when: false
-
-- name: "langfuse | teardown | Remove namespace"
-  kubernetes.core.k8s:
-    state: absent
-    api_version: v1
-    kind: Namespace
-    name: "{{ langfuse_namespace }}"
-  failed_when: false
+- name: "langfuse | teardown | Remove owned objects"
+  ansible.builtin.include_role:
+    name: inference_ownership
+    tasks_from: delete
+  vars:
+    ownership_name: langfuse
+    ownership_items: "{{ langfuse_owned_objects }}"
 
 - name: "langfuse | teardown | Remove Helm repo"
   kubernetes.core.helm_repository:
@@ -77,4 +23,4 @@
 
 - name: "langfuse | teardown | Complete"
   ansible.builtin.debug:
-    msg: "Langfuse removed from namespace '{{ langfuse_namespace }}'"
+    msg: "Langfuse teardown done for namespace '{{ langfuse_namespace }}' (only objects this role installed)"

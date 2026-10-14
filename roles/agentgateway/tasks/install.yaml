@@ -23,13 +23,12 @@
 
 # ── 2. Control-plane namespace + mesh/PSS labels ─────────────────────────────
 - name: "agentgateway | Ensure control-plane namespace"
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: v1
-      kind: Namespace
-      metadata:
-        name: "{{ agentgateway_namespace }}"
+  ansible.builtin.include_role:
+    name: inference_ownership
+    tasks_from: namespace
+  vars:
+    ownership_name: agentgateway
+    ownership_namespace: "{{ agentgateway_namespace }}"
 
 - name: "agentgateway | Label control-plane namespace — Istio ambient"
   kubernetes.core.k8s:
@@ -129,14 +128,15 @@
     msg: "agentgateway v{{ agentgateway_version }} ready in {{ agentgateway_namespace }}."
 
 # ── 5. Public AI Gateway (GatewayClass agentgateway) ─────────────────────────
+# Owned by llm_services, which runs later and keeps the models in it.
 - name: "agentgateway | Ensure AI Gateway namespace"
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: v1
-      kind: Namespace
-      metadata:
-        name: "{{ ai_gateway_namespace }}"
+  ansible.builtin.include_role:
+    name: inference_ownership
+    tasks_from: namespace
+  vars:
+    ownership_name: agentgateway
+    ownership_namespace: "{{ ai_gateway_namespace }}"
+    ownership_owner: llm_services
   when: ai_gateway_create | bool
 
 - name: "agentgateway | Label AI Gateway namespace — Istio ambient"
@@ -161,6 +161,8 @@
       kind: GatewayClass
       metadata:
         name: "{{ ai_gateway_class_name }}"
+        labels:
+          enterprise-inference/owner: agentgateway
       spec:
         controllerName: agentgateway.dev/agentgateway
   when: ai_gateway_create | bool
@@ -174,6 +176,8 @@
       metadata:
         name: "{{ ai_gateway_name }}"
         namespace: "{{ ai_gateway_namespace }}"
+        labels:
+          enterprise-inference/owner: agentgateway
       spec:
         gatewayClassName: "{{ ai_gateway_class_name }}"
         listeners:
@@ -215,6 +219,7 @@
         namespace: "{{ ai_gateway_namespace }}"
         labels:
           app.kubernetes.io/managed-by: agentgateway-role
+          enterprise-inference/owner: agentgateway
       spec:
         targetRefs:
           - group: gateway.networking.k8s.io
@@ -254,6 +259,7 @@
         namespace: "{{ envoy_gateway_namespace }}"
         labels:
           app.kubernetes.io/managed-by: agentgateway-role
+          enterprise-inference/owner: agentgateway
       spec:
         hostnames:
           - "{{ inference_hostname }}"
@@ -286,6 +292,7 @@
         namespace: "{{ ai_gateway_namespace }}"
         labels:
           app.kubernetes.io/managed-by: agentgateway-role
+          enterprise-inference/owner: agentgateway
       spec:
         from:
           - group: gateway.networking.k8s.io

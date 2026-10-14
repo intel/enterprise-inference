@@ -2,25 +2,16 @@
 # =============================================================================
 # Keycloak Config — Teardown
 # =============================================================================
+# Removes only what this role installed (see keycloak_config_owned_objects).
 
-- name: "keycloak_config | Delete KeycloakRealmImport CR (if lingering)"
-  kubernetes.core.k8s:
-    api_version: k8s.keycloak.org/v2beta1
-    kind: KeycloakRealmImport
-    name: "{{ keycloak_realm }}-realm-import"
-    namespace: "{{ keycloak_namespace }}"
-    state: absent
-  failed_when: false
-
-- name: "keycloak_config | Delete client secret"
-  kubernetes.core.k8s:
-    api_version: v1
-    kind: Secret
-    name: "{{ keycloak_client_secret_name }}"
-    namespace: "{{ keycloak_namespace }}"
-    state: absent
-  failed_when: false
+- name: "keycloak_config | Remove owned objects"
+  ansible.builtin.include_role:
+    name: inference_ownership
+    tasks_from: delete
+  vars:
+    ownership_name: keycloak_config
+    ownership_items: "{{ keycloak_config_owned_objects }}"
 
 - name: "keycloak_config | Teardown complete"
   ansible.builtin.debug:
-    msg: "Inference Keycloak config resources removed."
+    msg: "Inference Keycloak config teardown done (only objects this role installed)."

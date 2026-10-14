@@ -24,6 +24,14 @@
       Envoy AI Gateway v{{ envoy_ai_gateway_version }}
       {{ ('(from ' ~ _eag_installed_chart ~ ')') if _eag_installed_chart and _eag_installed_chart != _eag_target_chart else '' }}
 
+- name: "envoy_ai_gateway | Create namespace (owned)"
+  ansible.builtin.include_role:
+    name: inference_ownership
+    tasks_from: namespace
+  vars:
+    ownership_name: envoy_ai_gateway
+    ownership_namespace: "{{ envoy_ai_gateway_namespace }}"
+
 - name: "envoy_ai_gateway | Label namespace — Istio"
   kubernetes.core.k8s:
     state: present
@@ -119,14 +127,15 @@
 
 # ── AI Gateway GatewayClass + Gateway (for InferencePool routing) ────────────
 
+# Owned by llm_services, which runs later and keeps the models in it.
 - name: "envoy_ai_gateway | Ensure AI Gateway namespace exists"
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: v1
-      kind: Namespace
-      metadata:
-        name: "{{ ai_gateway_namespace }}"
+  ansible.builtin.include_role:
+    name: inference_ownership
+    tasks_from: namespace
+  vars:
+    ownership_name: envoy_ai_gateway
+    ownership_namespace: "{{ ai_gateway_namespace }}"
+    ownership_owner: llm_services
   when: ai_gateway_create | bool
 
 - name: "envoy_ai_gateway | Label AI Gateway namespace — Istio"
@@ -168,6 +177,8 @@
       metadata:
         name: ai-gateway-proxy-config
         namespace: "{{ ai_gateway_namespace }}"
+        labels:
+          enterprise-inference/owner: envoy_ai_gateway
       spec:
         provider:
           type: Kubernetes
@@ -188,6 +199,8 @@
       kind: GatewayClass
       metadata:
         name: "{{ ai_gateway_class_name }}"
+        labels:
+          enterprise-inference/owner: envoy_ai_gateway
       spec:
         controllerName: gateway.envoyproxy.io/gatewayclass-controller
         parametersRef:
@@ -198,10 +211,13 @@
   when: ai_gateway_create | bool
 
 - name: "envoy_ai_gateway | Create AI Gateway namespace"
-  kubernetes.core.k8s:
-    kind: Namespace
-    name: "{{ ai_gateway_namespace }}"
-    state: present
+  ansible.builtin.include_role:
+    name: inference_ownership
+    tasks_from: namespace
+  vars:
+    ownership_name: envoy_ai_gateway
+    ownership_namespace: "{{ ai_gateway_namespace }}"
+    ownership_owner: llm_services
   when: ai_gateway_create | bool
 
 - name: "envoy_ai_gateway | Create AI Gateway resource"
@@ -213,6 +229,8 @@
       metadata:
         name: "{{ ai_gateway_name }}"
         namespace: "{{ ai_gateway_namespace }}"
+        labels:
+          enterprise-inference/owner: envoy_ai_gateway
       spec:
         gatewayClassName: "{{ ai_gateway_class_name }}"
         listeners:
@@ -246,6 +264,7 @@
         namespace: "{{ envoy_ai_gateway_namespace }}"
         labels:
           app: ai-gateway
+          enterprise-inference/owner: envoy_ai_gateway
       spec:
         selector:
           matchLabels:
@@ -301,6 +320,7 @@
         namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
         labels:
           app.kubernetes.io/managed-by: envoy-ai-gateway-role
+          enterprise-inference/owner: envoy_ai_gateway
       spec:
         hostnames:
           - "{{ inference_hostname }}"

@@ -4,13 +4,12 @@
 # =============================================================================
 
 - name: "llm_services | Create namespace"
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: v1
-      kind: Namespace
-      metadata:
-        name: "{{ llm_services_namespace }}"
+  ansible.builtin.include_role:
+    name: inference_ownership
+    tasks_from: namespace
+  vars:
+    ownership_name: llm_services
+    ownership_namespace: "{{ llm_services_namespace }}"
 
 - name: "llm_services | Label namespace — Istio"
   kubernetes.core.k8s:
@@ -52,6 +51,7 @@
         labels:
           app.kubernetes.io/name: "{{ llm_services_model_store_pvc }}"
           app.kubernetes.io/managed-by: ansible
+          enterprise-inference/owner: llm_services
       spec: "{{ _llm_model_store_spec }}"
   vars:
     _llm_model_store_spec_base:

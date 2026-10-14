@@ -114,3 +114,24 @@ llm_services_engines:
 llm_services_observability_enabled: "{{ observability_enabled | default(true) | bool }}"
 # Enable ambient mode label on namespace if Istio is enabled in the cluster
 istio_enabled: false
+
+# Owned objects — what teardown removes (see roles/inference_ownership).
+# Only objects labelled enterprise-inference/owner (llm_services, or
+# model-manager for what the CLI deployed) are deleted. Models first (KServe
+# finalizers need the controller), then this role's objects, then the namespace.
+llm_services_owned_objects:
+  - {kind: LLMInferenceService, api_version: serving.kserve.io/v1alpha2, namespace: "{{ llm_services_namespace }}", owner: model-manager}
+  - {kind: InferenceService, api_version: serving.kserve.io/v1beta1, namespace: "{{ llm_services_namespace }}", owner: model-manager}
+  - {kind: AIGatewayRoute, api_version: aigateway.envoyproxy.io/v1beta1, namespace: "{{ llm_services_namespace }}", owner: model-manager}
+  - {kind: AIServiceBackend, api_version: aigateway.envoyproxy.io/v1beta1, namespace: "{{ llm_services_namespace }}", owner: model-manager}
+  - {kind: Backend, api_version: gateway.envoyproxy.io/v1alpha1, namespace: "{{ llm_services_namespace }}", owner: model-manager}
+  - {kind: HTTPRoute, api_version: gateway.networking.k8s.io/v1, namespace: "{{ llm_services_namespace }}", owner: model-manager}
+  - {kind: Job, api_version: batch/v1, namespace: "{{ llm_services_namespace }}", owner: model-manager}
+  - {kind: ConfigMap, api_version: v1, namespace: "{{ llm_services_namespace }}", owner: model-manager}
+  - {kind: Secret, api_version: v1, namespace: "{{ llm_services_namespace }}", owner: model-manager}
+  - {kind: ClusterServingRuntime, api_version: serving.kserve.io/v1alpha1, owner: model-manager}
+  - {kind: ServingRuntime, api_version: serving.kserve.io/v1alpha1, namespace: "{{ llm_services_namespace }}"}
+  - {kind: ServiceMonitor, api_version: monitoring.coreos.com/v1, namespace: "{{ observability_namespace | default('monitoring') }}"}
+  - {kind: ConfigMap, api_version: v1, namespace: "{{ llm_services_namespace }}"}
+  - {kind: PersistentVolumeClaim, api_version: v1, namespace: "{{ llm_services_namespace }}"}
+  - {kind: Namespace, api_version: v1, name: "{{ llm_services_namespace }}"}

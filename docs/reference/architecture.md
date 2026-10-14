@@ -111,6 +111,38 @@ deploy:
 
 Both land in `llm_services_namespace` (default `llm-inference`).
 
+## Ownership and teardown
+
+Every object the inference layer creates carries the label
+`enterprise-inference/owner: <role>` (`model-manager` for what the CLI
+deploys). Teardown deletes **only** objects with its own label, so it never removes
+something it did not create:
+
+- A Helm release is uninstalled only if the role installed it (its namespace or
+  its Helm release record carries the label). An LWS, Istio, Knative or NFD that
+  was already on the cluster is left alone.
+- CRDs are deleted only when labelled. On OpenShift, OpenShift AI's KServe CRDs
+  and webhooks are never deleted.
+- PersistentVolumes are not deleted directly. Removing the `model-store` PVC lets
+  its StorageClass reclaim policy decide, so a `Retain` volume keeps its data.
+- Namespaces and secrets created by the platform layer (for example `litellm`,
+  `langfuse` and their database secrets) are left alone.
+- A namespace is created (and labelled) only if it does not already exist, so a
+  namespace that was there before install is never deleted. A namespace the
+  layer did create is deleted on teardown together with **everything in it**,
+  including objects someone else put there — keep your own workloads out of
+  the inference namespaces (for example `llm-inference`).
+
+Each role lists where its objects can be in `<role>_owned_objects` (role defaults).
+
+> [!NOTE]
+> The label was introduced with label-only teardown. Objects from an install made
+> before that carry no label, so teardown does not remove them; remove them by
+> hand or start from a fresh cluster.
+
+The helper roles `inference_platform` (platform detection) and `inference_ownership`
+(label-only delete) are not components; the roles above include them.
+
 ## Related
 
 - [Inference Request Flow](request_flow.md) — end-to-end routing for both auth modes

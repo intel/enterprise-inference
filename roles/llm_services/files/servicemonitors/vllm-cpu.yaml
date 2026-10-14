@@ -5,6 +5,7 @@ metadata:
   labels:
     app.kubernetes.io/component: inference
     inference-engine: vllm-cpu
+    enterprise-inference/owner: llm_services
 spec:
   # Match all namespaces — KServe deploys inference services in llm-inference
   namespaceSelector:

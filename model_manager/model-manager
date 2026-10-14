@@ -25,6 +25,7 @@ MM_CONFIG="${MM_CONFIG:-$SCRIPT_DIR/models.yaml}"
 
 # ── Libraries ────────────────────────────────────────────────────────────────
 source "$MM_LIB/helpers.sh"
+source "$MM_LIB/platform.sh"
 source "$MM_LIB/config.sh"
 source "$MM_LIB/routing.sh"
 source "$MM_LIB/nri.sh"
@@ -133,6 +134,10 @@ ${BOLD}${CYAN}For status / scale / logs, use kubectl:${RESET}
 ${BOLD}${CYAN}Environment:${RESET}
   ${GREEN}HF_TOKEN${RESET}              HuggingFace token for gated models
   ${GREEN}MM_CONFIG${RESET}             Path to models.yaml
+  ${GREEN}MM_PLATFORM${RESET}           Platform name from platforms.yaml, kubernetes, or
+                        auto (default: detect from the cluster). Set by the
+                        Ansible install.
+  ${GREEN}MM_PLATFORMS_FILE${RESET}     Path to platforms.yaml (platform registry)
   ${GREEN}MM_CPU_POLICY${RESET}         Cluster CPU policy: nri-balloons (default) |
                         kubelet-static | best-effort. Set by the Ansible
                         install from kubernetes_cpu_policy; --cpu-policy wins.
@@ -804,6 +809,7 @@ download_weights() {
     if [[ -n "${HF_TOKEN:-}" ]]; then
         kubectl create secret generic hf-token -n "$MODEL_NAMESPACE" \
             --from-literal=token="$HF_TOKEN" --dry-run=client -o yaml \
+            | kubectl label --local -f - -o yaml enterprise-inference/owner=model-manager \
             | kubectl apply -f - >/dev/null 2>&1
     fi
 
@@ -1507,6 +1513,8 @@ main() {
     esac
 
     check_prerequisites
+    # Before any command, so every later step can branch on platform_is.
+    platform_resolve
 
     case "$command" in
         deploy)               cmd_deploy               "$target" ;;

@@ -16,3 +16,21 @@ ai_gateway_service_name: "ai-gateway"
 
 # External inference hostname (eg-gateway TLS listener → ai-gateway)
 inference_hostname: "inference.{{ base_domain_name | default('inference-example.com') }}"
+
+# Owned objects — what teardown removes (see roles/inference_ownership).
+# Only objects labelled enterprise-inference/owner (envoy_ai_gateway, or
+# model-manager for its per-model routes) are deleted, so agentgateway's
+# objects of the same name are safe. The CRDs chart templates its CRDs, so
+# helm uninstall removes them. The llm-inference namespace belongs to
+# llm_services and is never deleted here.
+envoy_ai_gateway_owned_objects:
+  - {helm: aieg, namespace: "{{ envoy_ai_gateway_namespace }}"}
+  - {helm: aieg-crd, namespace: "{{ envoy_ai_gateway_namespace }}"}
+  - {kind: AIGatewayRoute, api_version: aigateway.envoyproxy.io/v1beta1, namespace: "{{ ai_gateway_namespace }}", owner: model-manager}
+  - {kind: HTTPRoute, api_version: gateway.networking.k8s.io/v1, namespace: "{{ ai_gateway_namespace }}", owner: model-manager}
+  - {kind: HTTPRoute, api_version: gateway.networking.k8s.io/v1, namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"}
+  - {kind: Gateway, api_version: gateway.networking.k8s.io/v1, namespace: "{{ ai_gateway_namespace }}"}
+  - {kind: EnvoyProxy, api_version: gateway.envoyproxy.io/v1alpha1, namespace: "{{ ai_gateway_namespace }}"}
+  - {kind: GatewayClass, api_version: gateway.networking.k8s.io/v1}
+  - {kind: ServiceMonitor, api_version: monitoring.coreos.com/v1, namespace: "{{ envoy_ai_gateway_namespace }}"}
+  - {kind: Namespace, api_version: v1, name: "{{ envoy_ai_gateway_namespace }}"}

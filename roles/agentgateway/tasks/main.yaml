@@ -1,5 +1,9 @@
 ---
 # Copyright (C) 2025-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
+- name: "agentgateway | Detect platform"
+  ansible.builtin.include_role:
+    name: inference_platform
+
 - name: "agentgateway | Dispatch action: {{ component_action }}"
   ansible.builtin.include_tasks: "{{ component_action }}.yaml"
