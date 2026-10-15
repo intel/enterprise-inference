@@ -21,3 +21,6 @@ keycloak_client_secret_name: "keycloak-client-secret"
 
 # JWT token lifespan in seconds (default: 900 = 15 minutes)
 keycloak_token_lifespan: 900
+
+# kcadm session file inside the Keycloak pod (see tasks/install.yaml).
+keycloak_kcadm_config: "/tmp/kcadm.config"

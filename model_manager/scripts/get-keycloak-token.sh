@@ -5,6 +5,8 @@
 # Usage: source ./scripts/get-keycloak-token.sh [--lifespan SECONDS]
 #   Exports: TOKEN, GATEWAY_IP, GATEWAY_DOMAIN, GATEWAY_URL (API base, path-aware)
 #   All values auto-discovered from cluster — no manual config needed.
+#   On OpenShift (no LoadBalancer): MM_GATEWAY_IP=<ingress VIP> if the *.apps
+#   hostnames do not resolve from this machine.
 #
 # Options:
 #   --lifespan SECONDS   Set token validity (updates Keycloak client setting)
@@ -76,7 +78,15 @@ GATEWAY_IP=$(kubectl get svc -n envoy-gateway-system \
   --field-selector spec.type=LoadBalancer \
   -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null)
 
-if [[ -z "$GATEWAY_IP" ]]; then
+# On OpenShift the gateways are published through the router (passthrough
+# Routes), not a LoadBalancer: the hostnames resolve to the ingress VIP through
+# DNS, or MM_GATEWAY_IP names it.
+GATEWAY_IP="${MM_GATEWAY_IP:-$GATEWAY_IP}"
+if [[ -z "$GATEWAY_IP" ]] && kubectl api-resources --api-group=route.openshift.io -o name 2>/dev/null | grep -q '^routes'; then
+  _gt_router=1
+fi
+
+if [[ -z "$GATEWAY_IP" && -z "${_gt_router:-}" ]]; then
   _gt_err "Could not find Envoy Gateway LoadBalancer IP.\n  Is the platform installed? Run: ./es_auto_installer.sh install platform"
 fi
 
@@ -112,19 +122,21 @@ fi
 # When port-forwarding, we speak HTTPS to keycloak-service:https (8443).
 _gt_open_keycloak() {
   local resolve_ip="$GATEWAY_IP"
+  local resolve=()
+  [[ -n "$resolve_ip" ]] && resolve=(--resolve "${KEYCLOAK_DOMAIN}:443:${resolve_ip}")
   # Attempt 1: direct connection through external LB.
   # Require HTTP 200 AND a JSON body — some clusters proxy 5xx errors as HTML
   # through the same route, which would otherwise pass a naive probe.
   local probe_body probe_code
   probe_body=$(curl -sk --noproxy '*' --connect-timeout 3 --max-time 5 \
-      --resolve "${KEYCLOAK_DOMAIN}:443:${resolve_ip}" \
+      "${resolve[@]}" \
       -o /dev/stdout -w "\n__HTTP__%{http_code}" \
       "https://${KEYCLOAK_DOMAIN}${KEYCLOAK_PATH}/realms/inference/.well-known/openid-configuration" 2>/dev/null)
   probe_code="${probe_body##*__HTTP__}"
   probe_body="${probe_body%__HTTP__*}"
   if [[ "$probe_code" == "200" && "$probe_body" == *'"issuer"'* ]]; then
     _gt_kc_base="https://${KEYCLOAK_DOMAIN}${KEYCLOAK_PATH}"
-    _gt_kc_curl_extra=(--resolve "${KEYCLOAK_DOMAIN}:443:${resolve_ip}")
+    _gt_kc_curl_extra=("${resolve[@]}")
     _gt_kc_pf_pid=""
     return 0
   fi
@@ -258,9 +270,10 @@ iat = json.loads(base64.urlsafe_b64decode(t)).get('iat', exp)
 print(f'{exp - iat}')
 " 2>/dev/null)
 
+unset _gt_router
 export TOKEN GATEWAY_IP GATEWAY_DOMAIN GATEWAY_URL KEYCLOAK_DOMAIN
 echo "Token acquired. Exported: TOKEN, GATEWAY_IP, GATEWAY_DOMAIN, GATEWAY_URL"
-echo "  Gateway:  ${GATEWAY_URL} → ${GATEWAY_IP}"
+echo "  Gateway:  ${GATEWAY_URL} → ${GATEWAY_IP:-(DNS, OpenShift router)}"
 echo "  Keycloak: ${KEYCLOAK_DOMAIN}${KEYCLOAK_PATH}"
 if [[ -n "${_gt_exp:-}" ]]; then
   echo "  Validity: ${_gt_exp}s ($((_gt_exp / 60)) min)"

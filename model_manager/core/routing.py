@@ -10,7 +10,7 @@ import time
 import urllib.error
 import urllib.request
 
-from . import k8s
+from . import k8s, platform
 from .config import MM_DIR, Model, config_value, env, gateway_ref, gateway_service, global_config, inference_config
 from .renderer import render, template
 from .ui import BOLD, CYAN, DIM, RESET, info, ok, warn
@@ -100,7 +100,10 @@ def deregister(m: Model) -> None:
 
 
 def patch_pool_status(m: Model) -> None:
-    """Mark the InferencePool Accepted so the gateway route goes live (done at ready time, after KServe creates it)."""
+    """Mark the InferencePool Accepted so the gateway route goes live (done at ready time, after KServe creates it).
+    On OpenShift the Gateway controller reports the status itself."""
+    if platform.is_openshift():
+        return
     pool = f"{m.name}-inference-pool"
     for _ in range(24):
         if k8s.succeeds("get", "inferencepool", pool, "-n", m.namespace):
@@ -324,6 +327,10 @@ def print_endpoints(m: Model) -> None:
         print(f"    -o jsonpath='{{.data.master_key}}' | base64 -d){RESET}")
     else:
         print(f"\n  {BOLD}1. Get a Keycloak token:{RESET}")
+        if platform.is_openshift():
+            # Published through the router, so there is no LoadBalancer IP to read.
+            print(f"  {DIM}# OpenShift: if {host} does not resolve here, add MM_GATEWAY_IP=<ingress VIP>{RESET}")
+            print(f"  {DIM}# and curl --resolve \"{host}:443:$MM_GATEWAY_IP\"{RESET}")
         print(f"  {DIM}source {MM_DIR}/scripts/get-keycloak-token.sh{RESET}")
         print(f"  {DIM}# exports TOKEN, GATEWAY_IP, GATEWAY_DOMAIN{RESET}")
     print(f"\n  {BOLD}2. Call the model:{RESET}")
