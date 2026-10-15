@@ -1,0 +1,260 @@
+---
+# =============================================================================
+# KServe on OpenShift — the OpenShift AI inference Gateway
+# =============================================================================
+# See the OpenShift block in defaults/main.yaml. Everything created here carries
+# app.kubernetes.io/managed-by: ai-solutions.
+# =============================================================================
+
+- name: "kserve | OpenShift: look up the inference Gateway"
+  kubernetes.core.k8s_info:
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    name: "{{ kserve_openshift_gateway_name }}"
+    namespace: "{{ kserve_openshift_gateway_namespace }}"
+  register: _kserve_ocp_gw
+
+- name: "kserve | OpenShift: note who owns the Gateway"
+  ansible.builtin.set_fact:
+    _kserve_ocp_gw_ours: >-
+      {{ (_kserve_ocp_gw.resources | length == 0)
+         or ((_kserve_ocp_gw.resources[0].metadata.labels | default({}))['app.kubernetes.io/managed-by'] | default('') == 'ai-solutions') }}
+
+- name: "kserve | OpenShift: existing Gateway is left alone"
+  ansible.builtin.debug:
+    msg: >-
+      Gateway {{ kserve_openshift_gateway_namespace }}/{{ kserve_openshift_gateway_name }} already exists
+      and was not created by the installer. Using it as is: the installer does not
+      add a Route or an AuthPolicy to it, so make sure it is exposed and authenticated.
+  when: not _kserve_ocp_gw_ours | bool
+
+- name: "kserve | OpenShift: create and publish the inference Gateway"
+  when: _kserve_ocp_gw_ours | bool
+  block:
+    - name: "kserve | OpenShift: find a GatewayClass of the OpenShift gateway controller"
+      kubernetes.core.k8s_info:
+        api_version: gateway.networking.k8s.io/v1
+        kind: GatewayClass
+      register: _kserve_ocp_gwclasses
+      when: kserve_openshift_gatewayclass | length == 0
+
+    - name: "kserve | OpenShift: pick the GatewayClass"
+      vars:
+        _ocp_classes: >-
+          {{ (_kserve_ocp_gwclasses.resources | default([]))
+             | selectattr('spec.controllerName', 'equalto', 'openshift.io/gateway-controller/v1')
+             | map(attribute='metadata.name') | list }}
+      ansible.builtin.set_fact:
+        _kserve_ocp_gwclass: >-
+          {{ kserve_openshift_gatewayclass if kserve_openshift_gatewayclass | length > 0
+             else ('openshift-default' if 'openshift-default' in _ocp_classes else (_ocp_classes | first | default(''))) }}
+
+    - name: "kserve | OpenShift: require a GatewayClass"
+      ansible.builtin.assert:
+        that: _kserve_ocp_gwclass | length > 0
+        fail_msg: >-
+          No GatewayClass with controllerName openshift.io/gateway-controller/v1 found.
+          Create the openshift-default GatewayClass (OpenShift Gateway API), or set
+          kserve_openshift_gatewayclass.
+        quiet: true
+
+    - name: "kserve | OpenShift: read the platform gateway certificate"
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "{{ kserve_openshift_tls_source_secret }}"
+        namespace: "{{ kserve_openshift_tls_source_namespace }}"
+      register: _kserve_ocp_tls_src
+      no_log: true
+
+    - name: "kserve | OpenShift: require the platform gateway certificate"
+      ansible.builtin.assert:
+        that: _kserve_ocp_tls_src.resources | length > 0
+        fail_msg: >-
+          Secret {{ kserve_openshift_tls_source_namespace }}/{{ kserve_openshift_tls_source_secret }} not found.
+          Install the platform layer (envoy_gateway) first.
+        quiet: true
+
+    - name: "kserve | OpenShift: copy the certificate next to the Gateway"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          type: kubernetes.io/tls
+          metadata:
+            name: "{{ kserve_openshift_gateway_name }}-tls"
+            namespace: "{{ kserve_openshift_gateway_namespace }}"
+            labels:
+              app.kubernetes.io/managed-by: ai-solutions
+          data:
+            tls.crt: "{{ _kserve_ocp_tls_src.resources[0].data['tls.crt'] }}"
+            tls.key: "{{ _kserve_ocp_tls_src.resources[0].data['tls.key'] }}"
+      no_log: true
+
+    # The gateway controller would otherwise ask for a LoadBalancer Service; the
+    # OpenShift router reaches it instead (Route below).
+    - name: "kserve | OpenShift: Gateway infrastructure parameters (ClusterIP)"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: "{{ kserve_openshift_gateway_name }}-config"
+            namespace: "{{ kserve_openshift_gateway_namespace }}"
+            labels:
+              app.kubernetes.io/managed-by: ai-solutions
+          data:
+            service: |
+              spec:
+                type: ClusterIP
+
+    - name: "kserve | OpenShift: apply the inference Gateway"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: gateway.networking.k8s.io/v1
+          kind: Gateway
+          metadata:
+            name: "{{ kserve_openshift_gateway_name }}"
+            namespace: "{{ kserve_openshift_gateway_namespace }}"
+            labels:
+              app.kubernetes.io/managed-by: ai-solutions
+          spec:
+            gatewayClassName: "{{ _kserve_ocp_gwclass }}"
+            infrastructure:
+              parametersRef:
+                group: ""
+                kind: ConfigMap
+                name: "{{ kserve_openshift_gateway_name }}-config"
+            listeners:
+              - name: https
+                port: 443
+                protocol: HTTPS
+                tls:
+                  mode: Terminate
+                  certificateRefs:
+                    - group: ""
+                      kind: Secret
+                      name: "{{ kserve_openshift_gateway_name }}-tls"
+                allowedRoutes:
+                  namespaces:
+                    from: Selector
+                    selector:
+                      matchExpressions:
+                        - key: kubernetes.io/metadata.name
+                          operator: In
+                          values: "{{ kserve_openshift_route_namespaces }}"
+
+    - name: "kserve | OpenShift: wait for the Gateway to be programmed"
+      kubernetes.core.k8s_info:
+        api_version: gateway.networking.k8s.io/v1
+        kind: Gateway
+        name: "{{ kserve_openshift_gateway_name }}"
+        namespace: "{{ kserve_openshift_gateway_namespace }}"
+      register: _kserve_ocp_gw_status
+      until: >-
+        (_kserve_ocp_gw_status.resources[0].status.conditions | default([])
+         | selectattr('type', 'equalto', 'Programmed') | selectattr('status', 'equalto', 'True') | list | length) > 0
+      retries: 30
+      delay: 10
+
+    - name: "kserve | OpenShift: find the Gateway Service"
+      kubernetes.core.k8s_info:
+        kind: Service
+        namespace: "{{ kserve_openshift_gateway_namespace }}"
+        label_selectors:
+          - "gateway.networking.k8s.io/gateway-name={{ kserve_openshift_gateway_name }}"
+      register: _kserve_ocp_gw_svc
+      until: _kserve_ocp_gw_svc.resources | length > 0
+      retries: 30
+      delay: 5
+
+    - name: "kserve | OpenShift: publish the Gateway through the router (passthrough)"
+      vars:
+        _svc: "{{ _kserve_ocp_gw_svc.resources[0] }}"
+        _port: "{{ _svc.spec.ports | selectattr('port', 'equalto', 443) | first }}"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: route.openshift.io/v1
+          kind: Route
+          metadata:
+            name: "{{ kserve_openshift_gateway_name }}"
+            namespace: "{{ kserve_openshift_gateway_namespace }}"
+            labels:
+              app.kubernetes.io/managed-by: ai-solutions
+          spec:
+            host: "{{ kserve_openshift_hostname }}"
+            to:
+              kind: Service
+              name: "{{ _svc.metadata.name }}"
+            port:
+              targetPort: "{{ _port.name | default(_port.port) }}"
+            tls:
+              termination: passthrough
+              insecureEdgeTerminationPolicy: Redirect
+            wildcardPolicy: None
+
+    # Gateway-wide overrides: every model route on this Gateway needs a Keycloak
+    # token, whatever per-route policy is attached (they also win over the
+    # Kubernetes-token AuthPolicy odh-model-controller puts on the Gateway).
+    # Authorino fetches the keys from the in-cluster Keycloak Service; the issuer
+    # check pins the public issuer that Keycloak writes into the token.
+    # The deny messages are fixed: by default Authorino copies its error text
+    # into X-Ext-Auth-Reason, and the Connectivity Link 1.4 wasm-shim panics on
+    # one containing a quote (e.g. a malformed JWT), leaving the request hanging.
+    - name: "kserve | OpenShift: require a Keycloak JWT on the Gateway (AuthPolicy)"
+      when: kserve_openshift_auth_enabled | bool
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: kuadrant.io/v1
+          kind: AuthPolicy
+          metadata:
+            name: "{{ kserve_openshift_gateway_name }}-keycloak"
+            namespace: "{{ kserve_openshift_gateway_namespace }}"
+            labels:
+              app.kubernetes.io/managed-by: ai-solutions
+          spec:
+            targetRef:
+              group: gateway.networking.k8s.io
+              kind: Gateway
+              name: "{{ kserve_openshift_gateway_name }}"
+            overrides:
+              rules:
+                authentication:
+                  keycloak:
+                    jwt:
+                      jwksUrl: "{{ kserve_openshift_keycloak_jwks_url | trim }}"
+                authorization:
+                  issuer-and-audience:
+                    patternMatching:
+                      patterns:
+                        - selector: auth.identity.iss
+                          operator: eq
+                          value: "{{ kserve_openshift_keycloak_issuer | trim }}"
+                        - selector: auth.identity.aud
+                          operator: incl
+                          value: "{{ kserve_openshift_keycloak_audience }}"
+                response:
+                  unauthenticated:
+                    message:
+                      value: missing or invalid access token
+                    headers:
+                      WWW-Authenticate:
+                        value: Bearer realm="{{ keycloak_realm | default('inference') }}"
+                    body:
+                      value: '{"error":"unauthorized","message":"a valid Keycloak access token is required"}'
+                  unauthorized:
+                    message:
+                      value: token not issued for this service
+                    body:
+                      value: '{"error":"forbidden","message":"the token is not issued for this service"}'
+
+    - name: "kserve | OpenShift: inference Gateway summary"
+      ansible.builtin.debug:
+        msg: >-
+          Models are served at https://{{ kserve_openshift_hostname }}/<namespace>/<model>/v1/...
+          through {{ kserve_openshift_gateway_namespace }}/{{ kserve_openshift_gateway_name }}
+          (class {{ _kserve_ocp_gwclass }}){{ ', Keycloak JWT required' if kserve_openshift_auth_enabled | bool else '' }}.

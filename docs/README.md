@@ -15,6 +15,7 @@ Get a model running and call it.
 |-------|----------------|
 | [Deploy a Model](deploy/deploy_models.md) | Every `model-manager` command and flag — deploy, update, undeploy, gated models, ad-hoc Hugging Face deploys |
 | [Accessing Models](deploy/accessing_models.md) | Endpoints and credentials for both auth modes, and how to list what's serving |
+| [Deploy on OpenShift](deploy/openshift.md) | *Initial release, WIP.* `install inference` on OpenShift AI, deploying models with `model-manager`, CPU balloons, calling a model |
 
 ## Customize
 

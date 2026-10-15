@@ -21,7 +21,12 @@ __llm_mm_env:
   # In-cluster AI Gateway data plane LiteLLM calls vLLM models through.
   MM_LITELLM_KSERVE_URL: "{{ _llm_ai_gateway_url }}"
   # AIGatewayRoute unified endpoint — only when auth_type=jwt.
-  MM_AIGATEWAY_ENABLED: "{{ 'true' if auth_type | default('jwt') == 'jwt' else 'false' }}"
+  # Not on OpenShift: models are routed by OpenShift AI's inference Gateway
+  # (kserve role), at /<namespace>/<model>/v1/...
+  MM_AIGATEWAY_ENABLED: "{{ 'true' if auth_type | default('jwt') == 'jwt' and not (cluster_distribution | default('kubernetes') == 'openshift') else 'false' }}"
+  MM_PLATFORM: "{{ cluster_distribution | default('kubernetes') }}"
+  MM_INFERENCE_GATEWAY: "{{ kserve_openshift_gateway_name | default('openshift-ai-inference') if cluster_distribution | default('kubernetes') == 'openshift' else '' }}"
+  MM_INFERENCE_GATEWAY_NS: "{{ kserve_openshift_gateway_namespace | default('openshift-ingress') if cluster_distribution | default('kubernetes') == 'openshift' else '' }}"
   MM_EG_GATEWAY_NAME: "{{ gateway_name | default('eg-gateway') }}"
   MM_EG_GATEWAY_NS: "{{ gateway_namespace | default('envoy-gateway-system') }}"
   # API host and path in the endpoint hints model-manager prints; path mode

@@ -1,0 +1,83 @@
+---
+# =============================================================================
+# KServe on OpenShift — provided by Red Hat OpenShift AI
+# =============================================================================
+# OpenShift AI owns the KServe CRDs, controllers, webhooks and
+# LLMInferenceServiceConfig presets (redhat-ods-applications). Installing
+# upstream KServe next to it would overwrite those CRDs and run a second
+# controller, so install and validate check the prerequisites, install adds
+# the inference Gateway when it is missing (openshift_gateway.yaml), and
+# teardown leaves everything alone.
+# =============================================================================
+
+- name: "kserve | OpenShift: teardown is a no-op"
+  ansible.builtin.debug:
+    msg: >-
+      KServe belongs to OpenShift AI on this cluster; nothing to tear down.
+      Remove models with the llm_services teardown instead.
+  when: component_action == 'teardown'
+
+- name: "kserve | OpenShift: check OpenShift AI"
+  when: component_action != 'teardown'
+  block:
+    - name: "kserve | OpenShift: look up the DataScienceCluster"
+      kubernetes.core.k8s_info:
+        api_version: datasciencecluster.opendatahub.io/v2
+        kind: DataScienceCluster
+      register: _kserve_dsc
+      failed_when: false
+
+    - name: "kserve | OpenShift: look up the OpenShift AI KServe controllers"
+      kubernetes.core.k8s_info:
+        kind: Deployment
+        namespace: "{{ kserve_openshift_namespace }}"
+        name: "{{ item }}"
+      loop: [kserve-controller-manager]
+      register: _kserve_ocp_controllers
+
+    - name: "kserve | OpenShift: look up required CRDs"
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: "{{ item }}"
+      loop:
+        - inferenceservices.serving.kserve.io
+        - llminferenceservices.serving.kserve.io
+        - inferencepools.inference.networking.k8s.io
+        - leaderworkersets.leaderworkerset.x-k8s.io
+      register: _kserve_ocp_crds
+
+    - name: "kserve | OpenShift: require OpenShift AI with KServe managed"
+      vars:
+        _dsc: "{{ (_kserve_dsc.resources | default([]) | first) | default({}) }}"
+        _conds: "{{ _dsc.status.conditions | default([]) }}"
+        _missing_crds: >-
+          {{ _kserve_ocp_crds.results | rejectattr('resources') | map(attribute='item') | list }}
+        _missing_ctrl: >-
+          {{ _kserve_ocp_controllers.results
+             | rejectattr('resources.0.status.readyReplicas', 'defined')
+             | map(attribute='item') | list }}
+      ansible.builtin.assert:
+        that:
+          - _dsc | length > 0
+          - (_dsc.spec.components.kserve.managementState | default('')) == 'Managed'
+          - _conds | selectattr('type', 'equalto', 'KserveReady') | selectattr('status', 'equalto', 'True') | list | length > 0
+          - _conds | selectattr('type', 'equalto', 'KserveLLMInferenceServiceDependencies') | selectattr('status', 'equalto', 'True') | list | length > 0
+          - _missing_crds | length == 0
+          - _missing_ctrl | length == 0
+        fail_msg: |-
+          OpenShift AI is not ready to serve models:
+            DataScienceCluster: {{ _dsc.metadata.name | default('none') }}, kserve={{ _dsc.spec.components.kserve.managementState | default('-') }}
+            {% for c in _conds if c.type in ['KserveReady', 'KserveLLMInferenceServiceDependencies'] %}
+            {{ c.type }}={{ c.status }} {{ c.message | default('') }}
+            {% endfor %}
+            missing CRDs: {{ _missing_crds | join(', ') or 'none' }}
+            controllers not ready in {{ kserve_openshift_namespace }}: {{ _missing_ctrl | join(', ') or 'none' }}
+          Install rhods-operator, LeaderWorkerSet and Red Hat Connectivity Link from
+          OperatorHub and create a DataScienceCluster with kserve Managed
+          (docs/deploy/openshift.md, steps 9 to 11). The installer does not deploy KServe on OpenShift.
+        success_msg: "OpenShift AI KServe ready ({{ _dsc.metadata.name }})"
+
+- name: "kserve | OpenShift: inference Gateway"
+  ansible.builtin.include_tasks: openshift_gateway.yaml
+  when: component_action == 'install'

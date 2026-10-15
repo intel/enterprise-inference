@@ -1,3 +1,7 @@
 ---
+# On OpenShift the component comes from the marketplace: openshift.yaml only
+# checks that it is there, and never installs or deletes anything.
 - name: "nfd | Dispatch action: {{ component_action }}"
-  ansible.builtin.include_tasks: "{{ component_action }}.yaml"
+  ansible.builtin.include_tasks:
+    file: >-
+      {{ 'openshift.yaml' if cluster_distribution | default('kubernetes') == 'openshift' else component_action ~ '.yaml' }}
