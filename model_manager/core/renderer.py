@@ -6,6 +6,7 @@ import os
 import re
 from pathlib import Path
 
+from . import platform
 from .config import Catalog, Model, gateway_ref, mm_path, pick, text
 from .ui import abort
 
@@ -18,7 +19,7 @@ def render(path: Path, **values: str) -> str:
     out = path.read_text(encoding="utf-8")
     for key, value in values.items():
         out = out.replace("{{" + key + "}}", value)
-    return out.rstrip("\n") + "\n"
+    return platform.adapt(out.rstrip("\n") + "\n")
 
 
 def template(name: str) -> Path:
@@ -128,13 +129,13 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
     if m.kind == "LLMInferenceService":
         inline = inline_chat_template(m)
         gateway, gateway_ns = gateway_ref()
-        return render(
+        return platform.adapt_llmisvc(render(
             template("llm-inference-service.yaml"), **common, IMAGE=m.image,
             GATEWAY_NAME=gateway, GATEWAY_NAMESPACE=gateway_ns,
             CHAT_TEMPLATE_MOUNT=(f"        volumeMounts:\n          - name: chat-template\n"
                                  f"            mountPath: {CHAT_TEMPLATE_DIR}\n            readOnly: true\n") if inline else "",
             CHAT_TEMPLATE_VOLUME=(f"    volumes:\n      - name: chat-template\n        configMap:\n"
-                                  f"          name: {m.name}-chat-template\n") if inline else "")
+                                  f"          name: {m.name}-chat-template\n") if inline else ""))
     if m.kind == "InferenceService":
         name = "inference-service-ovms.yaml" if m.runtime == "openvino" else "inference-service.yaml"
         return render(template(name), **common, MODEL_ID=m.model_id, PVC_NAME=catalog.pvc,

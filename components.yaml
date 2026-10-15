@@ -24,14 +24,16 @@ components:
     enabled: "{{ keycloak_enabled | default(true) | bool }}"
     depends_on: []
 
+  # The AI gateways are skipped on OpenShift: models are routed through the
+  # OpenShift AI inference Gateway (openshift-ingress/openshift-ai-inference).
   - name: envoy_ai_gateway
     layer: inference
-    enabled: "{{ kserve_enabled | default(true) | bool and (ai_gateway_provider | default('envoy')) == 'envoy' }}"
+    enabled: "{{ kserve_enabled | default(true) | bool and (ai_gateway_provider | default('envoy')) == 'envoy' and not (cluster_distribution | default('kubernetes') == 'openshift') }}"
     depends_on: []
 
   - name: agentgateway
     layer: inference
-    enabled: "{{ (ai_gateway_provider | default('envoy')) == 'agentgateway' }}"
+    enabled: "{{ (ai_gateway_provider | default('envoy')) == 'agentgateway' and not (cluster_distribution | default('kubernetes') == 'openshift') }}"
     depends_on: []
 
   - name: kserve
