@@ -43,9 +43,12 @@ BE = {"MM_CPU_POLICY": "best-effort"}
 NRI = {"MM_CPU_POLICY": "nri-balloons"}
 # Legacy computed LiteLLM's api_base even with LiteLLM disabled, warning about it.
 NO_LITELLM_URL = (r"^\[WARN \]  AI Gateway service 'ai-gateway' not found.*\n", "")
-# --help documents MM_INFERENCE_GATEWAY_SVC_NS, which is new.
+# --help documents MM_PLATFORM and MM_INFERENCE_GATEWAY_SVC_NS, which are new.
 HELP_SVC_NS = (r"^(  MM_INFERENCE_HOSTNAME .*\n)",
-               r"\1  MM_INFERENCE_GATEWAY_SVC_NS\n                        Namespace of the AI Gateway Service LiteLLM calls\n"
+               r"\1  MM_PLATFORM           openshift | kubernetes (default: detected). On\n"
+               r"                        OpenShift models attach to OpenShift AI's inference\n"
+               r"                        Gateway and run with the namespace's SCC UIDs.\n"
+               r"  MM_INFERENCE_GATEWAY_SVC_NS\n                        Namespace of the AI Gateway Service LiteLLM calls\n"
                r"                        (default: MM_INFERENCE_GATEWAY_NS, else envoy-gateway-system)\n")
 
 

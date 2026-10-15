@@ -1,0 +1,48 @@
+---
+# =============================================================================
+# NFD on OpenShift — provided by the Node Feature Discovery operator
+# =============================================================================
+# The marketplace operator (openshift-nfd + NodeFeatureDiscovery) produces the
+# same feature.node.kubernetes.io/* labels that model-manager uses for AMX
+# affinity. A Helm NFD next to it would duplicate the CRDs and the labeller,
+# and its worker needs a privileged SCC, so this only checks the operator.
+# =============================================================================
+
+- name: "nfd | OpenShift: teardown is a no-op"
+  ansible.builtin.debug:
+    msg: "NFD belongs to the Node Feature Discovery operator on this cluster; nothing to tear down."
+  when: component_action == 'teardown'
+
+- name: "nfd | OpenShift: check the NFD operator"
+  when: component_action != 'teardown' and nfd_enabled | bool
+  block:
+    - name: "nfd | OpenShift: look up NodeFeatureDiscovery instances"
+      kubernetes.core.k8s_info:
+        api_version: nfd.openshift.io/v1
+        kind: NodeFeatureDiscovery
+      register: _nfd_ocp_instances
+      failed_when: false
+
+    - name: "nfd | OpenShift: require the NFD operator"
+      ansible.builtin.assert:
+        that: _nfd_ocp_instances.resources | default([]) | length > 0
+        fail_msg: |-
+          No NodeFeatureDiscovery instance found. Install the Node Feature Discovery
+          operator (package nfd, namespace openshift-nfd) from OperatorHub and create a
+          NodeFeatureDiscovery (docs/deploy/openshift.md, step 8), or set nfd_enabled: false
+          if no model needs AMX node affinity (require_amx).
+        success_msg: >-
+          NFD operator present ({{ _nfd_ocp_instances.resources | map(attribute='metadata.namespace') | join(', ') }})
+
+    - name: "nfd | OpenShift: look up AMX nodes"
+      kubernetes.core.k8s_info:
+        kind: Node
+        label_selectors:
+          - "feature.node.kubernetes.io/cpu-cpuid.AMXBF16=true"
+      register: _nfd_amx_nodes
+
+    - name: "nfd | OpenShift: AMX node summary"
+      ansible.builtin.debug:
+        msg: >-
+          NFD reports {{ _nfd_amx_nodes.resources | length }} node(s) with AMX:
+          {{ _nfd_amx_nodes.resources | map(attribute='metadata.name') | join(', ') or 'none' }}
