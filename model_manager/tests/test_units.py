@@ -150,3 +150,74 @@ def test_auth_mode_from_configs(monkeypatch, tmp_path, global_cfg, inference_cfg
         (tmp_path / name).write_text(body + "\n")
         monkeypatch.setenv(var, str(tmp_path / name))
     assert routing.auth_provider() == want
+
+
+LLMISVC = """apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: m
+spec:
+  annotations:
+    balloon.balloons.resource-policy.nri.io/container.main: vllm-balloon-tp1
+  model:
+    uri: pvc://model-store/m
+  template:
+    containers:
+      - name: main
+        args:
+          - "--served-model-name"
+          - "served"
+          - "--max-model-len=4096"
+          - "--chat-template"
+          - "/etc/chat-template/a b.jinja"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+"""
+
+
+@pytest.mark.parametrize("value, expected", [("openshift", "openshift"), ("", "kubernetes")])
+def test_platform_detect(monkeypatch, value, expected):
+    from core import platform
+    for key in ("MM_PLATFORM", "MM_LLMISVC_API_VERSION", "MM_INFERENCE_GATEWAY", "MM_AIGATEWAY_ENABLED"):
+        monkeypatch.delenv(key, raising=False)
+    answers = {"api-resources": "clusterversions.config.openshift.io\n" if value else "",
+               "api-versions": "serving.kserve.io/v1alpha1\n"}
+    monkeypatch.setattr(k8s, "out", lambda *a: answers.get(a[0], ""))
+    platform.detect()
+    assert os.environ["MM_PLATFORM"] == expected and os.environ["MM_LLMISVC_API_VERSION"] == "v1alpha1"
+    assert (os.environ.get("MM_INFERENCE_GATEWAY") == "openshift-ai-inference") == bool(value)
+
+
+def test_openshift_llmisvc(monkeypatch):
+    # OpenShift AI 3.3: v1alpha1, vLLM started by its template script, no pinned UIDs.
+    import yaml
+    from core import platform
+    monkeypatch.setenv("MM_PLATFORM", "openshift")
+    monkeypatch.setenv("MM_LLMISVC_API_VERSION", "v1alpha1")
+    doc = yaml.safe_load(platform.adapt_llmisvc(platform.adapt(LLMISVC)))
+    main = doc["spec"]["template"]["containers"][0]
+    assert doc["apiVersion"] == "serving.kserve.io/v1alpha1" and "annotations" not in doc["spec"]
+    assert doc["metadata"]["annotations"] == {"balloon.balloons.resource-policy.nri.io/container.main": "vllm-balloon-tp1"}
+    assert doc["spec"]["model"] == {"uri": "pvc://model-store/m", "name": "served"}
+    assert "args" not in main and main["env"] == [
+        {"name": "VLLM_ADDITIONAL_ARGS", "value": "--max-model-len=4096 --chat-template '/etc/chat-template/a b.jinja'"}]
+    assert main["readinessProbe"]["httpGet"]["scheme"] == "HTTPS"
+    assert main["securityContext"] == {"runAsNonRoot": True}
+
+
+def test_kubernetes_llmisvc_unchanged(monkeypatch):
+    from core import platform
+    monkeypatch.setenv("MM_PLATFORM", "kubernetes")
+    monkeypatch.setenv("MM_LLMISVC_API_VERSION", "v1alpha2")
+    assert platform.adapt_llmisvc(platform.adapt(LLMISVC)) == LLMISVC
+
+
+def test_openshift_skips_pool_status(monkeypatch, kubectl):
+    monkeypatch.setenv("MM_PLATFORM", "openshift")
+    routing.patch_pool_status(Model(name="m", namespace="ns"))
+    assert kubectl == []
