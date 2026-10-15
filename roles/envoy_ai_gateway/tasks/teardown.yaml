@@ -52,6 +52,33 @@
         label: "{{ item.metadata.name }}"
       failed_when: false
 
+    # The controller also puts its finalizer on ReferenceGrants (any namespace);
+    # gone, it cannot release them, and the platform's CRD cleanup would hang.
+    - name: "envoy_ai_gateway | Find ReferenceGrants"
+      kubernetes.core.k8s_info:
+        api_version: gateway.networking.k8s.io/v1beta1
+        kind: ReferenceGrant
+      register: _eag_rgs
+      failed_when: false
+
+    - name: "envoy_ai_gateway | Release its finalizer on ReferenceGrants"
+      kubernetes.core.k8s:
+        state: patched
+        api_version: gateway.networking.k8s.io/v1beta1
+        kind: ReferenceGrant
+        name: "{{ item.metadata.name }}"
+        namespace: "{{ item.metadata.namespace }}"
+        merge_type: merge
+        definition:
+          metadata:
+            finalizers: "{{ item.metadata.finalizers | reject('eq', 'aigateway.envoyproxy.io/finalizer') | list }}"
+      loop: >-
+        {{ _eag_rgs.resources | default([]) | selectattr('metadata.finalizers', 'defined')
+           | selectattr('metadata.finalizers', 'contains', 'aigateway.envoyproxy.io/finalizer') | list }}
+      loop_control:
+        label: "{{ item.metadata.namespace }}/{{ item.metadata.name }}"
+      failed_when: false
+
     - name: "envoy_ai_gateway | Find all AIGatewayRoutes in namespace"
       kubernetes.core.k8s_info:
         api_version: aigateway.envoyproxy.io/v1beta1
