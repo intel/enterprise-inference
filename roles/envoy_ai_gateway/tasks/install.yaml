@@ -70,17 +70,28 @@
           pod-security.kubernetes.io/warn: "privileged"
   when: enforce_pss | default(false) | bool
 
+# Also when the CRDs went missing under an installed release (another role's teardown).
+- name: "envoy_ai_gateway | Check the AI Gateway CRDs"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: aigatewayroutes.aigateway.envoyproxy.io
+  register: _eag_crd
+
 - name: "envoy_ai_gateway | Install/upgrade CRDs via Helm (OCI)"
   when: >-
     _eag_release.status is not defined or
     _eag_release.status is none or
-    _eag_installed_chart != _eag_target_chart
+    _eag_installed_chart != _eag_target_chart or
+    _eag_crd.resources | default([]) | length == 0
   kubernetes.core.helm:
     name: aieg-crd
     chart_ref: "{{ envoy_ai_gateway_helm_repo }}/ai-gateway-crds-helm"
     release_namespace: "{{ envoy_ai_gateway_namespace }}"
     create_namespace: true
     chart_version: "v{{ envoy_ai_gateway_version }}"
+    # Same chart and values: Helm would skip, so force it to recreate the CRDs.
+    force: "{{ _eag_crd.resources | default([]) | length == 0 and _eag_installed_chart == _eag_target_chart }}"
     wait: true
     timeout: "5m0s"
 
