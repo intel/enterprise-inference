@@ -9,21 +9,31 @@
     name: gateway
     tasks_from: platform.yaml
 
-- name: "envoy_ai_gateway | Platform gateway is Envoy Gateway"
-  ansible.builtin.assert:
-    that: gateway_platform.provider | default('envoy') == 'envoy'
-    fail_msg: >-
-      Envoy AI Gateway extends Envoy Gateway, but the platform gateway is
-      '{{ gateway_platform.provider }}'. Use ai_gateway_provider: agentgateway.
-    quiet: true
+# Never stops the install: without a fitting platform, say why and skip.
+- name: "envoy_ai_gateway | Fit to the platform"
+  vars:
+    _skip: >-
+      {{ 'the platform gateway is ' ~ gateway_platform.provider ~ ', not Envoy Gateway (use ai_gateway_provider: agentgateway)'
+           if gateway_platform.provider | default('envoy') != 'envoy'
+         else 'no Envoy AI Gateway release is known for Envoy Gateway ' ~ (gateway_platform.version or '(unknown version)')
+              ~ ' (set envoy_ai_gateway_version)' if not envoy_ai_gateway_version
+         else '' }}
+  ansible.builtin.set_fact:
+    _eag_skip: "{{ _skip }}"
+    _eag_notices: >-
+      {{ (['Envoy AI Gateway skipped: ' ~ _skip] if _skip else [])
+         + (['Envoy AI Gateway ' ~ envoy_ai_gateway_version ~ ' is built for Envoy Gateway ' ~ _eag_minor_match
+             ~ '; the platform runs ' ~ gateway_platform.version ~ '.']
+            if _eag_minor_match and _eag_minor_match != _eag_eg_minor else []) }}
 
-- name: "envoy_ai_gateway | Release for Envoy Gateway {{ _eag_eg_minor }}"
-  ansible.builtin.assert:
-    that: envoy_ai_gateway_version | length > 0
-    fail_msg: >-
-      No Envoy AI Gateway release is known for Envoy Gateway {{ _eag_eg_minor }}
-      (known: {{ envoy_ai_gateway_versions.keys() | join(', ') }}). Set envoy_ai_gateway_version.
-    quiet: true
+- name: "envoy_ai_gateway | Notices"
+  ansible.builtin.debug:
+    msg: "{{ _eag_notices }}"
+  when: _eag_notices | length > 0
+
+- name: "envoy_ai_gateway | Skip"
+  ansible.builtin.meta: end_role
+  when: _eag_skip | length > 0
 
 - name: "envoy_ai_gateway | Check for existing Helm release"
   kubernetes.core.helm_info:

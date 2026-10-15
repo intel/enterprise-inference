@@ -21,38 +21,31 @@
     tasks_from: platform.yaml
   when: kserve_enable_gateway_api | bool or kserve_llmisvc_enabled | bool
 
-# A controller the platform did not install is never upgraded here; it must
-# already point its extension manager at the AI Gateway controller. Checked
-# live, before any change.
-- name: "kserve | Read the existing Envoy Gateway configuration"
+# AI integration on Envoy Gateway, decided from its live configuration:
+# present (already configured: nothing to do), apply (our release, or an existing
+# one with envoy_gateway_configure_existing) or skip (a notice; never stops).
+- name: "kserve | Read the Envoy Gateway configuration"
   kubernetes.core.k8s_info:
     kind: ConfigMap
     name: envoy-gateway-config
     namespace: "{{ kserve_envoy_gateway_namespace }}"
   register: _kserve_eg_cfg
-  when:
-    - kserve_llmisvc_enabled | bool
-    - (ai_gateway_provider | default('envoy')) == 'envoy'
-    - not gateway_platform.controller_managed | bool
+  when: kserve_llmisvc_enabled | bool and (ai_gateway_provider | default('envoy')) == 'envoy'
 
-- name: "kserve | Existing Envoy Gateway carries the AI integration"
+- name: "kserve | Plan the Envoy Gateway AI integration"
   vars:
     _want: "{{ kserve_envoy_ai_controller_service }}.{{ kserve_envoy_ai_controller_namespace }}.svc.cluster.local"
     _cfg: >-
-      {{ ((_kserve_eg_cfg.resources | first | default({})).data | default({})).get('envoy-gateway.yaml', '{}')
+      {{ ((_kserve_eg_cfg.resources | default([]) | first | default({})).data | default({})).get('envoy-gateway.yaml', '{}')
          | from_yaml | default({}, true) }}
-  ansible.builtin.assert:
-    that: (((_cfg.extensionManager | default({})).service | default({})).fqdn | default({})).hostname | default('') == _want
-    fail_msg: >-
-      The Envoy Gateway in {{ kserve_envoy_gateway_namespace }} was not installed by this platform, so it is not
-      upgraded. Add the AI Gateway extension to its configuration (Helm values as in
-      roles/kserve/templates/envoy-gateway-ai-values.yaml.j2: extensionManager service {{ _want }}:1063,
-      backendResources InferencePool, extensionApis enableBackend and enableEnvoyPatchPolicy), then re-run.
-    quiet: true
-  when:
-    - kserve_llmisvc_enabled | bool
-    - (ai_gateway_provider | default('envoy')) == 'envoy'
-    - not gateway_platform.controller_managed | bool
+    _has: "{{ (((_cfg.extensionManager | default({})).service | default({})).fqdn | default({})).hostname | default('') == _want }}"
+  ansible.builtin.set_fact:
+    _kserve_eg_ai: >-
+      {{ 'off' if not (kserve_llmisvc_enabled | bool and (ai_gateway_provider | default('envoy')) == 'envoy')
+         else 'present' if _has | bool
+         else 'apply' if gateway_platform.controller_managed | bool
+              or (gateway_platform.configure_existing | default(false) | bool and gateway_platform.release)
+         else 'skip' }}
 
 # ── 1. cert-manager (installed by cert_manager role — just verify it's up) ───
 
@@ -674,10 +667,7 @@
 #   its own control plane, so this step is skipped for that provider.
 
 - name: "kserve | Envoy Gateway AI integration upgrade"
-  when:
-    - kserve_llmisvc_enabled | bool
-    - (ai_gateway_provider | default('envoy')) == 'envoy'
-    - gateway_platform.controller_managed | bool
+  when: _kserve_eg_ai == 'apply'
   block:
     - name: "kserve | Ensure temp directory exists"
       ansible.builtin.file:
@@ -720,6 +710,18 @@
       delay: 5
 
 # ── 6. Summary ───────────────────────────────────────────────────────────────
+
+- name: "kserve | Notices"
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'AI Gateway integration skipped: the Envoy Gateway in ' ~ kserve_envoy_gateway_namespace
+         ~ ' was not installed by this platform' ~ ('' if gateway_platform.release else ' and is not a Helm release')
+         ~ '. LLMIsvc models are not routed until it has the AI Gateway extension: set'
+         ~ ' envoy_gateway_configure_existing: true, or add the values in roles/kserve/templates/envoy-gateway-ai-values.yaml.j2.'
+         if _kserve_eg_ai == 'skip' else
+         'Added the AI Gateway extension to the existing Envoy Gateway release ' ~ kserve_envoy_gateway_release_name
+         ~ ' (version ' ~ kserve_envoy_gateway_version ~ ' unchanged).' }}
+  when: _kserve_eg_ai == 'skip' or (_kserve_eg_ai == 'apply' and not gateway_platform.controller_managed | bool)
 
 - name: "kserve | Install complete"
   ansible.builtin.debug:
