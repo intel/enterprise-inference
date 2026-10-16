@@ -24,8 +24,10 @@ litellm_run_as_user: 65534
 litellm_namespace: "litellm"
 litellm_valkey_tag: "9.1.2-alpine"              # valkey/valkey (official upstream image, Alpine for smaller footprint)
 
-# Gateway integration
-gateway_create: "{{ envoy_gateway_enabled | default(true) }}"
+# Publish LiteLLM on the platform gateway.
+# Foreign var (canonical owner: enterprise-ai-solutions gateway component flag;
+# envoy_gateway_enabled is its alias).
+litellm_gateway_publish: "{{ gateway_enabled | default(envoy_gateway_enabled | default(true)) | bool }}"
 litellm_hostname: "litellm.{{ base_domain_name | default('inference-example.com') }}"
 # Path mode (routing_mode: path): <base>/litellm, each public path rewritten.
 litellm_path: "/litellm"

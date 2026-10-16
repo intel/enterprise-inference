@@ -91,17 +91,14 @@
     # The postgresql role creates the DB and copies credentials as
     # 'litellm-db-secret' into this namespace.
 
-    - name: "litellm | Wait for DB credentials secret"
+    # PostgreSQL ran first (depends_on), so the secret exists now or not at all.
+    - name: "litellm | Read DB credentials secret"
       kubernetes.core.k8s_info:
         api_version: v1
         kind: Secret
         name: litellm-db-secret
         namespace: "{{ litellm_namespace }}"
       register: _litellm_db_secret
-      until: _litellm_db_secret.resources | length > 0
-      retries: 30
-      delay: 10
-      failed_when: false
 
     - name: "litellm | DB credentials present"
       ansible.builtin.assert:
@@ -420,11 +417,11 @@
     gateway_publish_namespace: "{{ litellm_namespace }}"
     gateway_publish_host: "{{ litellm_hostname }}"
     gateway_publish_path: "{{ litellm_path }}"
-  when: gateway_create | bool
+  when: litellm_gateway_publish | bool
 
 # API: only the exact inference paths reach LiteLLM, HTTPS listener only.
 - name: "litellm | Create API HTTPRoute"
-  when: gateway_create | bool
+  when: litellm_gateway_publish | bool
   kubernetes.core.k8s:
     state: present
     definition:
@@ -462,7 +459,7 @@
 # With auth_type=litellm_vkey programs authenticate with LiteLLM virtual keys,
 # so the gateway's Keycloak JWT default is overridden on the API route only.
 - name: "litellm | Exempt the route from gateway auth (LiteLLM checks virtual keys)"
-  when: gateway_create | bool
+  when: litellm_gateway_publish | bool
   ansible.builtin.include_role:
     name: gateway
     tasks_from: route_auth_exempt.yaml
@@ -475,7 +472,7 @@
 # ── Edge rate limit ───────────────────────────────────────────────────────────
 # Per client IP, blunting key brute-force; removed again when turned off.
 - name: "litellm | Edge rate limit"
-  when: gateway_create | bool
+  when: litellm_gateway_publish | bool
   ansible.builtin.include_role:
     name: gateway
     tasks_from: route_rate_limit.yaml
