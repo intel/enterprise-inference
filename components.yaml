@@ -43,13 +43,14 @@ components:
     layer: inference
     # Required in litellm auth mode; an optional add-on with Keycloak auth.
     enabled: "{{ (auth_type | default('jwt')) == 'litellm_vkey' or (litellm_enabled | default(false) | bool) }}"
-    depends_on: []
+    # PostgreSQL creates its database only while it is enabled.
+    depends_on: [postgresql]
 
   - name: langfuse
     layer: inference
     # Optional tracing for LiteLLM: on with LiteLLM unless langfuse_enabled: false.
     enabled: "{{ ((auth_type | default('jwt')) == 'litellm_vkey' or (litellm_enabled | default(false) | bool)) and (langfuse_enabled | default(true) | bool) }}"
-    depends_on: [litellm]
+    depends_on: [litellm, postgresql]
 
   - name: llm_services
     layer: inference
