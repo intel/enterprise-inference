@@ -1,0 +1,259 @@
+# rc: 0
+--- stdout
+[INFO ]  Deploying tmpl-inline (LLMInferenceService)
+[INFO ]    Runtime: vllm @ 0.24.0 | Category: llm | Routing: epp
+[INFO ]    CPU: 4 | Memory: 8Gi | Replicas: 2
+[INFO ]    CPU policy: best-effort
+[INFO ]  Storing chat template in ConfigMap: tmpl-inline-chat-template
+[  OK ]  Storage ready: model-store (Bound)
+[INFO ]  Downloading model weights: org/inline → PVC:/tmpl-inline
+[INFO ]  Downloading model weights: org/inline
+[INFO ]    This may take several minutes depending on model size and your internet/proxy speed.
+[INFO ]    Follow progress below — do not interrupt.
+[  OK ]  Download complete: tmpl-inline
+[  OK ]  Manifest applied: LLMInferenceService/tmpl-inline in ns1
+[INFO ]  Creating AIGatewayRoute aigw-tmpl-inline (EPP → tmpl-inline-inference-pool)
+[INFO ]  Waiting for tmpl-inline to become Ready (timeout: 900s)...
+[  OK ]  tmpl-inline is Ready
+
+  ────────────────────────────────────────────────────────
+  Model:    tmpl-inline  |  Kind: LLMInferenceService  |  Category: llm
+  Auth:     keycloak
+  Endpoint: https://inference.example.com/v1/chat/completions
+  Note:     Pass "model": "tmpl-inline" in the request body
+  ────────────────────────────────────────────────────────
+
+  1. Get a Keycloak token:
+  source <MM>/scripts/get-keycloak-token.sh
+  # exports TOKEN, GATEWAY_IP, GATEWAY_DOMAIN
+
+  2. Call the model:
+  curl -sk --noproxy "*" \
+    -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"model":"tmpl-inline","messages":[{"role":"user","content":"Hello"}],"max_tokens":16}' \
+    https://inference.example.com/v1/chat/completions
+
+--- stderr
+[WARN ]  AI Gateway service 'ai-gateway' not found in envoy-gateway-system — LiteLLM will bypass gateway for tmpl-inline
+--- kubectl
+$ kubectl create namespace ns1
+$ kubectl apply -f -
+{
+  "apiVersion": "v1",
+  "kind": "ConfigMap",
+  "metadata": {
+    "name": "tmpl-inline-chat-template",
+    "namespace": "ns1",
+    "labels": {
+      "app.kubernetes.io/managed-by": "model-manager"
+    }
+  },
+  "data": {
+    "chat_template.jinja": "{%- for m in messages -%}{{ m['content'] }}{%- endfor -%}"
+  }
+}
+$ kubectl create namespace ns1
+$ kubectl delete job download-tmpl-inline -n ns1 --ignore-not-found
+$ kubectl apply -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: download-tmpl-inline
+  namespace: ns1
+  labels:
+    app.kubernetes.io/name: download-tmpl-inline
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 7200
+  # Garbage-collect the finished Job (and its pod) automatically once it
+  # completes or fails, so a successful download never leaves a stray pod
+  # behind even if the model-manager CLI has already exited. The window is
+  # long enough to inspect logs of a failed job before it is reaped.
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: download-tmpl-inline
+        app.kubernetes.io/managed-by: model-manager
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        # uid/gid match the serving pod for this runtime so prepared files are
+        # readable by the server (vLLM=1000, OVMS=5000). fsGroup makes the kubelet
+        # chown the mounted volume to this GID and mount it group-writable —
+        # without it, dynamically provisioned volumes (e.g. rancher.io/local-path)
+        # are created root:root 0755 and the non-root job gets "Permission denied".
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: downloader
+          image: img/vllm:0.24.0
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              export HOME=/tmp HF_HOME=/tmp/.hf XDG_CACHE_HOME=/tmp/.cache PIP_CACHE_DIR=/tmp/.pip
+              if [ -f /models/tmpl-inline/.download_complete ]; then echo 'Weights already present, skipping download'; exit 0; fi
+              command -v hf >/dev/null 2>&1 || pip install -q huggingface_hub[hf_xet]
+              hf download 'org/inline' --local-dir /models/tmpl-inline
+              touch /models/tmpl-inline/.download_complete
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          # Bound the job (CWE-400). Requests stay small so this transient job
+          # schedules easily; the memory limit tracks the model's serving
+          # envelope so OVMS `ovms --pull` conversion/quantization does not OOM.
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+          env:
+            - name: HOME
+              value: "/models"
+            - name: HF_HOME
+              value: "/models/.hf-cache"
+          volumeMounts:
+            - name: model-storage
+              mountPath: /models
+      volumes:
+        - name: model-storage
+          persistentVolumeClaim:
+            claimName: model-store
+$ kubectl apply --server-side --field-manager=model-manager --force-conflicts -f -
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: tmpl-inline
+  namespace: ns1
+  labels:
+    app.kubernetes.io/name: tmpl-inline
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  annotations:
+    cpu-policy.model-manager.io/type: best-effort
+  model:
+    uri: pvc://model-store/tmpl-inline
+  replicas: 2
+  router:
+    gateway:
+      refs:
+        - name: ai-gateway
+          namespace: llm-inference
+    route: {}
+    scheduler: {}
+  template:
+    containers:
+      - name: main
+        image: img/vllm:0.24.0
+        args: 
+        - "--dtype"
+        - "bfloat16"
+        - "--tensor-parallel-size"
+        - "1"
+        - "--max-model-len"
+        - "2048"
+        - "--served-model-name"
+        - "tmpl-inline"
+        - "--chat-template"
+        - "/etc/chat-template/chat_template.jinja"
+        env: 
+        - name: FLAG
+          value: "true"
+        - name: KV
+          value: "4g"
+        - name: NUM
+          value: "3"
+        - name: USER
+          value: "vllm"
+        - name: VLLM_CPU_KVCACHE_SPACE
+          value: "4"
+        volumeMounts:
+          - name: chat-template
+            mountPath: /etc/chat-template
+            readOnly: true
+        resources:
+          requests:
+            cpu: "4"
+            memory: 8Gi
+          limits:
+            cpu: "4"
+            memory: 8Gi
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 120
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 12
+          periodSeconds: 10
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
+    securityContext:
+      seccompProfile:
+        type: RuntimeDefault
+    volumes:
+      - name: chat-template
+        configMap:
+          name: tmpl-inline-chat-template
+$ kubectl apply --server-side --field-manager=model-manager --force-conflicts -f -
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIGatewayRoute
+metadata:
+  name: aigw-tmpl-inline
+  namespace: ns1
+  labels:
+    app.kubernetes.io/name: tmpl-inline
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: ai-gateway
+      namespace: llm-inference
+      sectionName: http
+  rules:
+    - matches:
+        - headers:
+            - name: x-ai-eg-model
+              type: Exact
+              value: tmpl-inline
+      timeouts:
+        request: 600s
+      backendRefs:
+        - name: tmpl-inline-inference-pool
+          kind: InferencePool
+          group: inference.networking.k8s.io
+$ kubectl patch inferencepool tmpl-inline-inference-pool -n ns1 --type=merge --subresource=status -p {"status":{"parents":[{"parentRef":{"group":"gateway.networking.k8s.io","kind":"Gateway","name":"ai-gateway","namespace":"ai-gateway"},"controllerName":"gateway.envoyproxy.io/gatewayclass-controller","conditions":[{"type":"Accepted","status":"True","reason":"Accepted","message":"Patched by model-manager","lastTransitionTime":"<TS>"}]}]}}

@@ -10,13 +10,19 @@
 #   litellm_public_paths are routed; LiteLLM validates the virtual key. The
 #   admin UI and admin API are not published.
 #   Client → Envoy Gateway (TLS, path allowlist) → LiteLLM (key check) → KServe
+#
+# When auth_type=litellm_vkey the API route bypasses the gateway JWT policy;
+# Keycloak still serves people signing in to the UIs.
 # =============================================================================
 
-# Image tag. >= v1.103.1 for GHSA-7hp6-4w63-5g45; >= v1.85.0 for the 2026
-# Host-header, MCP OAuth and /sso/debug advisories.
-litellm_version: "v1.103.3"
+# Upstream non-root image (uid 65534, prisma engines baked in). Tag >= v1.103.1
+# for GHSA-7hp6-4w63-5g45; >= v1.85.0 for the 2026 Host-header, MCP OAuth and
+# /sso/debug advisories.
+litellm_image_repository: "ghcr.io/berriai/litellm-non_root"
+litellm_version: "v1.105.1"
+litellm_run_as_user: 65534
 litellm_namespace: "litellm"
-litellm_valkey_tag: "8.0-alpine"                # valkey/valkey (official upstream image, Alpine for smaller footprint)
+litellm_valkey_tag: "9.1.2-alpine"              # valkey/valkey (official upstream image, Alpine for smaller footprint)
 
 # Gateway integration
 gateway_create: "{{ envoy_gateway_enabled | default(false) }}"
@@ -127,3 +133,7 @@ litellm_multi_node_resources:
   limits:
     cpu: "4"
     memory: "4Gi"
+
+# Trace to Langfuse unless it is turned off (langfuse_enabled: false). The
+# langfuse role supplies host and keys and re-wires this when toggled later.
+_litellm_langfuse: "{{ langfuse_enabled | default(true) | bool }}"

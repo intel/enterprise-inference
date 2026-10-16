@@ -312,7 +312,7 @@
     gateway_publish_path: "{{ inference_path }}"
   when:
     - ai_gateway_create | bool
-    - auth_provider | default('keycloak') == 'keycloak'
+    - auth_type | default('jwt') == 'jwt'
 
 - name: "envoy_ai_gateway | Create external inference HTTPRoute (eg-gateway → ai-gateway)"
   kubernetes.core.k8s:
@@ -343,12 +343,11 @@
                 port: 80
   when:
     - ai_gateway_create | bool
-    - auth_provider | default('keycloak') == 'keycloak'
+    - auth_type | default('jwt') == 'jwt'
 
-# Remove the external route if the cluster was reconfigured from keycloak to
-# litellm/none: leaving inference.<domain> published would keep an unauthenticated
-# path to ai-gateway open once the gateway JWT policy is gone.
-- name: "envoy_ai_gateway | Remove external inference HTTPRoute when not keycloak"
+# inference.<domain> is the jwt-mode API endpoint; drop it after a switch to
+# litellm_vkey so clients have a single entry point (LiteLLM).
+- name: "envoy_ai_gateway | Remove external inference HTTPRoute when not jwt"
   kubernetes.core.k8s:
     state: absent
     api_version: gateway.networking.k8s.io/v1
@@ -359,9 +358,9 @@
   failed_when: false
   when:
     - ai_gateway_create | bool
-    - auth_provider | default('keycloak') != 'keycloak'
+    - auth_type | default('jwt') != 'jwt'
 
-- name: "envoy_ai_gateway | Unpublish the inference host when not keycloak"
+- name: "envoy_ai_gateway | Unpublish the inference host when not jwt"
   ansible.builtin.include_role:
     name: envoy_gateway
     tasks_from: unpublish.yaml
@@ -372,4 +371,4 @@
     gateway_publish_path: "{{ inference_path }}"
   when:
     - ai_gateway_create | bool
-    - auth_provider | default('keycloak') != 'keycloak'
+    - auth_type | default('jwt') != 'jwt'

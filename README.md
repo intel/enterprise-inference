@@ -27,7 +27,7 @@ Serving a model on Kubernetes normally means hand-writing manifests, sizing CPU 
 
 This repository replaces that with a catalog and a CLI. You describe a model once in `models.yaml`, or point `--id` at a Hugging Face repo, and `model-manager` resolves the configuration, checks the requested CPU fits the node, downloads the weights, creates the serving pod, and registers the model with the gateway.
 
-The Ansible roles here deploy the serving infrastructure itself: KServe for the model CRDs, an in-cluster AI gateway for model-aware routing, and — in `litellm` auth mode — LiteLLM for virtual API keys and Langfuse for request tracing.
+The Ansible roles here deploy the serving infrastructure itself: KServe for the model CRDs, an in-cluster AI gateway for model-aware routing, the Keycloak realm and client used for sign-in, and — with `auth_type: litellm_vkey` or `litellm_enabled: true` — LiteLLM for virtual API keys and Langfuse for request tracing.
 
 The result is a single OpenAI-compatible endpoint. The `model` field in the request body selects which model answers, so any OpenAI SDK client works unchanged.
 
@@ -67,7 +67,7 @@ An inference request enters through the **LLM gateway**, which authenticates and
 
 ### Step 1 — Install the inference stack
 
-Deploys KServe, the ServingRuntimes, the AI gateway, and — in `litellm` mode — LiteLLM and Langfuse. No models are deployed yet.
+Deploys KServe, the ServingRuntimes, the AI gateway, the Keycloak realm and client, and — with `auth_type: litellm_vkey` or `litellm_enabled: true` — LiteLLM and Langfuse. No models are deployed yet.
 
 ```bash
 ./es_auto_installer.sh install inference
@@ -100,7 +100,7 @@ When the command returns it prints the inference endpoint and a ready-to-run `cu
 
 ### Step 3 — Send your first request
 
-With the default `auth_provider: keycloak`, the helper script auto-discovers the gateway IP and fetches a JWT from the cluster:
+With the default `auth_type: jwt`, the helper script auto-discovers the gateway IP and fetches a JWT from the cluster:
 
 ```bash
 source ./ext/enterprise.ai-inference/model_manager/scripts/get-keycloak-token.sh
@@ -125,9 +125,9 @@ kubectl get llminferenceservices,inferenceservices -n llm-inference
 ```
 
 > [!NOTE]
-> **Using `auth_provider: litellm` instead?** LiteLLM becomes the auth boundary and the API is
-> served on `litellm.<your-domain>` — not `inference.<your-domain>` — with a LiteLLM master or
-> virtual key instead of a JWT. Full walkthrough →
+> **Using `auth_type: litellm_vkey` instead?** Set it in `env/<env>/config.inference.yaml`.
+> Keycloak is still deployed for sign-in, but API clients authenticate with a LiteLLM master or
+> virtual key on `litellm.<your-domain>` — not a JWT on `inference.<your-domain>`. Full walkthrough →
 > [Accessing Models](docs/deploy/accessing_models.md).
 
 Everything speaks the OpenAI-compatible API, so any tool that works with OpenAI works against your stack.

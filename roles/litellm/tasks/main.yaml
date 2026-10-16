@@ -4,4 +4,4 @@
   when: >-
     (component_action | default('install')) != 'install' or
     (litellm_enabled | default(false) | bool) or
-    (auth_provider | default('keycloak')) == 'litellm'
+    (auth_type | default('jwt')) == 'litellm_vkey'

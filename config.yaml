@@ -39,15 +39,20 @@ envoy_ai_gateway_namespace: "envoy-ai-gateway-system"
 # kserve_llmisvc_epp_image: "ghcr.io/llm-d/llm-d-router-endpoint-picker:v0.9.0"
 # kserve_llmisvc_tokenizer_image: "ghcr.io/llm-d/llm-d-uds-tokenizer:vllm-v0.19.1"
 
+# --- API authentication ---
+# Credential API clients send; people always sign in through Keycloak.
+# auth_type: "jwt"              # jwt (default, Keycloak JWT) | litellm_vkey (LiteLLM virtual key)
+
 # --- LiteLLM ---
-# litellm_version: "v1.103.3"
+# litellm_enabled: true         # add LiteLLM with Keycloak auth (always on with auth_type=litellm_vkey)
+# litellm_version: "v1.105.1"
 # litellm_namespace: "litellm"
 # litellm_hostname: "litellm.inference-example.com"  # defaults to litellm.<base_domain_name>
 # litellm_cache_enabled: true
 # litellm_cache_ttl: 600
 
 # --- Langfuse ---
-# langfuse_enabled: false       # auto-enabled when auth_provider=litellm
+# langfuse_enabled: false       # tracing for LiteLLM; default: on whenever LiteLLM is on
 # langfuse_namespace: "langfuse"
 # langfuse_hostname: "langfuse.inference-example.com"  # defaults to langfuse.<base_domain_name>
 # langfuse_admin_email: "admin@inference-example.com"  # defaults to admin@<base_domain_name>
