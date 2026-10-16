@@ -36,7 +36,8 @@ while [[ $# -gt 0 ]]; do
       echo "                   Examples: 3600 (1h), 86400 (24h), 900 (15min, default)"
       return 0 2>/dev/null || exit 0 ;;
     *)
-      _gt_err "Unknown option: $1. Use --help for usage." ;;
+      _gt_err "Unknown option: $1. Use --help for usage."
+      return 1 2>/dev/null || exit 1 ;;
   esac
 done
 
@@ -58,32 +59,46 @@ unset _gt_script_dir _gt_search
 # ── Preflight checks ──────────────────────────────────────────────────────────
 if ! command -v kubectl &>/dev/null; then
   _gt_err "kubectl not found in PATH. Install it or ensure it is on PATH."
+  return 1 2>/dev/null || exit 1
 fi
 
 if ! command -v python3 &>/dev/null; then
   _gt_err "python3 not found. Install python3 to parse the token response."
+  return 1 2>/dev/null || exit 1
 fi
 
 if ! kubectl cluster-info --request-timeout=5s &>/dev/null; then
   _gt_err "kubectl cannot reach the cluster. Check KUBECONFIG or run:\n  export KUBECONFIG=~/.kube/config"
+  return 1 2>/dev/null || exit 1
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Discover gateway IP from cluster (filter for LoadBalancer type to skip ClusterIP services)
-GATEWAY_IP=$(kubectl get svc -n envoy-gateway-system \
-  -l gateway.envoyproxy.io/owning-gateway-name \
-  --field-selector spec.type=LoadBalancer \
-  -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+# Preserve a caller-supplied address, then prefer Gateway API status before
+# looking through every LoadBalancer service. Envoy Gateway's generated Service
+# labels can vary across releases, so do not require an owning-gateway label.
+if [[ -z "${GATEWAY_IP:-}" ]]; then
+  GATEWAY_IP=$(kubectl get gateway eg-gateway -n envoy-gateway-system \
+    -o jsonpath='{range .status.addresses[*]}{.value}{"\n"}{end}' 2>/dev/null | awk 'NF {print; exit}')
+fi
+if [[ -z "${GATEWAY_IP:-}" ]]; then
+  GATEWAY_IP=$(kubectl get svc -n envoy-gateway-system \
+    --field-selector spec.type=LoadBalancer \
+    -o jsonpath='{range .items[*]}{range .status.loadBalancer.ingress[*]}{.ip}{"\n"}{end}{end}' 2>/dev/null | awk 'NF {print; exit}')
+fi
 
 if [[ -z "$GATEWAY_IP" ]]; then
   _gt_err "Could not find Envoy Gateway LoadBalancer IP.\n  Is the platform installed? Run: ./es_auto_installer.sh install platform"
+  kubectl get gateway eg-gateway -n envoy-gateway-system -o wide >&2 2>/dev/null || true
+  kubectl get svc -n envoy-gateway-system --field-selector spec.type=LoadBalancer -o wide >&2 2>/dev/null || true
+  return 1 2>/dev/null || exit 1
 fi
 
 # Discover domains from Keycloak CR
 KEYCLOAK_DOMAIN=$(kubectl get keycloaks -n keycloak -o jsonpath='{.items[0].spec.hostname.hostname}' 2>/dev/null)
 if [[ -z "$KEYCLOAK_DOMAIN" ]]; then
   _gt_err "Could not read Keycloak hostname from cluster.\n  Is Keycloak installed? Run: ./es_auto_installer.sh install keycloak"
+  return 1 2>/dev/null || exit 1
 fi
 # Strip protocol prefix if present (handles both http:// and https://)
 KEYCLOAK_DOMAIN="${KEYCLOAK_DOMAIN#http://}"
@@ -97,6 +112,7 @@ CLIENT_SECRET=$(kubectl get secret keycloak-client-secret -n keycloak \
 
 if [[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]]; then
   _gt_err "Secret 'keycloak-client-secret' not found in namespace 'keycloak'.\n  Run the inference stack install to create it:\n  ./es_auto_installer.sh install inference"
+  return 1 2>/dev/null || exit 1
 fi
 
 # ── Keycloak reachability: prefer direct (external), fall back to port-forward ─
@@ -125,17 +141,35 @@ _gt_open_keycloak() {
   # Attempt 2: port-forward keycloak-service on port `https` (8443).
   local kc_ns="${MM_KEYCLOAK_NS:-keycloak}"
   local kc_svc="${MM_KEYCLOAK_SVC:-keycloak-service}"
-  local local_port
+  local local_port pf_log probe_body
   local_port=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
-  kubectl port-forward -n "$kc_ns" "svc/${kc_svc}" "${local_port}:https" &>/dev/null &
+  pf_log=$(mktemp)
+  kubectl port-forward -n "$kc_ns" "svc/${kc_svc}" "${local_port}:https" >"$pf_log" 2>&1 &
   _gt_kc_pf_pid=$!
-  sleep 2
-  if ! kill -0 "$_gt_kc_pf_pid" 2>/dev/null; then
+  for _gt_pf_attempt in {1..15}; do
+    if ! kill -0 "$_gt_kc_pf_pid" 2>/dev/null; then
+      break
+    fi
+    probe_body=$(curl -sk --noproxy '*' --connect-timeout 1 --max-time 2 \
+      "https://127.0.0.1:${local_port}/realms/inference/.well-known/openid-configuration" 2>/dev/null)
+    if [[ "$probe_body" == *'"issuer"'* ]]; then
+      _gt_kc_base="https://127.0.0.1:${local_port}"
+      _gt_kc_curl_extra=()
+      _gt_kc_pf_log="$pf_log"
+      return 0
+    fi
+    sleep 1
+  done
+  if ! kill -0 "$_gt_kc_pf_pid" 2>/dev/null || [[ -z "$probe_body" || "$probe_body" != *'"issuer"'* ]]; then
+    echo "Keycloak port-forward diagnostics (${kc_ns}/${kc_svc}, local port ${local_port}):" >&2
+    cat "$pf_log" >&2 2>/dev/null || true
+    kill "$_gt_kc_pf_pid" 2>/dev/null || true
+    wait "$_gt_kc_pf_pid" 2>/dev/null || true
     _gt_kc_pf_pid=""
+    rm -f "$pf_log"
     _gt_err "Cannot reach Keycloak — port-forward to ${kc_ns}/${kc_svc} failed."
+    return 1
   fi
-  _gt_kc_base="https://127.0.0.1:${local_port}"
-  _gt_kc_curl_extra=()
 }
 
 _gt_close_keycloak() {
@@ -144,10 +178,16 @@ _gt_close_keycloak() {
     wait "$_gt_kc_pf_pid" 2>/dev/null
     unset _gt_kc_pf_pid
   fi
+  if [[ -n "${_gt_kc_pf_log:-}" ]]; then
+    rm -f "$_gt_kc_pf_log"
+    unset _gt_kc_pf_log
+  fi
   unset _gt_kc_base _gt_kc_curl_extra
 }
 
-_gt_open_keycloak
+if ! _gt_open_keycloak; then
+  return 1 2>/dev/null || exit 1
+fi
 
 # ── Update token lifespan if requested ────────────────────────────────────────
 if [[ -n "$_gt_lifespan" ]]; then
@@ -167,6 +207,7 @@ if [[ -n "$_gt_lifespan" ]]; then
   if [[ -z "$_gt_admin_user" || -z "$_gt_admin_pass" ]]; then
     _gt_close_keycloak
     _gt_err "Could not read Keycloak admin credentials (keycloak-admin-secret or keycloak-initial-admin)."
+    return 1 2>/dev/null || exit 1
   fi
 
   # Get master admin token via the opened Keycloak channel (direct or port-forward).
@@ -182,6 +223,7 @@ if [[ -n "$_gt_lifespan" ]]; then
   if [[ -z "$_gt_admin_token" ]]; then
     _gt_close_keycloak
     _gt_err "Could not get Keycloak admin token. Check admin credentials."
+    return 1 2>/dev/null || exit 1
   fi
 
   _gt_client_uuid=$(curl -sk --noproxy '*' --connect-timeout 5 --max-time 15 \
@@ -193,6 +235,7 @@ if [[ -n "$_gt_lifespan" ]]; then
   if [[ -z "$_gt_client_uuid" ]]; then
     _gt_close_keycloak
     _gt_err "Could not find client '${CLIENT_ID}' in Keycloak realm 'inference'."
+    return 1 2>/dev/null || exit 1
   fi
 
   _gt_update_resp=$(curl -sk --noproxy '*' --connect-timeout 5 --max-time 15 \
