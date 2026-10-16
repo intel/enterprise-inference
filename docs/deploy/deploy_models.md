@@ -1,6 +1,6 @@
 # Deploy a Model
 
-`model-manager` is a bash CLI that takes a model from Hugging Face to a live
+`model-manager` is a CLI that takes a model from Hugging Face to a live
 OpenAI-compatible endpoint. It exposes two lifecycle commands — **`deploy`** and
 **`undeploy`** — and delegates status, scaling, and logs to `kubectl`, since the
 serving objects are standard Kubernetes CRDs.
@@ -9,6 +9,14 @@ serving objects are standard Kubernetes CRDs.
 > Run it from the **solutions repo root** as `./model-manager` (a thin wrapper pointing at
 > `ext/enterprise.ai-inference/model_manager/`). It operates against a **running cluster**
 > provisioned by the core platform install — see [Quick Start](../../README.md#quick-start).
+
+It needs `kubectl`, `curl`, and **Python 3.9 or newer with PyYAML**. The installer's `.venv`
+is picked up automatically (as is any active virtualenv); otherwise install the dependencies
+for the system `python3`:
+
+```bash
+pip install -r ext/enterprise.ai-inference/model_manager/requirements.txt
+```
 
 ## deploy / undeploy
 

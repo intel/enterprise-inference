@@ -9,6 +9,9 @@
 #   litellm_public_paths are routed; LiteLLM validates the virtual key. The
 #   admin UI and admin API are not published.
 #   Client → Envoy Gateway (TLS, path allowlist) → LiteLLM (key check) → KServe
+#
+# When auth_type=litellm_vkey the API route bypasses the gateway JWT policy;
+# Keycloak still serves people signing in to the UIs.
 # =============================================================================
 
 # Image tag. >= v1.103.1 for GHSA-7hp6-4w63-5g45; >= v1.85.0 for the 2026
@@ -120,3 +123,7 @@ litellm_multi_node_resources:
   limits:
     cpu: "4"
     memory: "4Gi"
+
+# Trace to Langfuse unless it is turned off (langfuse_enabled: false). The
+# langfuse role supplies host and keys and re-wires this when toggled later.
+_litellm_langfuse: "{{ langfuse_enabled | default(true) | bool }}"

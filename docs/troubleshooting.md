@@ -30,10 +30,10 @@ Detail → [CPU Pinning & NUMA](reference/cpu_pinning.md).
 
 | Symptom | Likely cause / fix |
 |---------|--------------------|
-| `404` from `inference.<domain>` in `litellm` mode | Nothing is bound to that host in this mode — use `litellm.<domain>`. See [Accessing Models](deploy/accessing_models.md). |
-| `401` on every request in `keycloak` mode | Missing, malformed, or expired JWT. Tokens last 15 minutes by default — re-run `source .../get-keycloak-token.sh`, or pass `--lifespan 3600`. |
-| `401` in `litellm` mode with a key that used to work | The virtual key expired, was revoked, or exceeded its budget. List keys with `/key/list?return_full_object=true`. |
-| `401` for one model only, in `litellm` mode | The key's model allow-list doesn't include it. Mint a key with that model in `models`. |
+| `404` from `inference.<domain>` in `litellm_vkey` mode | Nothing is bound to that host in this mode — use `litellm.<domain>`. See [Accessing Models](deploy/accessing_models.md). |
+| `401` on every request in `jwt` mode | Missing, malformed, or expired JWT. Tokens last 15 minutes by default — re-run `source .../get-keycloak-token.sh`, or pass `--lifespan 3600`. |
+| `401` in `litellm_vkey` mode with a key that used to work | The virtual key expired, was revoked, or exceeded its budget. List keys with `/key/list?return_full_object=true`. |
+| `401` for one model only, in `litellm_vkey` mode | The key's model allow-list doesn't include it. Mint a key with that model in `models`. |
 | TLS certificate warnings from `curl` or a browser | Self-signed CA. Use `--cacert env/<env>/logs/ai-solutions-ca.crt`, or import that CA into your trust store. |
 | The LiteLLM UI redirects to `http://` and fails | The trailing slash is required: `https://litellm.<domain>/ui/`, not `/ui`. |
 | Model deployed, but requests return "model not found" | The `model` field must match the deploy **name**, not the Hugging Face `model_id`. List what's registered with `GET /v1/models`. |

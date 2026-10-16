@@ -29,6 +29,12 @@
     namespace: "{{ langfuse_namespace }}"
   failed_when: false
 
+# Unwire first, so LiteLLM neither traces to a removed Langfuse nor needs its keys.
+- name: "langfuse | teardown | Turn LiteLLM tracing off"
+  ansible.builtin.include_tasks: litellm_wiring.yaml
+  vars:
+    _lf_wire: false
+
 - name: "langfuse | teardown | Remove Langfuse API keys from LiteLLM namespace"
   kubernetes.core.k8s:
     state: absent

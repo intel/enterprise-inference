@@ -1,0 +1,61 @@
+---
+# =============================================================================
+# Langfuse — wire LiteLLM tracing on or off (_lf_wire: true | false)
+# =============================================================================
+# LiteLLM's callbacks are written at its install, so turning Langfuse on or off
+# later edits litellm-config here and restarts LiteLLM only on a real change.
+# The keys Secret (LANGFUSE_HOST/_PUBLIC_KEY/_SECRET_KEY) is optional for the
+# pod, so removing Langfuse never stops LiteLLM from starting.
+
+- name: "langfuse | LiteLLM wiring | Read litellm-config"
+  kubernetes.core.k8s_info:
+    kind: ConfigMap
+    name: litellm-config
+    namespace: "{{ litellm_namespace | default('litellm') }}"
+  register: _lf_litellm_cm
+
+- name: "langfuse | LiteLLM wiring | Callbacks"
+  when: _lf_litellm_cm.resources | length > 0
+  vars:
+    _cfg: "{{ _lf_litellm_cm.resources[0].data['config.yaml'] | from_yaml }}"
+    _cb: "{{ ['langfuse'] if _lf_wire | bool else [] }}"
+    _new: "{{ _cfg | combine({'litellm_settings': {'success_callback': _cb | list, 'failure_callback': _cb | list}}, recursive=True) }}"
+  block:
+    - name: "langfuse | LiteLLM wiring | Set callbacks in litellm-config"
+      kubernetes.core.k8s:
+        state: patched
+        kind: ConfigMap
+        name: litellm-config
+        namespace: "{{ litellm_namespace | default('litellm') }}"
+        definition:
+          data:
+            config.yaml: "{{ _new | to_nice_yaml }}"
+      when: (_new | to_nice_yaml) != _lf_litellm_cm.resources[0].data['config.yaml']
+
+    # envFrom picks up the keys; the annotation restarts the pod when the
+    # callbacks changed (LiteLLM reads its config only at start).
+    - name: "langfuse | LiteLLM wiring | Point LiteLLM at the keys and roll it on change"
+      kubernetes.core.k8s:
+        state: patched
+        api_version: apps/v1
+        kind: Deployment
+        name: litellm
+        namespace: "{{ litellm_namespace | default('litellm') }}"
+        definition:
+          spec:
+            template:
+              metadata:
+                annotations:
+                  litellm.enterprise-ai/tracing: "{{ _cb | join(',') or 'none' }}"
+              spec:
+                containers:
+                  - name: litellm
+                    # An explicit LANGFUSE_HOST (older releases set one) would
+                    # override the Secret's value.
+                    env:
+                      - name: LANGFUSE_HOST
+                        $patch: delete
+                    envFrom:
+                      - secretRef:
+                          name: langfuse-api-keys
+                          optional: true

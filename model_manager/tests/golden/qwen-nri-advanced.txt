@@ -1,0 +1,134 @@
+# rc: 0
+--- stdout
+[INFO ]  Deploying qwen3-0-6b (LLMInferenceService)
+[INFO ]    Runtime: vllm @ 0.19.1 | Category: llm | Routing: epp
+[INFO ]    CPU: 8 | Memory: 16Gi | Replicas: 2
+[INFO ]    Node: w1
+[INFO ]    CPU policy: nri-balloons
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: qwen3-0-6b
+  namespace: llm-inference
+  labels:
+    app.kubernetes.io/name: qwen3-0-6b
+    app.kubernetes.io/managed-by: model-manager
+    team: "ml"
+    example.com/owner: ""
+spec:
+  annotations:
+    cpu-policy.model-manager.io/type: nri-balloons
+    cpu-policy.model-manager.io/balloon: vllm-balloon-tp2
+    balloon.balloons.resource-policy.nri.io/container.main: vllm-balloon-tp2
+  model:
+    uri: pvc://model-store/qwen3-0-6b
+  replicas: 2
+  router:
+    gateway:
+      refs:
+        - name: ai-gateway
+          namespace: llm-inference
+    route: {}
+    scheduler: {}
+  template:
+    containers:
+      - name: main
+        image: docker.io/vllm/vllm-openai-cpu:v0.19.1
+        args: 
+        - "--dtype"
+        - "bfloat16"
+        - "--max-num-batched-tokens"
+        - "2048"
+        - "--enable-prefix-caching"
+        - "--enable-chunked-prefill"
+        - "--served-model-name"
+        - "qwen3-0-6b"
+        - "--max-model-len=4096"
+        - "--max-num-seqs"
+        - "64"
+        - "--tensor-parallel-size"
+        - "2"
+        env: 
+        - name: FOO
+          value: "bar"
+        - name: KMP_BLOCKTIME
+          value: "1"
+        - name: USER
+          value: "vllm"
+        - name: VLLM_CPU_KVCACHE_SPACE
+          value: "20"
+        - name: VLLM_CPU_NUM_OF_RESERVED_CPU
+          value: "1"
+        - name: VLLM_CPU_SGL_KERNEL
+          value: "1"
+        - name: VLLM_NO_USAGE_STATS
+          value: "1"
+        - name: VLLM_USE_V1
+          value: "1"
+        resources:
+          requests:
+            cpu: "16"
+            memory: 16Gi
+          limits:
+            cpu: "16"
+            memory: 16Gi
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 120
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 12
+          periodSeconds: 10
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
+    securityContext:
+      seccompProfile:
+        type: RuntimeDefault
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: feature.node.kubernetes.io/cpu-cpuid.AMXBF16
+                  operator: In
+                  values:
+                    - "true"
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+                - key: kubernetes.io/hostname
+                  operator: In
+                  values:
+                    - w1
+          - weight: 50
+            preference:
+              matchExpressions:
+                - key: node-role.kubernetes.io/control-plane
+                  operator: DoesNotExist
+--- stderr
+[WARN ]  NRI balloons DaemonSet not found in kube-system. Pods will be annotated for NRI but will not receive CPU pinning until the nri-resource-policy-balloons DaemonSet is deployed. Run the nri_cpu_balloons Ansible role to install it.
+[INFO ]  Binding pods to NRI balloon 'vllm-balloon-tp2'
+[INFO ]  NRI: Effective CPU 8 → 16 (hideHyperthreads active)
+--- kubectl
