@@ -24,6 +24,39 @@ except ImportError:
 
 
 _NRI_ANN_PREFIX = "balloon.balloons.resource-policy.nri.io/"
+_POD_LABEL_PREFIX = "pod/labels/"
+
+
+def _label_balloon_types(custom_api) -> list[tuple[str, list[dict]]]:
+    """Balloon types that select pods by label (matchExpressions on pod/labels/...), from the
+    BalloonsPolicy. OpenShift AI's v1alpha1 LLMInferenceService cannot annotate its pods, so they
+    land in their balloon this way. Node-specific policies repeat the default's types."""
+    try:
+        policies = custom_api.list_cluster_custom_object("config.nri", "v1alpha1", "balloonspolicies")
+    except Exception:
+        return []
+    types, seen = [], set()
+    for policy in policies.get("items", []):
+        for bt in (policy.get("spec") or {}).get("balloonTypes") or []:
+            exprs = bt.get("matchExpressions") or []
+            if bt["name"] in seen or not exprs or not all(e.get("key", "").startswith(_POD_LABEL_PREFIX)
+                                                          for e in exprs):
+                continue
+            seen.add(bt["name"])
+            types.append((bt["name"], exprs))
+    return types
+
+
+def _matches(labels: dict, exprs: list[dict]) -> bool:
+    for e in exprs:
+        value = labels.get(e["key"][len(_POD_LABEL_PREFIX):])
+        op, values = e.get("operator"), e.get("values") or []
+        ok = {"In": value in values, "NotIn": value not in values, "Equals": value == (values or [None])[0],
+              "NotEqual": value != (values or [None])[0], "Exists": value is not None,
+              "NotExist": value is None}.get(op, False)
+        if not ok:
+            return False
+    return True
 
 
 def _parse_cpuset(spec: str) -> list[int]:
@@ -132,6 +165,7 @@ def main():
 
     core_api = client.CoreV1Api()
     pods = core_api.list_namespaced_pod(args.namespace)
+    label_types = _label_balloon_types(client.CustomObjectsApi())
 
     balloon_pods = []
     for pod in pods.items:
@@ -139,6 +173,9 @@ def main():
             continue
         anns = pod.metadata.annotations or {}
         balloon = next((v for k, v in anns.items() if k.startswith(_NRI_ANN_PREFIX)), None)
+        if not balloon:
+            balloon = next((name for name, exprs in label_types
+                            if _matches(pod.metadata.labels or {}, exprs)), None)
         if balloon:
             balloon_pods.append({
                 "name": pod.metadata.name,
@@ -147,7 +184,7 @@ def main():
             })
 
     if not balloon_pods:
-        print(f"No running pods with NRI balloon annotations in '{args.namespace}'")
+        print(f"No running pods with NRI balloon annotations or balloon-matched labels in '{args.namespace}'")
         return
 
     # Get topology from first pod on each node
