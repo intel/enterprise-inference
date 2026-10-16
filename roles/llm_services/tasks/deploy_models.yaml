@@ -70,7 +70,7 @@
           Set HF_TOKEN environment variable to download gated models (e.g., Llama)
           {% endif %}
 
-    - name: "Deploy models | Load LiteLLM master key (when auth_provider=litellm)"
+    - name: "Deploy models | Load LiteLLM master key (when auth_type=litellm_vkey)"
       kubernetes.core.k8s_info:
         api_version: v1
         kind: Secret
@@ -78,7 +78,7 @@
         namespace: "{{ litellm_namespace | default('litellm') }}"
       register: _deploy_litellm_secret
       failed_when: false
-      when: auth_provider | default('keycloak') == 'litellm'
+      when: auth_type | default('jwt') == 'litellm_vkey'
 
     # Enumerate the catalog model names (jq over the YAML->JSON, the same shape
     # the CLI itself uses). Select only models opted in with `autodeploy: true`
@@ -130,13 +130,13 @@
         # SMT width override for kubelet-static's full-pcpus-only alignment.
         # Empty ⇒ the CLI auto-detects.
         MM_KUBELET_THREADS_PER_CORE: "{{ mm_kubelet_threads_per_core | default('') }}"
-        # LiteLLM auto-registration — only when auth_provider=litellm.
-        MM_LITELLM_ENABLED: "{{ 'true' if auth_provider | default('keycloak') == 'litellm' else 'false' }}"
-        MM_LITELLM_URL: "{{ 'http://litellm.' + (litellm_namespace | default('litellm')) + '.svc.cluster.local:4000' if auth_provider | default('keycloak') == 'litellm' else '' }}"
-        MM_LITELLM_MASTER_KEY: "{{ (_deploy_litellm_secret.resources[0].data.master_key | b64decode) if (auth_provider | default('keycloak') == 'litellm' and _deploy_litellm_secret.resources | default([]) | length > 0) else '' }}"
+        # LiteLLM auto-registration — only when auth_type=litellm_vkey.
+        MM_LITELLM_ENABLED: "{{ 'true' if auth_type | default('jwt') == 'litellm_vkey' else 'false' }}"
+        MM_LITELLM_URL: "{{ 'http://litellm.' + (litellm_namespace | default('litellm')) + '.svc.cluster.local:4000' if auth_type | default('jwt') == 'litellm_vkey' else '' }}"
+        MM_LITELLM_MASTER_KEY: "{{ (_deploy_litellm_secret.resources[0].data.master_key | b64decode) if (auth_type | default('jwt') == 'litellm_vkey' and _deploy_litellm_secret.resources | default([]) | length > 0) else '' }}"
         MM_LITELLM_KSERVE_URL: "http://envoy-gateway.{{ gateway_namespace | default('envoy-gateway-system') }}.svc.cluster.local"
-        # AIGatewayRoute unified endpoint — only when auth_provider=keycloak.
-        MM_AIGATEWAY_ENABLED: "{{ 'true' if auth_provider | default('keycloak') == 'keycloak' else 'false' }}"
+        # AIGatewayRoute unified endpoint — only when auth_type=jwt.
+        MM_AIGATEWAY_ENABLED: "{{ 'true' if auth_type | default('jwt') == 'jwt' else 'false' }}"
         MM_EG_GATEWAY_NAME: "{{ gateway_name | default('eg-gateway') }}"
         MM_EG_GATEWAY_NS: "{{ gateway_namespace | default('envoy-gateway-system') }}"
       loop: "{{ _mm_model_names.stdout_lines }}"

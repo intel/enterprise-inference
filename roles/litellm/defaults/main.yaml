@@ -5,11 +5,10 @@
 # LiteLLM is an OpenAI-compatible proxy that adds virtual key management,
 # spend tracking, rate limiting, and model routing on top of inference backends.
 #
-# When auth_provider=litellm:
-#   - The gateway does TLS + routing only; LiteLLM is the sole auth boundary
-#     and validates its own virtual keys (no gateway JWT, no extAuth)
-#   - Keycloak is disabled (not deployed)
-#   - Virtual keys are the auth mechanism (Bearer <litellm-virtual-key>)
+# When auth_type=litellm_vkey:
+#   - The LiteLLM route bypasses the gateway JWT policy; LiteLLM validates its
+#     own virtual keys (Bearer <litellm-virtual-key>)
+#   - Keycloak still serves people signing in to the UIs
 #
 # LiteLLM sits in front of KServe inference endpoints:
 #   Client → Envoy Gateway (TLS+routing) → LiteLLM proxy (auth) → KServe
@@ -118,3 +117,6 @@ litellm_multi_node_resources:
     cpu: "4"
     memory: "4Gi"
 
+# Trace to Langfuse unless it is turned off (langfuse_enabled: false). The
+# langfuse role supplies host and keys and re-wires this when toggled later.
+_litellm_langfuse: "{{ langfuse_enabled | default(true) | bool }}"

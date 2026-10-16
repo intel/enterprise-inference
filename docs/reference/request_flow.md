@@ -4,9 +4,9 @@ End-to-end path for an inference request through the platform, from external cli
 
 ## Architecture
 
-Two auth modes are supported. The flow differs based on `auth_provider` in `global_config.yaml`:
+Two auth modes are supported. The flow differs based on `auth_type` in `env/<env>/config.inference.yaml`. Keycloak is deployed in both modes for sign-in; `auth_type` only selects the API client credential:
 
-### Keycloak (default) — Unified Routing
+### `jwt` (default) — Unified Routing
 
 ```
                          EXTERNAL                          INTERNAL (cluster)
@@ -20,7 +20,7 @@ Two auth modes are supported. The flow differs based on `auth_provider` in `glob
 Single endpoint: `https://inference.<domain>/v1/chat/completions`
 Model selected by `"model": "<name>"` in the JSON body (Envoy AI Gateway extracts it automatically).
 
-### LiteLLM mode
+### `litellm_vkey` mode
 
 ```
                          EXTERNAL                          INTERNAL (cluster)
@@ -39,10 +39,12 @@ Model selected by `"model": "<name>"` in the JSON body (Envoy AI Gateway extract
 | `eg-gateway` | LoadBalancer (external IP) | TLS termination, hostname routing, JWT validation | `eg` |
 | `ai-gateway` | ClusterIP (internal only) | Model routing via header match, EPP scheduling or direct routing | `eg` |
 
-In Keycloak mode, `eg-gateway` validates the JWT and forwards directly to `ai-gateway`. No LiteLLM in the path.
-In LiteLLM mode, `eg-gateway` routes to LiteLLM (which does auth), and LiteLLM forwards to `ai-gateway`.
+`eg-gateway` carries a deny-by-default Keycloak JWT policy. Routes that authenticate themselves (the LiteLLM API in `litellm_vkey` mode, the Langfuse UI) attach their own no-auth `SecurityPolicy`.
 
-## Request Flow — Keycloak + Unified Routing (Default)
+In `jwt` mode, `eg-gateway` validates the JWT and forwards directly to `ai-gateway`. No LiteLLM in the path.
+In `litellm_vkey` mode, `eg-gateway` routes to LiteLLM (which validates the virtual key), and LiteLLM forwards to `ai-gateway`.
+
+## Request Flow — `jwt` + Unified Routing (Default)
 
 ### Example: `qwen3-0-6b` (LLMInferenceService, EPP routing)
 
@@ -65,8 +67,8 @@ curl https://inference.example.com/v1/chat/completions \
 
 **Kubernetes resources:**
 - `Gateway/eg-gateway` in `envoy-gateway-system`
-- `HTTPRoute/inference-to-aigateway` in `envoy-ai-gateway-system` → backend `ai-gateway:80`
-- `SecurityPolicy/inference-jwt-auth` (OIDC validation against Keycloak)
+- `HTTPRoute/inference-external` in `envoy-gateway-system` → backend `ai-gateway:80`
+- `SecurityPolicy/gateway-auth` on `eg-gateway` (deny-by-default JWT validation against Keycloak)
 
 ---
 
@@ -118,7 +120,7 @@ No caching or tracing in this path (add observability via OpenTelemetry sidecar 
 
 ---
 
-## Request Flow — LiteLLM Mode
+## Request Flow — `litellm_vkey` Mode
 
 ### Example: `llama3-8b-awq` model, deployed via KServe LLMInferenceService
 
@@ -139,6 +141,7 @@ curl https://litellm.inference-example.com/v1/chat/completions \
 **Kubernetes resources:**
 - `Gateway/eg-gateway` in `envoy-gateway-system` (listeners: http/80, https/443)
 - `HTTPRoute/litellm` in `litellm` namespace → backend `litellm:4000`
+- `SecurityPolicy/litellm-no-auth` (overrides the gateway JWT policy; LiteLLM checks the key)
 
 ---
 
@@ -266,7 +269,7 @@ When a model is deployed via `model-manager deploy`:
 3. Background process (`_register_bg.py`) waits for `Ready` condition
 4. Discovers ai-gateway dataplane via label: `gateway.envoyproxy.io/owning-gateway-name=ai-gateway`
 5. Probes the gateway URL to confirm it's routable
-6. Registers model in LiteLLM with `api_base = http://<ai-gw-dataplane>/<ns>/<model>/v1`
+6. With `auth_type: litellm_vkey`, registers the model in LiteLLM with `api_base = http://<ai-gw-dataplane>/<ns>/<model>/v1`
 
 If the gateway isn't routable yet (e.g., EPP not configured), falls back to the direct workload service URL.
 
