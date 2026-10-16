@@ -87,29 +87,6 @@
               pod-security.kubernetes.io/warn: "restricted"
       when: enforce_pss | default(false) | bool
 
-    # ReferenceGrant allows Envoy Gateway SecurityPolicy (in gateway namespace)
-    # to reference the LiteLLM service (in litellm namespace) for extAuth.
-    # Must be created after namespace exists — moved here from envoy_gateway role.
-    - name: "litellm | Create ReferenceGrant for Envoy Gateway extAuth"
-      when: auth_provider | default('keycloak') == 'litellm' and gateway_create | bool
-      kubernetes.core.k8s:
-        state: present
-        definition:
-          apiVersion: gateway.networking.k8s.io/v1beta1
-          kind: ReferenceGrant
-          metadata:
-            name: envoy-to-litellm
-            namespace: "{{ litellm_namespace }}"
-          spec:
-            from:
-              - group: gateway.envoyproxy.io
-                kind: SecurityPolicy
-                namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
-            to:
-              - group: ""
-                kind: Service
-                name: litellm
-
     # ── PostgreSQL credentials ────────────────────────────────────────────────
     # The postgresql role creates the DB and copies credentials as
     # 'litellm-db-secret' into this namespace.
@@ -219,8 +196,6 @@
               secretKeyRef:
                 name: litellm-ui-auth
                 key: password
-          - name: LANGFUSE_HOST
-            value: "{{ 'http://langfuse-web.' + (langfuse_namespace | default('langfuse')) + '.svc.cluster.local:3000' if (langfuse_enabled | default(false) | bool or litellm_enabled | default(false) | bool or (auth_provider | default('keycloak')) == 'litellm') else '' }}"
       kubernetes.core.helm:
         name: litellm
         chart_ref: "{{ role_path }}/../../charts/litellm-helm"
@@ -234,7 +209,7 @@
               allowInsecureImages: true
           replicaCount: "{{ _litellm_replicas }}"
           image:
-            repository: ghcr.io/berriai/litellm-database
+            repository: "{{ litellm_image_repository }}"
             tag: "{{ litellm_version }}"
           # DB — use our existing PostgreSQL via db-secret pattern
           db:
@@ -293,8 +268,8 @@
                 port: 6379
                 password: "os.environ/REDIS_PASSWORD"
                 ttl: "{{ litellm_cache_ttl | default(600) }}"
-              success_callback: "{{ ['langfuse'] if (langfuse_enabled | default(false) | bool or litellm_enabled | default(false) | bool or (auth_provider | default('keycloak')) == 'litellm') else [] }}"
-              failure_callback: "{{ ['langfuse'] if (langfuse_enabled | default(false) | bool or litellm_enabled | default(false) | bool or (auth_provider | default('keycloak')) == 'litellm') else [] }}"
+              success_callback: "{{ ['langfuse'] if _litellm_langfuse | bool else [] }}"
+              failure_callback: "{{ ['langfuse'] if _litellm_langfuse | bool else [] }}"
             model_list: []
             router_settings:
               routing_strategy: least-busy
@@ -350,11 +325,19 @@
                 capabilities:
                   drop: ["ALL"]
           resources: "{{ _litellm_resources }}"
+          # Run as the image's own user so it can read what it ships.
+          podSecurityContext:
+            runAsNonRoot: true
+            runAsUser: "{{ litellm_run_as_user | int }}"
+            runAsGroup: "{{ litellm_run_as_user | int }}"
+            fsGroup: "{{ litellm_run_as_user | int }}"
+            seccompProfile:
+              type: RuntimeDefault
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             runAsNonRoot: true
-            runAsUser: 1000
+            runAsUser: "{{ litellm_run_as_user | int }}"
             capabilities:
               drop: ["ALL"]
           autoscaling:
@@ -408,6 +391,17 @@
 
 # ── Gateway integration (runs even on re-runs to stay idempotent) ─────────────
 
+# The gateway no longer delegates auth to LiteLLM (extAuth), so the grant
+# older releases created for it is removed.
+- name: "litellm | Remove the Envoy Gateway extAuth ReferenceGrant"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: gateway.networking.k8s.io/v1beta1
+    kind: ReferenceGrant
+    name: envoy-to-litellm
+    namespace: "{{ litellm_namespace }}"
+  failed_when: false
+
 - name: "litellm | Publish the litellm host"
   ansible.builtin.include_role:
     name: envoy_gateway
@@ -456,10 +450,10 @@
           {%- endif -%}
           {{ out }}
 
-# Programs authenticate with LiteLLM virtual keys, so the gateway's Keycloak
-# JWT default is overridden on the API route only.
+# With auth_type=litellm_vkey programs authenticate with LiteLLM virtual keys,
+# so the gateway's Keycloak JWT default is overridden on the API route only.
 - name: "litellm | Create no-auth SecurityPolicy (LiteLLM checks virtual keys)"
-  when: gateway_create | bool
+  when: gateway_create | bool and auth_type | default('jwt') == 'litellm_vkey'
   kubernetes.core.k8s:
     state: present
     definition:
