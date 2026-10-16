@@ -11,31 +11,21 @@
     wait: true
   failed_when: false
 
-- name: "litellm | teardown | Remove HTTPRoute"
+- name: "litellm | teardown | Remove gateway and mesh resources"
   kubernetes.core.k8s:
     state: absent
-    api_version: gateway.networking.k8s.io/v1
-    kind: HTTPRoute
-    name: litellm
+    api_version: "{{ item.api }}"
+    kind: "{{ item.kind }}"
+    name: "{{ item.name }}"
     namespace: "{{ litellm_namespace }}"
-  failed_when: false
-
-- name: "litellm | teardown | Remove SecurityPolicy"
-  kubernetes.core.k8s:
-    state: absent
-    api_version: gateway.envoyproxy.io/v1alpha1
-    kind: SecurityPolicy
-    name: litellm-no-auth
-    namespace: "{{ litellm_namespace }}"
-  failed_when: false
-
-- name: "litellm | teardown | Remove rate-limit BackendTrafficPolicy"
-  kubernetes.core.k8s:
-    state: absent
-    api_version: gateway.envoyproxy.io/v1alpha1
-    kind: BackendTrafficPolicy
-    name: litellm-rate-limit
-    namespace: "{{ litellm_namespace }}"
+  loop:
+    - { api: gateway.envoyproxy.io/v1alpha1, kind: SecurityPolicy, name: litellm-no-auth }
+    - { api: gateway.envoyproxy.io/v1alpha1, kind: BackendTrafficPolicy, name: litellm-rate-limit }
+    - { api: gateway.networking.k8s.io/v1, kind: HTTPRoute, name: litellm }
+    - { api: security.istio.io/v1, kind: AuthorizationPolicy, name: litellm-ingress }
+    - { api: security.istio.io/v1, kind: AuthorizationPolicy, name: litellm-redis }
+  loop_control:
+    label: "{{ item.kind }}/{{ item.name }}"
   failed_when: false
 
 - name: "litellm | teardown | Remove ConfigMaps"
@@ -59,6 +49,8 @@
   loop:
     - litellm-master-key
     - litellm-db-secret
+    - litellm-ui-auth
+    - litellm-redis-auth
   failed_when: false
 
 - name: "litellm | teardown | Remove namespace"

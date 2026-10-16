@@ -130,7 +130,7 @@ LiteLLM is always deployed with `auth_type: litellm_vkey`, and optional with `jw
 ```yaml
 # litellm_enabled: true
 # langfuse_enabled: false
-# litellm_version: "v1.83.14-stable.patch.2"
+# litellm_version: "v1.105.1"
 # litellm_namespace: "litellm"
 # litellm_cache_enabled: true
 # litellm_cache_ttl: 600

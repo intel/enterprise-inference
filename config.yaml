@@ -45,7 +45,7 @@ envoy_ai_gateway_namespace: "envoy-ai-gateway-system"
 
 # --- LiteLLM ---
 # litellm_enabled: true         # add LiteLLM with Keycloak auth (always on with auth_type=litellm_vkey)
-# litellm_version: "v1.83.14-stable.patch.2"
+# litellm_version: "v1.105.1"
 # litellm_namespace: "litellm"
 # litellm_hostname: "litellm.inference-example.com"  # defaults to litellm.<base_domain_name>
 # litellm_cache_enabled: true
