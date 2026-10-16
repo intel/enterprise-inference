@@ -4,21 +4,24 @@ Both auth modes expose the **same OpenAI-compatible API** on a single endpoint: 
 `model` field in the request body selects which deployed model answers. What differs
 is the hostname and the credential.
 
-`auth_provider` selects the mode — `keycloak` (default) or `litellm`. It is set in the
-platform's `global_config.yaml`, not in this repo.
+`auth_type` selects the mode — `jwt` (default) or `litellm_vkey`. It is set in the
+environment's `env/<env>/config.inference.yaml` (seeded from this repo's `config.yaml`).
+Keycloak is deployed in both modes and people always sign in through it; `auth_type`
+only selects the credential API clients send.
 
-| | **Keycloak** (`auth_provider: keycloak`) | **LiteLLM** (`auth_provider: litellm`) |
+| | **Keycloak JWT** (`auth_type: jwt`) | **LiteLLM virtual key** (`auth_type: litellm_vkey`) |
 |---|---|---|
 | **Hostname** | `inference.<base_domain_name>` | `litellm.<base_domain_name>` |
 | **Endpoint** | `https://inference.<domain>/v1/chat/completions` | `https://litellm.<domain>/v1/chat/completions` |
 | **Credential** | Keycloak OIDC JWT (`Authorization: Bearer <jwt>`) | LiteLLM master or virtual key (`Authorization: Bearer sk-...`) |
 | **Validated by** | The edge gateway, via `SecurityPolicy.jwt` | LiteLLM itself, before the request reaches a model |
-| **Also deployed** | Keycloak realm + client | LiteLLM, Langfuse, Valkey (no Keycloak) |
+| **Also deployed** | Keycloak realm + client; LiteLLM, Langfuse, Valkey with `litellm_enabled: true` | Keycloak realm + client, LiteLLM, Langfuse, Valkey |
 | **Model selection** | `"model"` field in the request body | `"model"` field in the request body |
 
 > [!IMPORTANT]
-> The two modes serve on **different hostnames**. In `litellm` mode nothing is bound to
+> The two modes serve on **different hostnames**. In `litellm_vkey` mode nothing is bound to
 > `inference.<domain>` — requests there return `404`. Use `litellm.<domain>`.
+> In `jwt` mode with `litellm_enabled: true`, `litellm.<domain>` also needs a Keycloak JWT.
 
 Both hostnames resolve to the same edge gateway LoadBalancer IP:
 
@@ -37,7 +40,7 @@ SNI without editing `/etc/hosts`. The installer's self-signed CA is at
 `env/local/logs/ai-solutions-ca.crt` — pass `--cacert <that path>` to verify the chain
 properly instead of using `-k`.
 
-## Keycloak mode (default)
+## Keycloak JWT mode (default)
 
 A helper script discovers the gateway, reads the Keycloak client credentials from the
 cluster, and exchanges them for a JWT:
@@ -74,7 +77,7 @@ curl -sk --noproxy '*' \
 A request with a missing, malformed, or expired JWT is rejected with `401` at the
 gateway, before it reaches a model.
 
-## LiteLLM mode
+## LiteLLM virtual key mode
 
 LiteLLM is the auth boundary. The edge gateway terminates TLS and forwards to LiteLLM,
 which validates the bearer key, enforces that key's model allow-list, budget, and rate
@@ -208,8 +211,8 @@ Any OpenAI-compatible client works — only `base_url` and `api_key` change:
 from openai import OpenAI
 
 client = OpenAI(
-    # keycloak mode: https://inference.<base_domain_name>/v1
-    # litellm  mode: https://litellm.<base_domain_name>/v1
+    # auth_type jwt:          https://inference.<base_domain_name>/v1
+    # auth_type litellm_vkey: https://litellm.<base_domain_name>/v1
     base_url="https://inference.solutions.ai/v1",
     api_key="<KEYCLOAK_JWT_OR_LITELLM_KEY>",
 )

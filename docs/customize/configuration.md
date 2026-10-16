@@ -6,10 +6,11 @@
 which AI gateway to use, which KServe and LiteLLM versions to install, hostnames, and
 the cluster's CPU-pinning policy.
 
-The core installer loads it as Ansible extra vars:
+`init inference` copies it to `env/<name>/config.inference.yaml`, and the core
+installer loads that copy as Ansible extra vars:
 
 ```
--e @ext/enterprise.ai-inference/config.yaml
+-e @env/<name>/config.inference.yaml
 ```
 
 ### How it fits together
@@ -19,17 +20,18 @@ Three layers, each overriding the one before it:
 ```
 roles/<name>/defaults/main.yaml     role defaults — the baseline
         ↓
-config.yaml  (this repo)            inference-layer settings
+env/<name>/config.inference.yaml    inference-layer settings (auth_type, litellm_*, …)
         ↓
-env/<name>/global_config.yaml       platform settings (base_domain_name, auth_provider, …)
+env/<name>/global_config.yaml       platform settings (base_domain_name, …)
         ↓
 -e on the command line              one-off override
 ```
 
 > [!IMPORTANT]
-> `config.yaml` is checked into this repo, so it applies to **every** environment.
-> Anything environment-specific — domain, auth provider, storage — belongs in the
-> platform's `env/<name>/global_config.yaml` instead. See the
+> `config.yaml` is checked into this repo and seeds **every** new environment. Edit
+> `env/<name>/config.inference.yaml` for one environment's inference settings, such
+> as `auth_type`. Platform settings — domain, storage — belong in
+> `env/<name>/global_config.yaml`. See the
 > [solutions Configuration Reference](https://github.com/intel/enterprise-ai-solutions/blob/main/docs/customize/configuration.md).
 
 ### Do I need to change anything?
@@ -39,6 +41,8 @@ No. The defaults deploy a working inference stack. Reach for this file when:
 | If you want to… | Change |
 |---|---|
 | Use agentgateway instead of Envoy AI Gateway | `ai_gateway_provider: "agentgateway"` |
+| Authenticate API clients with LiteLLM virtual keys | `auth_type: "litellm_vkey"` |
+| Add LiteLLM alongside Keycloak JWT auth | `litellm_enabled: true` |
 | Auto-deploy catalog models during install | `llm_services_deploy_models: true` |
 | Make an auto-deploy failure abort the install | `model_deploy_strict: true` |
 | Pin a component version | `kserve_version`, `litellm_version`, `envoy_ai_gateway_version` |
@@ -77,9 +81,9 @@ Every hostname defaults to a prefix on the platform's `base_domain_name`.
 
 | Setting | Default | Serves |
 |---|---|---|
-| `inference_hostname` | `inference.<base_domain_name>` | Model API in `keycloak` mode |
+| `inference_hostname` | `inference.<base_domain_name>` | Model API with `auth_type: jwt` |
 | `inference_prefix` | `inference` | Prefix used when `inference_hostname` is unset |
-| `litellm_hostname` | `litellm.<base_domain_name>` | Model API in `litellm` mode |
+| `litellm_hostname` | `litellm.<base_domain_name>` | LiteLLM API (the model API with `auth_type: litellm_vkey`) |
 | `langfuse_hostname` | `langfuse.<base_domain_name>` | Langfuse UI |
 
 > [!NOTE]
@@ -97,7 +101,13 @@ keycloak_client_id: "inference-client"
 # keycloak_token_lifespan: 900   # JWT access token lifespan in seconds (default: 15 min)
 ```
 
-These roles run only when `auth_provider` is not `litellm`.
+`keycloak_config` runs in both auth modes: people always sign in through Keycloak.
+`auth_type` only selects the credential API clients send:
+
+```yaml
+# auth_type: "jwt"   # jwt (default): Keycloak JWT on inference.<domain>
+#                    # litellm_vkey: LiteLLM virtual key on litellm.<domain>
+```
 
 ## KServe
 
@@ -113,9 +123,13 @@ supported mode.
 
 ## LiteLLM and Langfuse
 
-Deployed only when `auth_provider: litellm`.
+LiteLLM is always deployed with `auth_type: litellm_vkey`, and optional with `jwt`
+(`litellm_enabled: true`). Langfuse is deployed whenever LiteLLM is, unless
+`langfuse_enabled: false`.
 
 ```yaml
+# litellm_enabled: true
+# langfuse_enabled: false
 # litellm_version: "v1.83.14-stable.patch.2"
 # litellm_namespace: "litellm"
 # litellm_cache_enabled: true
@@ -225,12 +239,14 @@ Disabling NFD means those affinity rules cannot be satisfied.
 | `MM_CONFIG` | Path to the model catalog (`models.yaml`) |
 | `MM_GLOBAL_CONFIG` | Path to the platform's `global_config.yaml` |
 | `MM_INFERENCE_HOSTNAME` | Override the resolved endpoint hostname in either auth mode |
+| `MM_INFERENCE_GATEWAY` / `MM_INFERENCE_GATEWAY_NS` | Gateway a model's routes attach to (default `ai-gateway` in `llm-inference`) |
+| `MM_INFERENCE_GATEWAY_SVC_NS` | Namespace of that gateway's Service, which LiteLLM calls (default: `MM_INFERENCE_GATEWAY_NS`, else `envoy-gateway-system`) |
 | `MM_CPU_POLICY` | Override `kubernetes_cpu_policy` for one invocation |
 | `MM_NRI_ENABLED` | Set `false` to skip NRI CPU-pinning annotations |
 | `MM_NRI_PREFLIGHT` | `warn` — report a capacity shortfall but proceed |
 | `MM_NRI_SKIP_PREFLIGHT` | `1` — skip the capacity check entirely |
 | `MM_FORCE_REDEPLOY` | `1` — re-apply a model even if its rendered spec is unchanged |
-| `MM_HTTP_PROXY` / `MM_HTTPS_PROXY` / `MM_NO_PROXY` | Proxy settings for the download job |
+| `MM_HTTP_PROXY` / `MM_HTTPS_PROXY` / `MM_NO_PROXY` | Proxy for reaching Hugging Face (Hub checks, the download job, OVMS pods). `models.yaml` `network:` takes precedence; `HTTP_PROXY` / `http_proxy` etc. are the fallback |
 | `SKIP_MODEL_DEPLOYMENT` | `true` — skip the auto-deploy phase for one install run |
 
 Run `./model-manager --help` for the full surface.
