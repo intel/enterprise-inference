@@ -6,6 +6,7 @@ import binascii
 import json
 import os
 import secrets
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -295,11 +296,23 @@ def inference_hostname() -> str:
     return ""
 
 
+def _resolves(host: str) -> bool:
+    try:
+        socket.getaddrinfo(host, 443)
+        return True
+    except (OSError, UnicodeError):
+        return False
+
+
 def print_endpoints(m: Model) -> None:
     host, litellm = inference_hostname(), litellm_enabled()
-    gw_ip = k8s.out("get", "svc", "-n", env("MM_EG_GATEWAY_NS", "envoy-gateway-system"), "-l",
-                    f"gateway.envoyproxy.io/owning-gateway-name={env('MM_EG_GATEWAY_NAME', 'eg-gateway')}",
-                    "-o", "jsonpath={.items[0].status.loadBalancer.ingress[0].ip}")
+    if platform.is_openshift():
+        # Published through the router. No --resolve when the hostname resolves here, as with *.apps DNS.
+        gw_ip = "" if _resolves(host) else platform.router_ip()
+    else:
+        gw_ip = k8s.out("get", "svc", "-n", env("MM_EG_GATEWAY_NS", "envoy-gateway-system"), "-l",
+                        f"gateway.envoyproxy.io/owning-gateway-name={env('MM_EG_GATEWAY_NAME', 'eg-gateway')}",
+                        "-o", "jsonpath={.items[0].status.loadBalancer.ingress[0].ip}")
     api = {"embed": "v1/embeddings", "rerank": "v1/score"}.get(m.category, "v1/chat/completions")
     # The AI Gateway and LiteLLM both serve every model on one URL, picked by "model" in the body.
     if gateway_enabled() or litellm:
@@ -327,10 +340,6 @@ def print_endpoints(m: Model) -> None:
         print(f"    -o jsonpath='{{.data.master_key}}' | base64 -d){RESET}")
     else:
         print(f"\n  {BOLD}1. Get a Keycloak token:{RESET}")
-        if platform.is_openshift():
-            # Published through the router, so there is no LoadBalancer IP to read.
-            print(f"  {DIM}# OpenShift: if {host} does not resolve here, add MM_GATEWAY_IP=<ingress VIP>{RESET}")
-            print(f"  {DIM}# and curl --resolve \"{host}:443:$MM_GATEWAY_IP\"{RESET}")
         print(f"  {DIM}source {MM_DIR}/scripts/get-keycloak-token.sh{RESET}")
         print(f"  {DIM}# exports TOKEN, GATEWAY_IP, GATEWAY_DOMAIN{RESET}")
     print(f"\n  {BOLD}2. Call the model:{RESET}")
