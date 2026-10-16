@@ -101,7 +101,7 @@ TOKEN=$(curl -s --noproxy '*' --cacert env/ocp/logs/ai-solutions-ca.crt \
   -d grant_type=client_credentials -d client_id=inference-client -d client_secret=$SECRET | jq -r .access_token)
 ```
 
-Response codes: no token gives `401`, an invalid token `503` (as validated), and a valid one `200`.
+Response codes: no token or an invalid one gives `401`, and a valid one `200`.
 
 ## Known gaps
 
@@ -111,7 +111,7 @@ Response codes: no token gives `401`, an invalid token `503` (as validated), and
 | TP2+ balloons | On v1alpha1 every model pod matches by label into `vllm-balloon-tp1`, so models with more than one NUMA node per replica don't get their own balloon type. |
 | Unified `/v1` endpoint | Not available, because there is no AI gateway. Clients (e.g. eRAG) need the per-model URL. |
 | Token script fallback | When the hostnames neither resolve nor `MM_GATEWAY_IP` is set, the port-forward fallback fails: RHBK serves plain HTTP on `8080`. |
-| NRI plugin sync | After the balloon configuration changes, restart the plugin so it re-reads it: `oc delete pod -n kube-system -l app.kubernetes.io/name=nri-resource-policy-balloons`. |
+| NRI plugin sync | The installer restarts the plugin once it applies the node policy. After a balloon policy change of your own, restart it by hand, or new pods may run unpinned: `oc delete pod -n kube-system -l app.kubernetes.io/name=nri-resource-policy-balloons`. |
 
 ## Related Docs
 
