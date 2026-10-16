@@ -13,9 +13,9 @@
 
 # Image tag. >= v1.103.1 for GHSA-7hp6-4w63-5g45; >= v1.85.0 for the 2026
 # Host-header, MCP OAuth and /sso/debug advisories.
-litellm_version: "v1.103.3"
+litellm_version: "v1.106.0-rc.3"
 litellm_namespace: "litellm"
-litellm_valkey_tag: "8.0-alpine"                # valkey/valkey (official upstream image, Alpine for smaller footprint)
+litellm_valkey_tag: "9.1.2-alpine"              # valkey/valkey (official upstream image, Alpine for smaller footprint)
 
 # Gateway integration
 gateway_create: "{{ envoy_gateway_enabled | default(false) }}"
