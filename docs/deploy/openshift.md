@@ -75,17 +75,18 @@ oc exec -n llm-inference deploy/qwen3-0-6b-kserve -c main -- \
 ## Call the model
 
 Models are served at `https://inference.<domain>/<namespace>/<model>/v1/...`, through
-the OpenShift router, and need a Keycloak token. If the `*.apps` hostnames don't resolve
-from your machine, give the ingress VIP with `--resolve`, or with `MM_GATEWAY_IP` for
-the token script.
+the OpenShift router, and need a Keycloak token. `model-manager deploy` prints both
+commands ready to paste. The router IP comes from the cluster, and `--resolve` is added
+only when the `*.apps` hostnames don't resolve from your machine.
 
 ```bash
-# The token script reads the client secret from the cluster.
-MM_GATEWAY_IP=<ingress VIP> source model_manager/scripts/get-keycloak-token.sh
+# The token script reads the client secret from the cluster and finds the router
+# itself (MM_GATEWAY_IP overrides it). It exports TOKEN and GATEWAY_IP.
+source model_manager/scripts/get-keycloak-token.sh
 
 H=inference.<domain>
 curl -s --noproxy '*' --cacert env/ocp/logs/ai-solutions-ca.crt \
-  --resolve "$H:443:<ingress VIP>" \
+  --resolve "$H:443:$GATEWAY_IP" \
   https://$H/llm-inference/qwen3-0-6b/v1/chat/completions \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-0-6b","messages":[{"role":"user","content":"Hello /no_think"}],"max_tokens":64}'
@@ -110,7 +111,7 @@ Response codes: no token or an invalid one gives `401`, and a valid one `200`.
 | OpenVINO models (`InferenceService`) | Not validated. They need a `ClusterServingRuntime` that OpenShift AI does not ship. |
 | TP2+ balloons | On v1alpha1 every model pod matches by label into `vllm-balloon-tp1`, so models with more than one NUMA node per replica don't get their own balloon type. |
 | Unified `/v1` endpoint | Not available, because there is no AI gateway. Clients (e.g. eRAG) need the per-model URL. |
-| Token script fallback | When the hostnames neither resolve nor `MM_GATEWAY_IP` is set, the port-forward fallback fails: RHBK serves plain HTTP on `8080`. |
+| Token script fallback | When the router can't be reached, the port-forward fallback fails: RHBK serves plain HTTP on `8080`. |
 | NRI plugin sync | The installer restarts the plugin once it applies the node policy. After a balloon policy change of your own, restart it by hand, or new pods may run unpinned: `oc delete pod -n kube-system -l app.kubernetes.io/name=nri-resource-policy-balloons`. |
 
 ## Related Docs
