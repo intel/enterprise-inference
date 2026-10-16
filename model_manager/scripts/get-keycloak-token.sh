@@ -5,8 +5,8 @@
 # Usage: source ./scripts/get-keycloak-token.sh [--lifespan SECONDS]
 #   Exports: TOKEN, GATEWAY_IP, GATEWAY_DOMAIN, GATEWAY_URL (API base, path-aware)
 #   All values auto-discovered from cluster — no manual config needed.
-#   On OpenShift (no LoadBalancer): MM_GATEWAY_IP=<ingress VIP> if the *.apps
-#   hostnames do not resolve from this machine.
+#   On OpenShift the gateway is the router (found automatically); MM_GATEWAY_IP
+#   overrides it.
 #
 # Options:
 #   --lifespan SECONDS   Set token validity (updates Keycloak client setting)
@@ -79,11 +79,18 @@ GATEWAY_IP=$(kubectl get svc -n envoy-gateway-system \
   -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null)
 
 # On OpenShift the gateways are published through the router (passthrough
-# Routes), not a LoadBalancer: the hostnames resolve to the ingress VIP through
-# DNS, or MM_GATEWAY_IP names it.
+# Routes), not a LoadBalancer: its ingress VIP, else its LoadBalancer, else (HostNetwork,
+# as on single-node clusters) the router pod's node. MM_GATEWAY_IP overrides it.
 GATEWAY_IP="${MM_GATEWAY_IP:-$GATEWAY_IP}"
 if [[ -z "$GATEWAY_IP" ]] && kubectl api-resources --api-group=route.openshift.io -o name 2>/dev/null | grep -q '^routes'; then
   _gt_router=1
+  GATEWAY_IP=$(kubectl get infrastructure cluster \
+    -o jsonpath='{.status.platformStatus.*.ingressIPs[0]}' 2>/dev/null)
+  [[ -n "$GATEWAY_IP" ]] || GATEWAY_IP=$(kubectl get svc -n openshift-ingress router-default \
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+  [[ -n "$GATEWAY_IP" ]] || GATEWAY_IP=$(kubectl get pods -n openshift-ingress \
+    -l ingresscontroller.operator.openshift.io/deployment-ingresscontroller=default \
+    --field-selector=status.phase=Running -o jsonpath='{.items[0].status.hostIP}' 2>/dev/null)
 fi
 
 if [[ -z "$GATEWAY_IP" && -z "${_gt_router:-}" ]]; then

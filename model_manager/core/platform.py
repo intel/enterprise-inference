@@ -45,6 +45,20 @@ def is_openshift() -> bool:
     return os.environ.get("MM_PLATFORM") == "openshift"
 
 
+def router_ip() -> str:
+    """Where the default IngressController's router listens, which the *.apps hostnames resolve to:
+    MM_GATEWAY_IP, else the platform's ingress VIP, else its LoadBalancer, else (HostNetwork, as on
+    single-node clusters) the router pod's node."""
+    return (os.environ.get("MM_GATEWAY_IP")
+            or k8s.out("get", "infrastructure", "cluster",
+                       "-o", "jsonpath={.status.platformStatus.*.ingressIPs[0]}")
+            or k8s.out("get", "svc", "-n", "openshift-ingress", "router-default",
+                       "-o", "jsonpath={.status.loadBalancer.ingress[0].ip}")
+            or k8s.out("get", "pods", "-n", "openshift-ingress", "-l",
+                       "ingresscontroller.operator.openshift.io/deployment-ingresscontroller=default",
+                       "--field-selector=status.phase=Running", "-o", "jsonpath={.items[0].status.hostIP}"))
+
+
 def adapt(manifest: str) -> str:
     """Fit any rendered template to the platform: on OpenShift, drop pinned numeric UIDs/GIDs."""
     return _PINNED_ID.sub("", manifest) if is_openshift() else manifest
