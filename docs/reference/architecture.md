@@ -13,7 +13,7 @@ stack and the CLI that deploys and manages models at runtime.
 | **LiteLLM** | `roles/litellm/`, `charts/litellm-helm/` | OpenAI-compatible proxy — virtual API keys, per-key budgets and rate limits |
 | **Langfuse** | `roles/langfuse/` | LLM observability — request traces, token usage, prompt management |
 | **LLM services** | `roles/llm_services/` | Provisions the inference namespace and ServingRuntimes, and runs the model auto-deploy phase |
-| **Keycloak config** | `roles/keycloak_config/` | Inference realm + client for JWT-based model auth |
+| **Keycloak config** | `roles/keycloak_config/` | Inference realm + client for sign-in and JWT-based API auth (both auth modes) |
 | **NFD** | `roles/nfd/` | Node Feature Discovery — labels nodes with hardware capabilities (AMX, AVX512, NUMA count) |
 | **Model Manager** | `model_manager/` | Bash CLI (`model-manager`) + runtime and manifest templates for the model lifecycle |
 
@@ -25,12 +25,12 @@ resolved by the core installer in dependency order.
 | Role | Enabled when | Depends on |
 |------|--------------|------------|
 | `nfd` | `nfd_enabled` (default `true`) | — |
-| `keycloak_config` | `auth_provider != litellm` | — |
+| `keycloak_config` | `keycloak_enabled` (default `true`; both auth modes) | — |
 | `envoy_ai_gateway` | `kserve_enabled` and `ai_gateway_provider == envoy` | — |
 | `agentgateway` | `ai_gateway_provider == agentgateway` | — |
 | `kserve` | `kserve_enabled` (default `true`) | `envoy_ai_gateway`, `agentgateway` |
-| `litellm` | `auth_provider == litellm` | — |
-| `langfuse` | `auth_provider == litellm` | `litellm` |
+| `litellm` | `auth_type == litellm_vkey` or `litellm_enabled` | — |
+| `langfuse` | `litellm` is enabled and `langfuse_enabled` (default `true`) | `litellm` |
 | `llm_services` | `kserve_enabled` (default `true`) | `kserve` |
 
 > [!NOTE]
@@ -48,18 +48,21 @@ depends on both: whichever one is enabled runs first, and the other is skipped.
 | `eg-gateway` | LoadBalancer (external IP) | TLS termination, hostname routing, JWT validation |
 | `ai-gateway` | ClusterIP (internal only) | Model routing via header match, EPP scheduling or direct routing |
 
-In **keycloak** mode, `eg-gateway` validates the JWT and forwards straight to
-`ai-gateway`; LiteLLM is not in the path. In **litellm** mode, `eg-gateway` routes to
-LiteLLM, which does auth and then forwards to `ai-gateway`.
+`eg-gateway` carries a deny-by-default Keycloak JWT policy; routes that authenticate
+themselves (the LiteLLM API in `litellm_vkey` mode, the Langfuse UI) attach their own
+no-auth `SecurityPolicy`. In **jwt** mode, `eg-gateway` validates the JWT and forwards
+straight to `ai-gateway`; LiteLLM is not in the path. In **litellm_vkey** mode,
+`eg-gateway` routes to LiteLLM, which validates the virtual key and then forwards to
+`ai-gateway`.
 
 ```
                     EXTERNAL                            INTERNAL (cluster)
 
-  keycloak mode (default)
+  jwt mode (default)
   Client ──HTTPS──► eg-gateway ─────────HTTP────────► ai-gateway ──► vLLM / OVMS
                     (TLS + JWT)                        (model routing)   (model)
 
-  litellm mode
+  litellm_vkey mode
   Client ──HTTPS──► eg-gateway ──► LiteLLM ──HTTP──► ai-gateway ──► vLLM / OVMS
                     (TLS term)     (virtual keys,     (model routing)   (model)
                                     budgets, cache)
@@ -81,12 +84,13 @@ enterprise-ai-solutions/
 ├── es_auto_installer.sh          # main entry point
 ├── model-manager                 # thin wrapper → ext/.../model_manager/model-manager
 ├── config/repos.yaml             # declares this repo, and which branch to clone
-├── env/<env>/global_config.yaml  # platform settings (base_domain_name, auth_provider, …)
-├── env/<env>/models.yaml         # per-environment model catalog (seeded by `init`)
+├── env/<env>/global_config.yaml     # platform settings (base_domain_name, …)
+├── env/<env>/config.inference.yaml  # inference settings (auth_type, …), seeded from config.yaml
+├── env/<env>/models.yaml            # per-environment model catalog (seeded by `init`)
 └── ext/
     └── enterprise.ai-inference/  # ← this repo
         ├── components.yaml       # component registry, merged into the core registry
-        ├── config.yaml           # merged into Ansible vars at runtime
+        ├── config.yaml           # seed for env/<env>/config.inference.yaml
         ├── roles/                # discovered via roles_path
         ├── charts/               # vendored Helm charts (LiteLLM)
         └── model_manager/        # the model-manager CLI + templates
@@ -95,7 +99,7 @@ enterprise-ai-solutions/
 1. At preflight, `components.yaml` is auto-discovered and merged into the core component
    registry. The Jinja in each `enabled:` expression resolves before resolution.
 2. `install inference` runs the enabled roles here in dependency order.
-3. `config.yaml` is loaded as extra vars, overriding role defaults.
+3. `env/<env>/config.inference.yaml` is loaded as extra vars, overriding role defaults.
 4. After install, `./model-manager` operates standalone against the live cluster, reading
    the environment's `models.yaml` catalog.
 

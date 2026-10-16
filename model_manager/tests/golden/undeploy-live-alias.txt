@@ -1,0 +1,10 @@
+# rc: 0
+--- stdout
+[INFO ]  Discovered live LLMInferenceService/qwen-alt in llm-inference (no catalog entry)
+[INFO ]  Undeploying qwen-alt
+[  OK ]  qwen-alt undeployed
+--- stderr
+--- kubectl
+$ kubectl delete LLMInferenceService qwen-alt -n llm-inference --ignore-not-found
+$ kubectl delete configmap qwen-alt-chat-template -n llm-inference --ignore-not-found
+$ kubectl delete httproute direct-qwen-alt -n llm-inference --ignore-not-found

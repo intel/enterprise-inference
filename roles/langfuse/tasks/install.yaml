@@ -567,7 +567,7 @@
                 port: 3000
 
 - name: "langfuse | Exempt the route from gateway auth (Langfuse has its own login)"
-  when: gateway_create | bool and auth_provider | default('none') in ['keycloak', 'litellm']
+  when: gateway_create | bool
   ansible.builtin.include_role:
     name: gateway
     tasks_from: route_auth_exempt.yaml
@@ -579,7 +579,7 @@
 # ── Wire LiteLLM → Langfuse callback ─────────────────────────────────────────
 
 - name: "langfuse | Configure LiteLLM to send traces to Langfuse"
-  when: litellm_enabled | default(false) | bool or (auth_provider | default('keycloak')) == 'litellm'
+  when: (auth_type | default('jwt')) == 'litellm_vkey' or (litellm_enabled | default(false) | bool)
   block:
     - name: "langfuse | Get Langfuse public key from API"
       ansible.builtin.uri:
@@ -607,23 +607,10 @@
             LANGFUSE_SECRET_KEY: "{{ _langfuse_secret_key }}"
       failed_when: false
 
-    - name: "langfuse | Patch LiteLLM deployment to use Langfuse API keys"
-      kubernetes.core.k8s:
-        state: patched
-        api_version: apps/v1
-        kind: Deployment
-        name: litellm
-        namespace: "{{ litellm_namespace | default('litellm') }}"
-        definition:
-          spec:
-            template:
-              spec:
-                containers:
-                  - name: litellm
-                    envFrom:
-                      - secretRef:
-                          name: langfuse-api-keys
-      failed_when: false
+    - name: "langfuse | Wire LiteLLM tracing to Langfuse"
+      ansible.builtin.include_tasks: litellm_wiring.yaml
+      vars:
+        _lf_wire: true
 
 # ── Store credentials ─────────────────────────────────────────────────────────
 
