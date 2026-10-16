@@ -134,6 +134,15 @@
       until: _litellm_db_secret.resources | length > 0
       retries: 30
       delay: 10
+      failed_when: false
+
+    - name: "litellm | DB credentials present"
+      ansible.builtin.assert:
+        that: _litellm_db_secret.resources | default([]) | length > 0
+        fail_msg: >-
+          litellm-db-secret not found in {{ litellm_namespace }}. PostgreSQL creates it when
+          litellm is enabled: run install litellm without --only, or install postgresql first.
+        quiet: true
 
     - name: "litellm | Wait for litellm database to be ready (CNPG Database CRD)"
       kubernetes.core.k8s_info:

@@ -62,6 +62,15 @@
       until: _langfuse_db_secret.resources | length > 0
       retries: 30
       delay: 10
+      failed_when: false
+
+    - name: "langfuse | DB credentials present"
+      ansible.builtin.assert:
+        that: _langfuse_db_secret.resources | default([]) | length > 0
+        fail_msg: >-
+          langfuse-db-secret not found in {{ langfuse_namespace }}. PostgreSQL creates it when
+          langfuse is enabled: run install langfuse without --only, or install postgresql first.
+        quiet: true
 
     - name: "langfuse | Wait for langfuse database to be ready (CNPG Database CRD)"
       kubernetes.core.k8s_info:
