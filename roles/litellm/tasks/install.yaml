@@ -209,7 +209,7 @@
               allowInsecureImages: true
           replicaCount: "{{ _litellm_replicas }}"
           image:
-            repository: ghcr.io/berriai/litellm-database
+            repository: "{{ litellm_image_repository }}"
             tag: "{{ litellm_version }}"
           # DB — use our existing PostgreSQL via db-secret pattern
           db:
@@ -325,11 +325,19 @@
                 capabilities:
                   drop: ["ALL"]
           resources: "{{ _litellm_resources }}"
+          # Run as the image's own user so it can read what it ships.
+          podSecurityContext:
+            runAsNonRoot: true
+            runAsUser: "{{ litellm_run_as_user | int }}"
+            runAsGroup: "{{ litellm_run_as_user | int }}"
+            fsGroup: "{{ litellm_run_as_user | int }}"
+            seccompProfile:
+              type: RuntimeDefault
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             runAsNonRoot: true
-            runAsUser: 1000
+            runAsUser: "{{ litellm_run_as_user | int }}"
             capabilities:
               drop: ["ALL"]
           autoscaling:
