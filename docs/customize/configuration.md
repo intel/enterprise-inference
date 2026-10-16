@@ -113,10 +113,21 @@ supported mode.
 
 ## LiteLLM and Langfuse
 
-Deployed only when `auth_provider: litellm`.
+Deployed when `auth_provider: litellm` or `litellm_enabled: true`. The default
+image tag is `v1.105.1`; the vendored chart runs its database migration as a
+Helm pre-install/pre-upgrade hook before switching the deployment image. Back
+up the LiteLLM database before changing the image tag: a Helm rollback does
+not revert database migrations.
+The install role skips an existing Helm release. For existing deployments, retain
+the current Helm values (including credentials), change `image.tag` to `v1.105.1`,
+and remove the old `extraInitContainers`, `volumes`, and `volumeMounts` values
+used for the Prisma seed before upgrading with Helm. Enable
+`migrationJob.hooks.helm.enabled` and disable
+`migrationJob.hooks.argocd.enabled` so the migration completes before the
+new deployment starts.
 
 ```yaml
-# litellm_version: "v1.83.14-stable.patch.2"
+# litellm_version: "v1.105.1"
 # litellm_namespace: "litellm"
 # litellm_cache_enabled: true
 # litellm_cache_ttl: 600

@@ -15,7 +15,7 @@
 #   Client → Envoy Gateway (TLS+routing) → LiteLLM proxy (auth) → KServe
 # =============================================================================
 
-litellm_version: "v1.83.14-stable.patch.2"     # Docker image tag to deploy
+litellm_version: "v1.105.1"                   # Docker image tag to deploy
 litellm_namespace: "litellm"
 litellm_valkey_tag: "8.0-alpine"                # valkey/valkey (official upstream image, Alpine for smaller footprint)
 
@@ -77,20 +77,6 @@ litellm_single_node_resources:
     cpu: "4"
     memory: "4Gi"
 
-# prisma query engine access under a hardened securityContext.
-# The engines are baked into the image under /root, which the uid 1000 the proxy
-# runs as cannot read, so they are seeded into this emptyDir by an initContainer
-# instead. See roles/litellm/files/prisma-engine-seed.sh for the full rationale.
-# The chart applies these to both the Deployment and the migration Job.
-litellm_prisma_root_size: "256Mi"
-litellm_prisma_root_volumes:
-  - name: prisma-root
-    emptyDir:
-      sizeLimit: "{{ litellm_prisma_root_size }}"
-litellm_prisma_root_volume_mounts:
-  - name: prisma-root
-    mountPath: /root
-
 # Schema migration Job — the chart's 512Mi limit is far too small and the Job was
 # cgroup-OOM-killed on every attempt until BackoffLimitExceeded (exit 137 reported
 # as "Error", with no log output at all because python's stdout was still buffered
@@ -117,4 +103,3 @@ litellm_multi_node_resources:
   limits:
     cpu: "4"
     memory: "4Gi"
-

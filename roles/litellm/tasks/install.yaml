@@ -40,15 +40,11 @@
         msg: "LiteLLM sizing: {{ 'multi-node (' + (_litellm_replicas | string) + ' replicas, HPA enabled)' if _litellm_is_multinode | bool else 'single-node (1 replica)' }}"
 
     # ── Proxy env for the pod ─────────────────────────────────────────────────
-    # prisma cannot read the CLI baked into the image (see the seed script below)
-    # so it re-fetches it with `npm install prisma` on every start. Behind a
-    # corporate proxy that fetch dies with ECONNRESET, `prisma migrate deploy`
-    # times out, the server never binds :4000 and the pod crash-loops.
     # Both the Deployment and the migration Job render .Values.envVars.
     # no_proxy must keep .svc/.cluster.local + pod/service CIDRs so DB traffic
     # stays direct.
 
-    - name: "litellm | Build proxy env (prisma CLI bootstrap needs egress)"
+    - name: "litellm | Build proxy env"
       ansible.builtin.set_fact:
         _litellm_proxy_env: >-
           {{
@@ -68,34 +64,6 @@
       ansible.builtin.debug:
         msg: "LiteLLM pod proxy: {{ 'enabled — ' + (https_proxy | default(http_proxy | default(''))) if _litellm_proxy_env else 'not set (direct egress)' }}"
 
-    # ── prisma query engine seed ──────────────────────────────────────────────
-    # Assembled here rather than in defaults/ because the seed script is loaded
-    # from this role's files/ directory, which needs role_path. The script itself
-    # documents why the seeding is necessary.
-
-    - name: "litellm | Build prisma engine seed initContainer"
-      ansible.builtin.set_fact:
-        _litellm_prisma_seed_containers:
-          - name: prisma-engine-seed
-            image: "ghcr.io/berriai/litellm-database:main-{{ litellm_version }}"
-            imagePullPolicy: IfNotPresent
-            # Root, so it can read the baked engines under /root — but with no
-            # capabilities, so the script cannot chown, only chmod.
-            securityContext:
-              runAsUser: 0
-              runAsNonRoot: false
-              allowPrivilegeEscalation: false
-              readOnlyRootFilesystem: true
-              capabilities:
-                drop: ["ALL"]
-            command:
-              - sh
-              - -c
-              - "{{ lookup('file', role_path + '/files/prisma-engine-seed.sh') }}"
-            volumeMounts:
-              - name: prisma-root
-                mountPath: /rootvol
-
     # ── Namespace ─────────────────────────────────────────────────────────────
 
     - name: "litellm | Create namespace"
@@ -104,8 +72,6 @@
         name: "{{ litellm_namespace }}"
         state: present
 
-    # baseline (not restricted): the prisma-engine-seed initContainer must run as
-    # root to read the engines baked into /root at image build time (see below).
     - name: "litellm | Label namespace — PSS"
       kubernetes.core.k8s:
         state: present
@@ -225,7 +191,7 @@
           replicaCount: "{{ _litellm_replicas }}"
           image:
             repository: ghcr.io/berriai/litellm-database
-            tag: "main-{{ litellm_version }}"
+            tag: "{{ litellm_version }}"
           # DB — use our existing PostgreSQL via db-secret pattern
           db:
             useExisting: true
@@ -240,8 +206,7 @@
           masterkeySecretKey: master_key
           environmentSecrets:
             - litellm-master-key
-          # Proxy vars merged in when the cluster is behind a corporate proxy —
-          # required for the prisma CLI bootstrap (see set_fact above).
+          # Proxy vars merged in when the cluster is behind a corporate proxy.
           envVars: "{{ {'UI_USERNAME': 'admin'} | combine(_litellm_proxy_env) }}"
           extraEnvVars:
             - name: LITELLM_SALT_KEY
@@ -256,14 +221,6 @@
                   key: master_key
             - name: LANGFUSE_HOST
               value: "{{ 'http://langfuse-web.' + (langfuse_namespace | default('langfuse')) + '.svc.cluster.local:3000' if (langfuse_enabled | default(false) | bool or litellm_enabled | default(false) | bool or (auth_provider | default('keycloak')) == 'litellm') else '' }}"
-          # ── prisma query engine seed ──────────────────────────────────────
-          # The prisma engines are baked into the image under /root, which uid
-          # 1000 cannot read, so the proxy cannot reach them. An emptyDir over
-          # /root, seeded from the image by an initContainer, fixes it — see
-          # files/prisma-engine-seed.sh for the full explanation.
-          extraInitContainers: "{{ _litellm_prisma_seed_containers }}"
-          volumes: "{{ litellm_prisma_root_volumes }}"
-          volumeMounts: "{{ litellm_prisma_root_volume_mounts }}"
           # ── Schema migration Job ──────────────────────────────────────────
           # The chart's default 512Mi limit is far below what
           # `python litellm/proxy/prisma_migration.py` actually needs (~2.1Gi
@@ -272,6 +229,11 @@
           # See litellm_migration_job_resources.
           migrationJob:
             resources: "{{ litellm_migration_job_resources }}"
+            hooks:
+              argocd:
+                enabled: false
+              helm:
+                enabled: true
           # Chart-managed proxy config (replaces manual ConfigMap + template)
           proxyConfigMap:
             create: true
