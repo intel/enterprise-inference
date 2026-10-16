@@ -17,7 +17,10 @@
 # =============================================================================
 
 langfuse_version: "1.5.33"              # chart version (appVersion: 3.177.0)
-gateway_create: "{{ envoy_gateway_enabled | default(true) }}"
+# Publish Langfuse on the platform gateway.
+# Foreign var (canonical owner: enterprise-ai-solutions gateway component flag;
+# envoy_gateway_enabled is its alias).
+langfuse_gateway_publish: "{{ gateway_enabled | default(envoy_gateway_enabled | default(true)) | bool }}"
 langfuse_namespace: "langfuse"
 langfuse_helm_repo: "https://langfuse.github.io/langfuse-k8s"
 langfuse_helm_repo_name: "langfuse"

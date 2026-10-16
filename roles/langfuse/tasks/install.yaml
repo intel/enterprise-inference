@@ -52,17 +52,14 @@
 
     # ── PostgreSQL credentials ────────────────────────────────────────────────
 
-    - name: "langfuse | Wait for DB credentials secret"
+    # PostgreSQL ran first (depends_on), so the secret exists now or not at all.
+    - name: "langfuse | Read DB credentials secret"
       kubernetes.core.k8s_info:
         api_version: v1
         kind: Secret
         name: langfuse-db-secret
         namespace: "{{ langfuse_namespace }}"
       register: _langfuse_db_secret
-      until: _langfuse_db_secret.resources | length > 0
-      retries: 30
-      delay: 10
-      failed_when: false
 
     - name: "langfuse | DB credentials present"
       ansible.builtin.assert:
@@ -549,10 +546,10 @@
     gateway_publish_namespace: "{{ langfuse_namespace }}"
     gateway_publish_host: "{{ langfuse_hostname }}"
     gateway_publish_mode: subdomain   # Langfuse cannot run under a path
-  when: gateway_create | bool
+  when: langfuse_gateway_publish | bool
 
 - name: "langfuse | Create HTTPRoute"
-  when: gateway_create | bool
+  when: langfuse_gateway_publish | bool
   kubernetes.core.k8s:
     state: present
     definition:
@@ -576,7 +573,7 @@
                 port: 3000
 
 - name: "langfuse | Exempt the route from gateway auth (Langfuse has its own login)"
-  when: gateway_create | bool
+  when: langfuse_gateway_publish | bool
   ansible.builtin.include_role:
     name: gateway
     tasks_from: route_auth_exempt.yaml
