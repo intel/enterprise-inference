@@ -3,6 +3,13 @@
 # Envoy AI Gateway — Teardown
 # =============================================================================
 
+- name: "envoy_ai_gateway | Load the platform Envoy Gateway"
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: platform.yaml
+  vars:
+    _eg_detect_strict: false
+
 - name: "envoy_ai_gateway | Check if Helm release exists"
   kubernetes.core.helm_info:
     name: aieg
@@ -52,6 +59,33 @@
         label: "{{ item.metadata.name }}"
       failed_when: false
 
+    # The controller also puts its finalizer on ReferenceGrants (any namespace);
+    # gone, it cannot release them, and the platform's CRD cleanup would hang.
+    - name: "envoy_ai_gateway | Find ReferenceGrants"
+      kubernetes.core.k8s_info:
+        api_version: gateway.networking.k8s.io/v1beta1
+        kind: ReferenceGrant
+      register: _eag_rgs
+      failed_when: false
+
+    - name: "envoy_ai_gateway | Release its finalizer on ReferenceGrants"
+      kubernetes.core.k8s:
+        state: patched
+        api_version: gateway.networking.k8s.io/v1beta1
+        kind: ReferenceGrant
+        name: "{{ item.metadata.name }}"
+        namespace: "{{ item.metadata.namespace }}"
+        merge_type: merge
+        definition:
+          metadata:
+            finalizers: "{{ item.metadata.finalizers | reject('eq', 'aigateway.envoyproxy.io/finalizer') | list }}"
+      loop: >-
+        {{ _eag_rgs.resources | default([]) | selectattr('metadata.finalizers', 'defined')
+           | selectattr('metadata.finalizers', 'contains', 'aigateway.envoyproxy.io/finalizer') | list }}
+      loop_control:
+        label: "{{ item.metadata.namespace }}/{{ item.metadata.name }}"
+      failed_when: false
+
     - name: "envoy_ai_gateway | Find all AIGatewayRoutes in namespace"
       kubernetes.core.k8s_info:
         api_version: aigateway.envoyproxy.io/v1beta1
@@ -94,6 +128,16 @@
         namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
         state: absent
       failed_when: false
+
+    - name: "envoy_ai_gateway | Unpublish the inference host"
+      ansible.builtin.include_role:
+        name: gateway
+        tasks_from: unpublish.yaml
+      vars:
+        gateway_publish_name: inference
+        gateway_publish_namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
+        gateway_publish_host: "{{ inference_hostname }}"
+        gateway_publish_path: "{{ inference_path }}"
 
     - name: "envoy_ai_gateway | Find model-manager managed HTTPRoutes on ai-gateway"
       kubernetes.core.k8s_info:

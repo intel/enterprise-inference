@@ -11,32 +11,45 @@
     wait: true
   failed_when: false
 
-- name: "litellm | teardown | Remove HTTPRoute"
+- name: "litellm | teardown | Drop the gateway auth exemption and rate limit"
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: "{{ item.hook }}"
+  loop:
+    - {hook: route_auth_exempt.yaml, policy: litellm-no-auth}
+    - {hook: route_rate_limit.yaml, policy: litellm-rate-limit}
+  loop_control:
+    label: "{{ item.policy }}"
+  vars:
+    gateway_route_name: litellm
+    gateway_route_namespace: "{{ litellm_namespace }}"
+    gateway_route_policy_name: "{{ item.policy }}"
+    gateway_route_state: absent
+
+- name: "litellm | teardown | Remove gateway and mesh resources"
   kubernetes.core.k8s:
     state: absent
-    api_version: gateway.networking.k8s.io/v1
-    kind: HTTPRoute
-    name: litellm
+    api_version: "{{ item.api }}"
+    kind: "{{ item.kind }}"
+    name: "{{ item.name }}"
     namespace: "{{ litellm_namespace }}"
+  loop:
+    - { api: gateway.networking.k8s.io/v1, kind: HTTPRoute, name: litellm }
+    - { api: security.istio.io/v1, kind: AuthorizationPolicy, name: litellm-ingress }
+    - { api: security.istio.io/v1, kind: AuthorizationPolicy, name: litellm-redis }
+  loop_control:
+    label: "{{ item.kind }}/{{ item.name }}"
   failed_when: false
 
-- name: "litellm | teardown | Remove SecurityPolicy"
-  kubernetes.core.k8s:
-    state: absent
-    api_version: gateway.envoyproxy.io/v1alpha1
-    kind: SecurityPolicy
-    name: litellm-no-auth
-    namespace: "{{ litellm_namespace }}"
-  failed_when: false
-
-- name: "litellm | teardown | Remove rate-limit BackendTrafficPolicy"
-  kubernetes.core.k8s:
-    state: absent
-    api_version: gateway.envoyproxy.io/v1alpha1
-    kind: BackendTrafficPolicy
-    name: litellm-rate-limit
-    namespace: "{{ litellm_namespace }}"
-  failed_when: false
+- name: "litellm | Unpublish the litellm host"
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: unpublish.yaml
+  vars:
+    gateway_publish_name: litellm
+    gateway_publish_namespace: "{{ litellm_namespace }}"
+    gateway_publish_host: "{{ litellm_hostname }}"
+    gateway_publish_path: "{{ litellm_path }}"
 
 - name: "litellm | teardown | Remove ConfigMaps"
   kubernetes.core.k8s:
@@ -59,6 +72,8 @@
   loop:
     - litellm-master-key
     - litellm-db-secret
+    - litellm-ui-auth
+    - litellm-redis-auth
   failed_when: false
 
 - name: "litellm | teardown | Remove namespace"

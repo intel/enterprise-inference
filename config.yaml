@@ -23,17 +23,17 @@ keycloak_client_id: "inference-client"
 ai_gateway_provider: "envoy"              # envoy | agentgateway
 
 # --- Envoy AI Gateway (used when ai_gateway_provider=envoy) ---
-envoy_ai_gateway_version: "0.6.0"
+# envoy_ai_gateway_version: "1.2.0"  # default: the release built for the platform Envoy Gateway
 envoy_ai_gateway_namespace: "envoy-ai-gateway-system"
-# inference_hostname: "inference.{{ base_domain_name }}"  # defaults to inference.<base_domain_name>
-# inference_prefix: "inference"                           # prefix prepended to base_domain_name if inference_hostname not set
+# Inference host: inference.<base_domain_name> (or <base_domain_name>/inference in
+# path mode).
 
 # --- agentgateway (used when ai_gateway_provider=agentgateway) ---
 # agentgateway_version: "1.3.1"
 # agentgateway_namespace: "agentgateway-system"
 
 # --- KServe ---
-# kserve_version: "0.15.1"
+# kserve_version: "0.18.0"
 # kserve_deploy_mode: "Standard"         # Standard | Knative
 # kserve_namespace: "kserve"
 # kserve_llmisvc_epp_image: "ghcr.io/llm-d/llm-d-router-endpoint-picker:v0.9.0"
@@ -45,7 +45,7 @@ envoy_ai_gateway_namespace: "envoy-ai-gateway-system"
 
 # --- LiteLLM ---
 # litellm_enabled: true         # add LiteLLM with Keycloak auth (always on with auth_type=litellm_vkey)
-# litellm_version: "v1.83.14-stable.patch.2"
+# litellm_version: "v1.105.1"
 # litellm_namespace: "litellm"
 # litellm_hostname: "litellm.inference-example.com"  # defaults to litellm.<base_domain_name>
 # litellm_cache_enabled: true

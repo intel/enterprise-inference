@@ -30,8 +30,9 @@ agentgateway_wait_timeout: "300s"
 agentgateway_inference_extension_enabled: true
 
 # --- Gateway API CRDs (agentgateway needs the standard channel) ---
-# Kept in step with the version pulled by other roles; applied server-side.
-agentgateway_gateway_api_version: "v1.5.0"
+# Only applied when absent (agentgateway as the sole gateway); with the
+# ai-solutions platform, envoy_gateway owns them. Same version it ships.
+agentgateway_gateway_api_version: "v1.6.1"
 agentgateway_gateway_api_manifest: >-
   https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ agentgateway_gateway_api_version }}/standard-install.yaml
 
@@ -50,7 +51,10 @@ ai_gateway_service_name: "ai-gateway"
 
 # External inference hostname (eg-gateway TLS listener → ai-gateway).
 inference_hostname: "inference.{{ base_domain_name | default('inference-example.com') }}"
-
-# Edge gateway to bridge from (must match the envoy_gateway role).
-envoy_gateway_name: "eg-gateway"
-envoy_gateway_namespace: "envoy-gateway-system"
+# Path mode (routing_mode: path): <base>/inference, prefix stripped for the AI
+# gateway; the API takes bearer tokens, so cookies of the shared host are dropped.
+inference_path: "/inference"
+_inference_strip_prefix: >-
+  {{ [{'type': 'URLRewrite', 'urlRewrite': {'path': {'type': 'ReplacePrefixMatch', 'replacePrefixMatch': '/'}}},
+      {'type': 'RequestHeaderModifier', 'requestHeaderModifier': {'remove': ['Cookie']}}]
+     if (routing_mode | default('subdomain')) == 'path' else [] }}

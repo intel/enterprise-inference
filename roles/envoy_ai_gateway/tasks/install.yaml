@@ -3,6 +3,38 @@
 # Envoy AI Gateway — Install / Upgrade CRDs + Controller via Helm (OCI)
 # =============================================================================
 
+# Version, controller namespace and controllerName follow the platform controller.
+- name: "envoy_ai_gateway | Load the platform Envoy Gateway"
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: platform.yaml
+
+# Never stops the install: without a fitting platform, say why and skip.
+- name: "envoy_ai_gateway | Fit to the platform"
+  vars:
+    _skip: >-
+      {{ 'the platform gateway is ' ~ gateway_platform.provider ~ ', not Envoy Gateway (use ai_gateway_provider: agentgateway)'
+           if gateway_platform.provider | default('envoy') != 'envoy'
+         else 'no Envoy AI Gateway release is known for Envoy Gateway ' ~ (gateway_platform.version or '(unknown version)')
+              ~ ' (set envoy_ai_gateway_version)' if not envoy_ai_gateway_version
+         else '' }}
+  ansible.builtin.set_fact:
+    _eag_skip: "{{ _skip }}"
+    _eag_notices: >-
+      {{ (['Envoy AI Gateway skipped: ' ~ _skip] if _skip else [])
+         + (['Envoy AI Gateway ' ~ envoy_ai_gateway_version ~ ' is built for Envoy Gateway ' ~ _eag_minor_match
+             ~ '; the platform runs ' ~ gateway_platform.version ~ '.']
+            if _eag_minor_match and _eag_minor_match != _eag_eg_minor else []) }}
+
+- name: "envoy_ai_gateway | Notices"
+  ansible.builtin.debug:
+    msg: "{{ _eag_notices }}"
+  when: _eag_notices | length > 0
+
+- name: "envoy_ai_gateway | Skip"
+  ansible.builtin.meta: end_role
+  when: _eag_skip | length > 0
+
 - name: "envoy_ai_gateway | Check for existing Helm release"
   kubernetes.core.helm_info:
     name: aieg
@@ -70,17 +102,28 @@
           pod-security.kubernetes.io/warn: "privileged"
   when: enforce_pss | default(false) | bool
 
+# Also when the CRDs went missing under an installed release (another role's teardown).
+- name: "envoy_ai_gateway | Check the AI Gateway CRDs"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: aigatewayroutes.aigateway.envoyproxy.io
+  register: _eag_crd
+
 - name: "envoy_ai_gateway | Install/upgrade CRDs via Helm (OCI)"
   when: >-
     _eag_release.status is not defined or
     _eag_release.status is none or
-    _eag_installed_chart != _eag_target_chart
+    _eag_installed_chart != _eag_target_chart or
+    _eag_crd.resources | default([]) | length == 0
   kubernetes.core.helm:
     name: aieg-crd
     chart_ref: "{{ envoy_ai_gateway_helm_repo }}/ai-gateway-crds-helm"
     release_namespace: "{{ envoy_ai_gateway_namespace }}"
     create_namespace: true
     chart_version: "v{{ envoy_ai_gateway_version }}"
+    # Same chart and values: Helm would skip, so force it to recreate the CRDs.
+    force: "{{ _eag_crd.resources | default([]) | length == 0 and _eag_installed_chart == _eag_target_chart }}"
     wait: true
     timeout: "5m0s"
 
@@ -189,7 +232,7 @@
       metadata:
         name: "{{ ai_gateway_class_name }}"
       spec:
-        controllerName: gateway.envoyproxy.io/gatewayclass-controller
+        controllerName: "{{ gateway_platform.controller_name }}"
         parametersRef:
           group: gateway.envoyproxy.io
           kind: EnvoyProxy
@@ -290,6 +333,19 @@
 # ClusterIP service, not this route. Publishing inference.<domain> in litellm
 # mode would expose an unauthenticated bypass around LiteLLM.
 
+- name: "envoy_ai_gateway | Publish the inference host"
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: publish.yaml
+  vars:
+    gateway_publish_name: inference
+    gateway_publish_namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
+    gateway_publish_host: "{{ inference_hostname }}"
+    gateway_publish_path: "{{ inference_path }}"
+  when:
+    - ai_gateway_create | bool
+    - auth_type | default('jwt') == 'jwt'
+
 - name: "envoy_ai_gateway | Create external inference HTTPRoute (eg-gateway → ai-gateway)"
   kubernetes.core.k8s:
     state: present
@@ -303,16 +359,16 @@
           app.kubernetes.io/managed-by: envoy-ai-gateway-role
       spec:
         hostnames:
-          - "{{ inference_hostname }}"
+          - "{{ gateway_publish.host }}"
         parentRefs:
-          - name: "{{ envoy_gateway_name | default('eg-gateway') }}"
-            namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
-            sectionName: https
+          - "{{ gateway_publish.parent_ref }}"
         rules:
           - matches:
               - path:
                   type: PathPrefix
-                  value: /
+                  value: "{{ gateway_publish.relative_path }}"
+            # Path mode: the AI gateway serves /v1/..., so strip /inference.
+            filters: "{{ _inference_strip_prefix }}"
             backendRefs:
               - name: "{{ ai_gateway_service_name }}"
                 namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
@@ -332,6 +388,19 @@
     namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
   # Absent on any install that was never in keycloak mode — not an error.
   failed_when: false
+  when:
+    - ai_gateway_create | bool
+    - auth_type | default('jwt') != 'jwt'
+
+- name: "envoy_ai_gateway | Unpublish the inference host when not jwt"
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: unpublish.yaml
+  vars:
+    gateway_publish_name: inference
+    gateway_publish_namespace: "{{ envoy_gateway_namespace | default('envoy-gateway-system') }}"
+    gateway_publish_host: "{{ inference_hostname }}"
+    gateway_publish_path: "{{ inference_path }}"
   when:
     - ai_gateway_create | bool
     - auth_type | default('jwt') != 'jwt'

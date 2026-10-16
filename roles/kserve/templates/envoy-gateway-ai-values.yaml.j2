@@ -4,7 +4,7 @@
 config:
   envoyGateway:
     gateway:
-      controllerName: gateway.envoyproxy.io/gatewayclass-controller
+      controllerName: {{ gateway_platform.controller_name | default("gateway.envoyproxy.io/gatewayclass-controller") }}
     logging:
       level:
         default: info

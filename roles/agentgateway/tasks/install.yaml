@@ -10,16 +10,23 @@
 # =============================================================================
 
 # ── 1. Gateway API CRDs (standard channel) ───────────────────────────────────
-# agentgateway relies on the upstream Gateway API CRDs. envoy_gateway also
-# installs these; applying server-side is idempotent and keeps the version
-# pinned when agentgateway is the sole gateway on a BYO cluster.
+# Owned by the platform (envoy_gateway) when present; installed here only on a
+# cluster that has none, so the two never fight over the version.
+- name: "agentgateway | Check for Gateway API CRDs"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: gateways.gateway.networking.k8s.io
+  register: _agw_gwapi_crd
+
 - name: "agentgateway | Install Gateway API standard CRDs (server-side)"
   ansible.builtin.command:
     cmd: >-
-      kubectl apply --server-side --force-conflicts
+      kubectl apply --server-side
       -f {{ agentgateway_gateway_api_manifest }}
   register: _agw_gwapi
   changed_when: "'configured' in _agw_gwapi.stdout or 'created' in _agw_gwapi.stdout"
+  when: _agw_gwapi_crd.resources | default([]) | length == 0
 
 # ── 2. Control-plane namespace + mesh/PSS labels ─────────────────────────────
 - name: "agentgateway | Ensure control-plane namespace"
@@ -232,6 +239,11 @@
                   value: 'string(json(request.body).model)'
   when: ai_gateway_create | bool
 
+- name: "agentgateway | Load the platform Envoy Gateway"
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: platform.yaml
+
 # ── 7. External ingress: eg-gateway → ai-gateway HTTPRoute ───────────────────
 # Bridge the edge eg-gateway to the AI gateway, forwarding all inference.<domain>
 # traffic to the ai-gateway data-plane Service.
@@ -243,6 +255,18 @@
 # llm-inference). So this backendRef is cross-namespace and requires a
 # ReferenceGrant in the target namespace permitting the edge namespace's
 # HTTPRoutes to reference the Service (Gateway API blocks cross-ns refs by default).
+- name: "agentgateway | Publish the inference host"
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: publish.yaml
+  vars:
+    gateway_publish_name: inference
+    gateway_publish_namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
+    gateway_publish_host: "{{ inference_hostname }}"
+    gateway_publish_path: "{{ inference_path }}"
+  when:
+    - ai_gateway_create | bool
+
 - name: "agentgateway | Create external inference HTTPRoute (eg-gateway → ai-gateway)"
   kubernetes.core.k8s:
     state: present
@@ -251,28 +275,28 @@
       kind: HTTPRoute
       metadata:
         name: inference-external
-        namespace: "{{ envoy_gateway_namespace }}"
+        namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
         labels:
           app.kubernetes.io/managed-by: agentgateway-role
       spec:
         hostnames:
-          - "{{ inference_hostname }}"
+          - "{{ gateway_publish.host }}"
         parentRefs:
-          - name: "{{ envoy_gateway_name }}"
-            namespace: "{{ envoy_gateway_namespace }}"
-            sectionName: https
+          - "{{ gateway_publish.parent_ref }}"
         rules:
           - matches:
               - path:
                   type: PathPrefix
-                  value: /
+                  value: "{{ gateway_publish.relative_path }}"
+            # Path mode: the AI gateway serves /v1/..., so strip /inference.
+            filters: "{{ _inference_strip_prefix }}"
             backendRefs:
               - name: "{{ ai_gateway_service_name }}"
                 namespace: "{{ ai_gateway_namespace }}"
                 port: 80
   when: ai_gateway_create | bool
 
-# Allow the edge HTTPRoute (in envoy_gateway_namespace) to target the ai-gateway
+# Allow the edge HTTPRoute (in gateway_namespace) to target the ai-gateway
 # Service in ai_gateway_namespace. Without this, the ref is silently rejected and
 # the edge returns HTTP 500 (direct_response, no upstream cluster).
 - name: "agentgateway | Allow edge → ai-gateway cross-namespace Service ref (ReferenceGrant)"
@@ -290,7 +314,7 @@
         from:
           - group: gateway.networking.k8s.io
             kind: HTTPRoute
-            namespace: "{{ envoy_gateway_namespace }}"
+            namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
         to:
           - group: ""
             kind: Service
@@ -302,4 +326,4 @@
     msg: >-
       agentgateway ready — public Gateway '{{ ai_gateway_name }}'
       (class {{ ai_gateway_class_name }}) in {{ ai_gateway_namespace }},
-      bridged from {{ envoy_gateway_name }} at host {{ inference_hostname }}.
+      bridged from {{ gateway_name | default('eg-gateway') }} at host {{ inference_hostname }}.

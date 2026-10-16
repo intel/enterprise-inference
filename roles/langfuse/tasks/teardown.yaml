@@ -20,14 +20,25 @@
     namespace: "{{ langfuse_namespace }}"
   failed_when: false
 
-- name: "langfuse | teardown | Remove SecurityPolicy"
-  kubernetes.core.k8s:
-    state: absent
-    api_version: gateway.envoyproxy.io/v1alpha1
-    kind: SecurityPolicy
-    name: langfuse-no-auth
-    namespace: "{{ langfuse_namespace }}"
-  failed_when: false
+- name: "langfuse | Unpublish the langfuse host"
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: unpublish.yaml
+  vars:
+    gateway_publish_name: langfuse
+    gateway_publish_namespace: "{{ langfuse_namespace }}"
+    gateway_publish_host: "{{ langfuse_hostname }}"
+    gateway_publish_mode: subdomain
+
+- name: "langfuse | teardown | Drop the gateway auth exemption"
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: route_auth_exempt.yaml
+  vars:
+    gateway_route_name: langfuse
+    gateway_route_namespace: "{{ langfuse_namespace }}"
+    gateway_route_policy_name: langfuse-no-auth
+    gateway_route_state: absent
 
 # Unwire first, so LiteLLM neither traces to a removed Langfuse nor needs its keys.
 - name: "langfuse | teardown | Turn LiteLLM tracing off"

@@ -531,6 +531,17 @@
 
 # ── Gateway integration ───────────────────────────────────────────────────────
 
+- name: "langfuse | Publish the langfuse host"
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: publish.yaml
+  vars:
+    gateway_publish_name: langfuse
+    gateway_publish_namespace: "{{ langfuse_namespace }}"
+    gateway_publish_host: "{{ langfuse_hostname }}"
+    gateway_publish_mode: subdomain   # Langfuse cannot run under a path
+  when: gateway_create | bool
+
 - name: "langfuse | Create HTTPRoute"
   when: gateway_create | bool
   kubernetes.core.k8s:
@@ -543,9 +554,7 @@
         namespace: "{{ langfuse_namespace }}"
       spec:
         parentRefs:
-          - name: "{{ gateway_name | default('eg-gateway') }}"
-            namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
-            sectionName: https
+          - "{{ gateway_publish.parent_ref }}"
         hostnames:
           - "{{ langfuse_hostname }}"
         rules:
@@ -557,21 +566,15 @@
               - name: langfuse-web
                 port: 3000
 
-- name: "langfuse | Create no-auth SecurityPolicy (Langfuse has its own login)"
+- name: "langfuse | Exempt the route from gateway auth (Langfuse has its own login)"
   when: gateway_create | bool
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: gateway.envoyproxy.io/v1alpha1
-      kind: SecurityPolicy
-      metadata:
-        name: langfuse-no-auth
-        namespace: "{{ langfuse_namespace }}"
-      spec:
-        targetRefs:
-          - group: gateway.networking.k8s.io
-            kind: HTTPRoute
-            name: langfuse
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: route_auth_exempt.yaml
+  vars:
+    gateway_route_name: langfuse
+    gateway_route_namespace: "{{ langfuse_namespace }}"
+    gateway_route_policy_name: langfuse-no-auth
 
 # ── Wire LiteLLM → Langfuse callback ─────────────────────────────────────────
 

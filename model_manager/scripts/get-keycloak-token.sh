@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # get-keycloak-token.sh — Fetch a Keycloak JWT token for inference API access
 # Usage: source ./scripts/get-keycloak-token.sh [--lifespan SECONDS]
-#   Exports: TOKEN, GATEWAY_IP, GATEWAY_DOMAIN
+#   Exports: TOKEN, GATEWAY_IP, GATEWAY_DOMAIN, GATEWAY_URL (API base, path-aware)
 #   All values auto-discovered from cluster — no manual config needed.
 #
 # Options:
@@ -88,6 +88,13 @@ fi
 # Strip protocol prefix if present (handles both http:// and https://)
 KEYCLOAK_DOMAIN="${KEYCLOAK_DOMAIN#http://}"
 KEYCLOAK_DOMAIN="${KEYCLOAK_DOMAIN#https://}"
+# Path routing: the frontend URL is <host>/<prefix>; split it.
+KEYCLOAK_PATH=""
+if [[ "$KEYCLOAK_DOMAIN" == */* ]]; then
+  KEYCLOAK_PATH="/${KEYCLOAK_DOMAIN#*/}"
+  KEYCLOAK_PATH="${KEYCLOAK_PATH%/}"
+  KEYCLOAK_DOMAIN="${KEYCLOAK_DOMAIN%%/*}"
+fi
 
 # Read client credentials from cluster
 CLIENT_ID=$(kubectl get secret keycloak-client-secret -n keycloak \
@@ -112,11 +119,11 @@ _gt_open_keycloak() {
   probe_body=$(curl -sk --noproxy '*' --connect-timeout 3 --max-time 5 \
       --resolve "${KEYCLOAK_DOMAIN}:443:${resolve_ip}" \
       -o /dev/stdout -w "\n__HTTP__%{http_code}" \
-      "https://${KEYCLOAK_DOMAIN}/realms/inference/.well-known/openid-configuration" 2>/dev/null)
+      "https://${KEYCLOAK_DOMAIN}${KEYCLOAK_PATH}/realms/inference/.well-known/openid-configuration" 2>/dev/null)
   probe_code="${probe_body##*__HTTP__}"
   probe_body="${probe_body%__HTTP__*}"
   if [[ "$probe_code" == "200" && "$probe_body" == *'"issuer"'* ]]; then
-    _gt_kc_base="https://${KEYCLOAK_DOMAIN}"
+    _gt_kc_base="https://${KEYCLOAK_DOMAIN}${KEYCLOAK_PATH}"
     _gt_kc_curl_extra=(--resolve "${KEYCLOAK_DOMAIN}:443:${resolve_ip}")
     _gt_kc_pf_pid=""
     return 0
@@ -134,7 +141,7 @@ _gt_open_keycloak() {
     _gt_kc_pf_pid=""
     _gt_err "Cannot reach Keycloak — port-forward to ${kc_ns}/${kc_svc} failed."
   fi
-  _gt_kc_base="https://127.0.0.1:${local_port}"
+  _gt_kc_base="https://127.0.0.1:${local_port}${KEYCLOAK_PATH}"
   _gt_kc_curl_extra=()
 }
 
@@ -231,8 +238,15 @@ if [[ -z "$TOKEN" ]]; then
   return 1 2>/dev/null || exit 1
 fi
 
-# Derive gateway domain from keycloak domain (strip "keycloak." prefix, add "inference.")
-GATEWAY_DOMAIN="inference.${KEYCLOAK_DOMAIN#keycloak.}"
+# Derive the inference endpoint from Keycloak's: <base>/inference in path mode,
+# else inference.<base>. GATEWAY_URL is the base for /v1/... requests.
+if [[ -n "$KEYCLOAK_PATH" ]]; then
+  GATEWAY_DOMAIN="$KEYCLOAK_DOMAIN"
+  GATEWAY_URL="https://${GATEWAY_DOMAIN}/inference"
+else
+  GATEWAY_DOMAIN="inference.${KEYCLOAK_DOMAIN#keycloak.}"
+  GATEWAY_URL="https://${GATEWAY_DOMAIN}"
+fi
 
 # Show token expiry
 _gt_exp=$(echo "$TOKEN" | python3 -c "
@@ -244,10 +258,10 @@ iat = json.loads(base64.urlsafe_b64decode(t)).get('iat', exp)
 print(f'{exp - iat}')
 " 2>/dev/null)
 
-export TOKEN GATEWAY_IP GATEWAY_DOMAIN KEYCLOAK_DOMAIN
-echo "Token acquired. Exported: TOKEN, GATEWAY_IP, GATEWAY_DOMAIN"
-echo "  Gateway:  ${GATEWAY_DOMAIN} → ${GATEWAY_IP}"
-echo "  Keycloak: ${KEYCLOAK_DOMAIN}"
+export TOKEN GATEWAY_IP GATEWAY_DOMAIN GATEWAY_URL KEYCLOAK_DOMAIN
+echo "Token acquired. Exported: TOKEN, GATEWAY_IP, GATEWAY_DOMAIN, GATEWAY_URL"
+echo "  Gateway:  ${GATEWAY_URL} → ${GATEWAY_IP}"
+echo "  Keycloak: ${KEYCLOAK_DOMAIN}${KEYCLOAK_PATH}"
 if [[ -n "${_gt_exp:-}" ]]; then
   echo "  Validity: ${_gt_exp}s ($((_gt_exp / 60)) min)"
 fi

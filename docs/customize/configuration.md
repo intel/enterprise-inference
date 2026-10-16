@@ -66,8 +66,9 @@ ai_gateway_provider: "envoy"          # envoy | agentgateway
 | `agentgateway` | agentgateway — native Gateway API `HTTPRoute` → `InferencePool`, plus MCP / A2A support for the agentic layer |
 
 ```yaml
-# Envoy AI Gateway (when ai_gateway_provider=envoy)
-envoy_ai_gateway_version: "0.6.0"
+# Envoy AI Gateway (when ai_gateway_provider=envoy). Unset, it follows the
+# platform Envoy Gateway: 1.9 → 1.2.0, 1.8 → 1.1.0, 1.7 → 0.6.0.
+# envoy_ai_gateway_version: "1.2.0"
 envoy_ai_gateway_namespace: "envoy-ai-gateway-system"
 
 # agentgateway (when ai_gateway_provider=agentgateway)
@@ -130,7 +131,7 @@ LiteLLM is always deployed with `auth_type: litellm_vkey`, and optional with `jw
 ```yaml
 # litellm_enabled: true
 # langfuse_enabled: false
-# litellm_version: "v1.83.14-stable.patch.2"
+# litellm_version: "v1.105.1"
 # litellm_namespace: "litellm"
 # litellm_cache_enabled: true
 # litellm_cache_ttl: 600
