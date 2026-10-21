@@ -92,6 +92,39 @@
     or ((kubernetes_cpu_policy | default('nri-balloons')) == 'kubelet-static'
         and (_llm_kubelet_cpu_policy.stdout | default('') | trim) not in ['static', ''])
 
+# Deploy from Headlamp: the template is admitted, a tampered copy is not.
+- name: "llm_services | Headlamp deploy Jobs are locked to the template"
+  when: llm_services_ui_deploy | bool
+  block:
+    - name: "llm_services | Read the Job template"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: ConfigMap
+        name: model-manager-job
+        namespace: "{{ llm_services_mm_namespace }}"
+      register: _llm_mm_val
+
+    - name: "llm_services | Admission of the template and a tampered copy (server dry run)"
+      vars:
+        _job: "{{ (_llm_mm_val.resources | first).data['job.json'] | from_json }}"
+        _model: "{{ ((lookup('ansible.builtin.file', __llm_mm_catalog) | from_yaml).models | first).name }}"
+        _pod: >-
+          {{ {'apiVersion': 'v1', 'kind': 'Pod',
+              'metadata': {'generateName': 'validate-', 'namespace': llm_services_mm_namespace},
+              'spec': _job.spec.template.spec | combine({'containers': [_job.spec.template.spec.containers[0]
+                        | combine({'args': ['deploy', _model, '--wait']} if item.ok else {'args': ['deploy', _model], 'command': ['/bin/sh']})]})} }}
+      ansible.builtin.command:
+        argv: [kubectl, create, --dry-run=server, -o, name, -f, "-"]
+        stdin: "{{ _pod | to_json }}"
+      environment:
+        KUBECONFIG: "{{ kubernetes_kubeconfig | default(ansible_env.HOME + '/.kube/config') }}"
+      loop: [{name: template, ok: true}, {name: tampered, ok: false}]
+      loop_control:
+        label: "{{ item.name }}"
+      register: _llm_mm_admit
+      changed_when: false
+      failed_when: (_llm_mm_admit.rc == 0) != item.ok
+
 - name: "llm_services | Validation passed"
   ansible.builtin.debug:
     msg: >-

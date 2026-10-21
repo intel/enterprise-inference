@@ -52,8 +52,11 @@ components:
     enabled: "{{ ((auth_type | default('jwt')) == 'litellm_vkey' or (litellm_enabled | default(false) | bool)) and (langfuse_enabled | default(true) | bool) }}"
     depends_on: [litellm, postgresql]
 
+  # teardown both: its own teardown also removes models deployed later from
+  # Headlamp, which carry no ownership labels.
   - name: llm_services
     layer: inference
+    teardown: both
     enabled: "{{ kserve_enabled | default(true) | bool }}"
     depends_on: [kserve]
 

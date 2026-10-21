@@ -108,6 +108,24 @@ _llm_ai_gateway_url: >-
   else (ai_gateway_namespace | default(kserve_llmisvc_namespace | default('llm-inference'))) }}.svc.cluster.local
 
 # =============================================================================
+# Deploy from Headlamp (Models page)
+# =============================================================================
+# The Models page runs `model-manager deploy|undeploy` as a Job in this
+# namespace. An admission policy admits only pods built from the published
+# template (pinned image, fixed command, catalogue name), so creating a Job
+# there cannot run anything else with model-manager's rights.
+llm_services_ui_deploy: "{{ headlamp_enabled | default(false) | bool }}"
+llm_services_mm_namespace: "model-manager"
+# Stock image with kubectl, Python and PyYAML; model-manager is mounted from a
+# ConfigMap. Pinned by digest; keep the tag on the cluster's Kubernetes minor.
+llm_services_mm_image: "docker.io/alpine/k8s:1.34.12@sha256:d50424976a0a888d2531f13035dce45c004ec2b6f877f233005ba35c0d61be5d"
+# Who may start deploy Jobs (Kubernetes groups, after the OIDC prefix).
+llm_services_mm_deployer_groups: ["{{ headlamp_oidc_prefix | default('oidc:') }}{{ keycloak_platform_admin_group | default('platform-admins') }}"]
+# Finished Jobs (and their logs) are kept this long for the Models page.
+llm_services_mm_job_ttl: 86400
+llm_services_mm_job_timeout: 3600     # seconds; weights download + model load
+
+# =============================================================================
 # Inference engine observability
 # =============================================================================
 # Each engine listed here gets a ServiceMonitor (Prometheus scraping) and a

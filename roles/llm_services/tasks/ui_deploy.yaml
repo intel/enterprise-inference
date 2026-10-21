@@ -1,0 +1,378 @@
+---
+# =============================================================================
+# LLM Services — deploy models from Headlamp (model-manager as a Job)
+# =============================================================================
+# The Models page creates a Job from the template published here; the Job runs
+# model-manager unchanged. An admission policy admits only pods built from that
+# template, so Job-create rights in this namespace cannot run anything else
+# with model-manager's ServiceAccount.
+
+- name: "llm_services | ui deploy | Namespace"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ llm_services_mm_namespace }}"
+        labels: >-
+          {{ ({'istio.io/dataplane-mode': 'ambient'} if istio_enabled | default(false) | bool else {})
+             | combine({'pod-security.kubernetes.io/enforce': 'restricted',
+                        'pod-security.kubernetes.io/audit': 'restricted',
+                        'pod-security.kubernetes.io/warn': 'restricted'}) }}
+
+# ── model-manager code and catalogue ─────────────────────────────────────────
+
+- name: "llm_services | ui deploy | Find model-manager files"
+  ansible.builtin.find:
+    paths: ["{{ __llm_mm_dir }}/core", "{{ __llm_mm_dir }}/templates", "{{ __llm_mm_dir }}/runtimes"]
+    recurse: true
+    excludes: ["*.pyc"]
+  register: _llm_mm_files
+
+# ConfigMap keys cannot hold '/': files are stored flat and mounted back at
+# their paths through the volume's items.
+- name: "llm_services | ui deploy | Files to ship"
+  ansible.builtin.set_fact:
+    __llm_mm_files: >-
+      {%- set out = [{'path': 'model-manager', 'src': __llm_mm_dir ~ '/model-manager'},
+                     {'path': 'models.yaml', 'src': __llm_mm_catalog}] -%}
+      {%- for f in _llm_mm_files.files | map(attribute='path') | reject('search', '/__pycache__/') | sort -%}
+      {%- set _ = out.append({'path': f | relpath(__llm_mm_dir), 'src': f}) -%}
+      {%- endfor -%}
+      {%- for f in out -%}{%- set _ = f.update({'key': f.path | replace('/', '__')}) -%}{%- endfor -%}
+      {{ out }}
+
+- name: "llm_services | ui deploy | Code ConfigMap"
+  vars:
+    _data: >-
+      {%- set d = {} -%}
+      {%- for f in __llm_mm_files -%}
+      {%- set _ = d.update({f.key: lookup('ansible.builtin.file', f.src, rstrip=false)}) -%}
+      {%- endfor -%}
+      {{ d }}
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: model-manager-code
+        namespace: "{{ llm_services_mm_namespace }}"
+      data: "{{ _data }}"
+
+# Allowed `deploy`/`undeploy` targets: the catalogue names, written into the
+# admission policy itself. No ConfigMap param: core-type params can freeze in the
+# API server once a policy is unbound (kubernetes/kubernetes#141015).
+- name: "llm_services | ui deploy | Catalogue names for the admission policy"
+  ansible.builtin.set_fact:
+    __llm_mm_models: "{{ (lookup('ansible.builtin.file', __llm_mm_catalog) | from_yaml).models | default([]) | map(attribute='name') | list }}"
+
+- name: "llm_services | ui deploy | Remove the old catalogue-names ConfigMap"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: v1
+    kind: ConfigMap
+    name: model-manager-allowed
+    namespace: "{{ llm_services_mm_namespace }}"
+
+# ── Secrets the Job reads (never in the Job spec) ────────────────────────────
+
+- name: "llm_services | ui deploy | LiteLLM master key"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: litellm-master-key
+    namespace: "{{ litellm_namespace | default('litellm') }}"
+  register: _llm_mm_litellm_key
+  when: __llm_mm_litellm | bool
+  no_log: true
+
+- name: "llm_services | ui deploy | Job secrets"
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: model-manager-secrets
+        namespace: "{{ llm_services_mm_namespace }}"
+      type: Opaque
+      stringData: >-
+        {{ ({'hf-token': lookup('env', 'HF_TOKEN')} if lookup('env', 'HF_TOKEN') | length > 0 else {})
+           | combine({'litellm-master-key': (_llm_mm_litellm_key.resources | first).data.master_key | b64decode}
+                     if __llm_mm_litellm | bool and _llm_mm_litellm_key.resources | default([]) | length > 0 else {}) }}
+  no_log: true
+
+# ── Job template (read by the Models page, enforced by the admission policy) ─
+
+# Settings first, then the two secrets, by reference.
+- name: "llm_services | ui deploy | Job environment"
+  ansible.builtin.set_fact:
+    __llm_mm_job_env: >-
+      {%- set out = [] -%}
+      {%- for k, v in (__llm_mm_env | combine({'MM_CONFIG': __llm_mm_mount ~ '/models.yaml',
+                                                'MM_RECONCILE_LOG_DIR': '/tmp', 'HOME': '/tmp'})) | dictsort -%}
+      {%- set _ = out.append({'name': k, 'value': v | string}) -%}
+      {%- endfor -%}
+      {%- set _ = out.append({'name': 'HF_TOKEN', 'valueFrom': {'secretKeyRef':
+                              {'name': 'model-manager-secrets', 'key': 'hf-token', 'optional': true}}}) -%}
+      {%- set _ = out.append({'name': 'MM_LITELLM_MASTER_KEY', 'valueFrom': {'secretKeyRef':
+                              {'name': 'model-manager-secrets', 'key': 'litellm-master-key', 'optional': true}}}) -%}
+      {{ out }}
+
+- name: "llm_services | ui deploy | Job template"
+  vars:
+    # The wrapper is executable (0555); everything else read-only (0444).
+    _items: >-
+      {%- set out = [] -%}
+      {%- for f in __llm_mm_files -%}
+      {%- set _ = out.append({'key': f.key, 'path': f.path} | combine({'mode': 365} if f.path == 'model-manager' else {})) -%}
+      {%- endfor -%}
+      {{ out }}
+    _job:
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        namespace: "{{ llm_services_mm_namespace }}"
+        labels: {app.kubernetes.io/name: model-manager}
+      spec:
+        backoffLimit: 0
+        activeDeadlineSeconds: "{{ llm_services_mm_job_timeout | int }}"
+        ttlSecondsAfterFinished: "{{ llm_services_mm_job_ttl | int }}"
+        template:
+          metadata:
+            labels: {app.kubernetes.io/name: model-manager}
+          spec:
+            serviceAccountName: "{{ __llm_mm_sa }}"
+            restartPolicy: Never
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 1000
+              runAsGroup: 1000
+              seccompProfile: {type: RuntimeDefault}
+            containers:
+              - name: model-manager
+                image: "{{ llm_services_mm_image }}"
+                command: ["{{ __llm_mm_mount }}/model-manager"]
+                args: []
+                env: "{{ __llm_mm_job_env }}"
+                resources:
+                  requests: {cpu: 100m, memory: 128Mi}
+                  limits: {cpu: "1", memory: 512Mi}
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities: {drop: [ALL]}
+                volumeMounts:
+                  - {name: code, mountPath: "{{ __llm_mm_mount }}", readOnly: true}
+                  - {name: tmp, mountPath: /tmp}
+            volumes:
+              - name: code
+                configMap: {name: model-manager-code, defaultMode: 292, items: "{{ _items }}"}
+              - name: tmp
+                emptyDir: {sizeLimit: 64Mi}
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: model-manager-job
+        namespace: "{{ llm_services_mm_namespace }}"
+      data:
+        job.json: "{{ _job | to_json }}"
+  register: _llm_mm_job
+
+# ── Who may do what ──────────────────────────────────────────────────────────
+
+- name: "llm_services | ui deploy | RBAC"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ item }}"
+  loop:
+    - apiVersion: v1
+      kind: ServiceAccount
+      metadata: {name: "{{ __llm_mm_sa }}", namespace: "{{ llm_services_mm_namespace }}"}
+    # What model-manager changes, in the inference namespace only.
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata: {name: model-manager, namespace: "{{ llm_services_namespace }}"}
+      rules:
+        - apiGroups: [serving.kserve.io]
+          resources: [llminferenceservices, inferenceservices]
+          verbs: [get, list, watch, create, update, patch, delete]
+        - apiGroups: [inference.networking.k8s.io, inference.networking.x-k8s.io]
+          resources: [inferencepools, inferencepools/status]
+          verbs: [get, list, patch]
+        - apiGroups: [gateway.networking.k8s.io]
+          resources: [httproutes]
+          verbs: [get, list, create, update, patch, delete]
+        - apiGroups: [aigateway.envoyproxy.io]
+          resources: [aigatewayroutes, aiservicebackends]
+          verbs: [get, list, create, update, patch, delete]
+        - apiGroups: [gateway.envoyproxy.io]
+          resources: [backends]
+          verbs: [get, list, create, update, patch, delete]
+        - apiGroups: [""]
+          resources: [configmaps, secrets]
+          verbs: [get, create, update, patch, delete]
+        - apiGroups: [batch]
+          resources: [jobs]
+          verbs: [get, list, watch, create, delete]
+        - apiGroups: [""]
+          resources: [pods, pods/log, persistentvolumeclaims, services]
+          verbs: [get, list, watch]
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata: {name: model-manager, namespace: "{{ llm_services_namespace }}"}
+      roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: model-manager}
+      subjects: [{kind: ServiceAccount, name: "{{ __llm_mm_sa }}", namespace: "{{ llm_services_mm_namespace }}"}]
+    # Read-only cluster view for placement checks (nodes, NRI policy, pods per node).
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata: {name: model-manager}
+      rules:
+        - apiGroups: [""]
+          resources: [nodes, pods, namespaces, services]
+          verbs: [get, list]
+        - apiGroups: [apps]
+          resources: [daemonsets]
+          verbs: [get, list]
+        - apiGroups: [""]
+          resources: [configmaps]
+          verbs: [get]
+        - apiGroups: [config.nri]
+          resources: [balloonspolicies]
+          verbs: [get, list]
+        - apiGroups: [storage.k8s.io]
+          resources: [storageclasses]
+          verbs: [get]
+        - apiGroups: [serving.kserve.io]
+          resources: [clusterservingruntimes, llminferenceservices, inferenceservices]
+          verbs: [get, list]
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata: {name: model-manager}
+      roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: model-manager}
+      subjects: [{kind: ServiceAccount, name: "{{ __llm_mm_sa }}", namespace: "{{ llm_services_mm_namespace }}"}]
+    # People who deploy from the Models page: start and watch Jobs, read logs.
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata: {name: model-deployer, namespace: "{{ llm_services_mm_namespace }}"}
+      rules:
+        - apiGroups: [batch]
+          resources: [jobs]
+          verbs: [get, list, watch, create, delete]
+        - apiGroups: [""]
+          resources: [pods, pods/log]
+          verbs: [get, list, watch]
+        - apiGroups: [""]
+          resources: [configmaps]
+          resourceNames: [model-manager-job]
+          verbs: [get, watch]
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata: {name: model-deployer, namespace: "{{ llm_services_mm_namespace }}"}
+      roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: model-deployer}
+      subjects: "{{ _subjects }}"
+  vars:
+    _subjects: >-
+      {%- set out = [] -%}
+      {%- for g in llm_services_mm_deployer_groups -%}
+      {%- set _ = out.append({'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Group', 'name': g}) -%}
+      {%- endfor -%}
+      {{ out }}
+  loop_control:
+    label: "{{ item.kind }}/{{ item.metadata.name }}"
+
+# ── Only pods built from the template run here ───────────────────────────────
+# Checked for every pod in the namespace, whoever creates it (Job, kubectl,
+# cluster-admin). The code volume, its file mapping and the environment must be
+# the template's, so the image cannot be pointed at other code or endpoints.
+- name: "llm_services | ui deploy | Admission policy"
+  vars:
+    _items_sig: "{{ __llm_mm_files | map(attribute='key') | zip(__llm_mm_files | map(attribute='path')) | map('join', ':') | list }}"
+    _env_sig: >-
+      {%- set out = [] -%}
+      {%- for e in __llm_mm_job_env -%}
+      {%- set _ = out.append(e.name ~ '=' ~ (e.value if e.value is defined
+                             else 'secret:' ~ e.valueFrom.secretKeyRef.name ~ '/' ~ e.valueFrom.secretKeyRef.key)) -%}
+      {%- endfor -%}
+      {{ out }}
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ item }}"
+  loop:
+    - apiVersion: admissionregistration.k8s.io/v1
+      kind: ValidatingAdmissionPolicy
+      metadata: {name: model-manager-pods}
+      spec:
+        failurePolicy: Fail
+        matchConstraints:
+          resourceRules:
+            - apiGroups: [""]
+              apiVersions: [v1]
+              operations: [CREATE]
+              resources: [pods]
+            - apiGroups: [""]
+              apiVersions: [v1]
+              operations: [UPDATE]
+              resources: [pods/ephemeralcontainers]
+        variables:
+          - name: c
+            expression: "object.spec.containers[0]"
+          - name: args
+            expression: "has(object.spec.containers[0].args) ? object.spec.containers[0].args : []"
+        validations:
+          - expression: >-
+              object.spec.containers.size() == 1 && !has(object.spec.initContainers)
+              && !has(object.spec.ephemeralContainers)
+            message: "Only the model-manager container may run here."
+          - expression: >-
+              object.spec.serviceAccountName == '{{ __llm_mm_sa }}'
+              && variables.c.image == '{{ llm_services_mm_image }}'
+              && variables.c.command == ['{{ __llm_mm_mount }}/model-manager']
+            message: "Pods here must use the model-manager image, command and ServiceAccount."
+          - expression: >-
+              variables.args.size() >= 2 && variables.args.size() <= 5
+              && variables.args[0] in ['deploy', 'undeploy'] && variables.args[1] in {{ __llm_mm_models | to_json }}
+              && variables.args.all(a, a in ['deploy', 'undeploy', '--wait', '--replicas']
+                                       || a == variables.args[1] || a.matches('^[1-8]$'))
+            messageExpression: >-
+              'Only deploy|undeploy <catalogue model> [--wait] [--replicas 1-8] is allowed, got: '
+              + variables.args.join(' ')
+          - expression: >-
+              !has(variables.c.envFrom) && has(variables.c.env)
+              && variables.c.env.map(e, e.name + '=' + (has(e.value) ? e.value
+                   : !has(e.valueFrom) ? ''
+                   : (has(e.valueFrom.secretKeyRef)
+                      ? 'secret:' + e.valueFrom.secretKeyRef.name + '/' + e.valueFrom.secretKeyRef.key : '?')))
+                 == {{ _env_sig | to_json }}
+            message: "The environment must be the published template's."
+          - expression: >-
+              object.spec.volumes.all(v,
+                (v.name == 'code' && has(v.configMap) && v.configMap.name == 'model-manager-code'
+                 && has(v.configMap.items) && v.configMap.items.map(i, i.key + ':' + i.path) == {{ _items_sig | to_json }})
+                || (v.name == 'tmp' && has(v.emptyDir))
+                || (v.name.startsWith('kube-api-access-') && has(v.projected)))
+              && variables.c.volumeMounts.all(m,
+                (m.name == 'code' && m.mountPath == '{{ __llm_mm_mount }}')
+                || (m.name == 'tmp' && m.mountPath == '/tmp')
+                || (m.name.startsWith('kube-api-access-')
+                    && m.mountPath == '/var/run/secrets/kubernetes.io/serviceaccount'))
+            message: "Volumes and mounts must be the published template's."
+    - apiVersion: admissionregistration.k8s.io/v1
+      kind: ValidatingAdmissionPolicyBinding
+      metadata: {name: model-manager-pods}
+      spec:
+        policyName: model-manager-pods
+        validationActions: [Deny]
+        matchResources:
+          namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: "{{ llm_services_mm_namespace }}"}
+  loop_control:
+    label: "{{ item.kind }}/{{ item.metadata.name }}"

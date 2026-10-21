@@ -215,37 +215,13 @@
         ./model-manager deploy "{{ item }}" --wait {{ model_deploy_flags | default('') }}
       args:
         chdir: "{{ _mm_dir }}"
-      environment:
-        KUBECONFIG: "{{ kubernetes_kubeconfig | default(ansible_env.HOME + '/.kube/config') }}"
-        HF_TOKEN: "{{ lookup('env', 'HF_TOKEN') | default('') }}"
-        MM_CONFIG: "{{ _mm_deploy_catalog }}"
-        # Proxy — pass through so weight downloads work behind a corporate proxy.
-        MM_HTTP_PROXY: "{{ http_proxy | default(lookup('env', 'http_proxy')) | default('') }}"
-        MM_HTTPS_PROXY: "{{ https_proxy | default(lookup('env', 'https_proxy')) | default('') }}"
-        MM_NO_PROXY: "{{ no_proxy | default(lookup('env', 'no_proxy')) | default('') }}"
-        # CPU pinning. MM_CPU_POLICY is the switch the CLI reads (nri-balloons |
-        # kubelet-static | best-effort); it mirrors the cluster-wide
-        # kubernetes_cpu_policy resolved in the solutions preflight, so the
-        # models are annotated for whatever kubelet/NRI was actually configured.
-        MM_CPU_POLICY: "{{ kubernetes_cpu_policy | default('nri-balloons') }}"
-        # Legacy flag, kept for older model-manager builds that only understand
-        # this one. MM_CPU_POLICY takes precedence when both are present.
-        MM_NRI_ENABLED: "{{ 'true' if kubernetes_cpu_policy | default('nri-balloons') == 'nri-balloons' else 'false' }}"
-        # SMT width override for kubelet-static's full-pcpus-only alignment.
-        # Empty ⇒ the CLI auto-detects.
-        MM_KUBELET_THREADS_PER_CORE: "{{ mm_kubelet_threads_per_core | default('') }}"
-        # LiteLLM auto-registration — only when auth_type=litellm_vkey.
-        MM_LITELLM_ENABLED: "{{ 'true' if auth_type | default('jwt') == 'litellm_vkey' else 'false' }}"
-        MM_LITELLM_URL: "{{ 'http://litellm.' + (litellm_namespace | default('litellm')) + '.svc.cluster.local:4000' if auth_type | default('jwt') == 'litellm_vkey' else '' }}"
-        MM_LITELLM_MASTER_KEY: "{{ (_deploy_litellm_secret.resources[0].data.master_key | b64decode) if (auth_type | default('jwt') == 'litellm_vkey' and _deploy_litellm_secret.resources | default([]) | length > 0) else '' }}"
-        # The in-cluster AI Gateway DATA PLANE (KServe attaches per-model HTTPRoutes
-        # here), NOT the "envoy-gateway" control-plane service (xDS/admin ports) — the
-        # latter resets plain HTTP :80, so LiteLLM could never reach the model.
-        MM_LITELLM_KSERVE_URL: "{{ _llm_ai_gateway_url }}"
-        # AIGatewayRoute unified endpoint — only when auth_type=jwt.
-        MM_AIGATEWAY_ENABLED: "{{ 'true' if auth_type | default('jwt') == 'jwt' else 'false' }}"
-        MM_EG_GATEWAY_NAME: "{{ gateway_name | default('eg-gateway') }}"
-        MM_EG_GATEWAY_NS: "{{ gateway_namespace | default('envoy-gateway-system') }}"
+      environment: >-
+        {{ __llm_mm_env | combine({
+             'KUBECONFIG': kubernetes_kubeconfig | default(ansible_env.HOME + '/.kube/config'),
+             'HF_TOKEN': lookup('env', 'HF_TOKEN') | default(''),
+             'MM_CONFIG': _mm_deploy_catalog,
+             'MM_LITELLM_MASTER_KEY': (_deploy_litellm_secret.resources[0].data.master_key | b64decode)
+               if (__llm_mm_litellm | bool and _deploy_litellm_secret.resources | default([]) | length > 0) else ''}) }}
       loop: "{{ _mm_deploy }}"
       loop_control:
         label: "{{ item }}"
