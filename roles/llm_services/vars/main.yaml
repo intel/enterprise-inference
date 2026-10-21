@@ -24,10 +24,17 @@ __llm_mm_env:
   MM_AIGATEWAY_ENABLED: "{{ 'true' if auth_type | default('jwt') == 'jwt' else 'false' }}"
   MM_EG_GATEWAY_NAME: "{{ gateway_name | default('eg-gateway') }}"
   MM_EG_GATEWAY_NS: "{{ gateway_namespace | default('envoy-gateway-system') }}"
-  # API host in the endpoint hints model-manager prints.
+  # API host and path in the endpoint hints model-manager prints; path mode
+  # serves every API on the base host under its own path.
   MM_INFERENCE_HOSTNAME: >-
-    {{ (litellm_hostname | default('litellm.' ~ base_domain_name)) if __llm_mm_litellm | bool
+    {{ base_domain_name if __llm_mm_path_mode | bool
+       else (litellm_hostname | default('litellm.' ~ base_domain_name)) if __llm_mm_litellm | bool
        else (inference_hostname | default('inference.' ~ base_domain_name)) }}
+  MM_INFERENCE_PATH: >-
+    {{ '' if not __llm_mm_path_mode | bool
+       else litellm_path | default('/litellm') if __llm_mm_litellm | bool
+       else inference_path | default('/inference') }}
+__llm_mm_path_mode: "{{ (routing_mode | default('subdomain')) == 'path' }}"
 # Catalogue: the environment's copy (env/<env>/models.yaml) first, as deploy_models.yaml.
 __llm_mm_dir: "{{ inference_extension_dir | default(playbook_dir ~ '/../ext/enterprise.ai-inference') }}/model_manager"
 __llm_mm_catalog: >-
