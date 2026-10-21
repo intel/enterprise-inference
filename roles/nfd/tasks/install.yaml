@@ -41,6 +41,10 @@
           kubernetes.core.helm_repository:
             name: "{{ nfd_helm_repo_name }}"
             repo_url: "{{ nfd_helm_repo }}"
+          register: _nfd_helm_repo
+          until: _nfd_helm_repo is succeeded
+          retries: "{{ helm_retries | default(5) }}"
+          delay: 15
 
         - name: "nfd | Install via Helm"
           kubernetes.core.helm:
@@ -73,6 +77,10 @@
     # /usr/src) and typically uses hostNetwork; namespace-level PSS applies to
     # every pod in the namespace, so master/gc must sit at the same floor the
     # worker requires — "privileged".
+          register: _nfd_helm
+          until: _nfd_helm is succeeded
+          retries: "{{ helm_retries | default(5) }}"
+          delay: 15
     - name: "nfd | Label namespace — PSS"
       kubernetes.core.k8s:
         state: present
