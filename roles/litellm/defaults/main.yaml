@@ -66,10 +66,12 @@ litellm_public_paths:
   - /health/liveliness
 
 # Namespaces allowed to open connections to LiteLLM (Istio L4 policy): the
-# gateway, and litellm itself (model-manager registers models from a pod there).
+# gateway, litellm itself (model-manager registers models from a pod there),
+# and the namespace of the Headlamp-started model-manager Jobs.
 litellm_allowed_namespaces:
   - "{{ gateway_namespace | default('envoy-gateway-system') }}"
   - "{{ litellm_namespace }}"
+  - "{{ llm_services_mm_namespace | default('model-manager') }}"
 # Let callers outside the mesh (for example agent sandboxes) reach LiteLLM's API port
 # from the cluster pod network: their plaintext traffic carries no namespace identity
 # to match. A solution layer turns this on; callers still need a LiteLLM key.
