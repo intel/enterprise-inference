@@ -104,26 +104,33 @@
         namespace: "{{ llm_services_mm_namespace }}"
       register: _llm_mm_val
 
+    # Check mode makes kubernetes.core.k8s a server-side dry run: admission is
+    # evaluated and nothing is created.
     - name: "llm_services | Admission of the template and a tampered copy (server dry run)"
       vars:
         _job: "{{ (_llm_mm_val.resources | first).data['job.json'] | from_json }}"
         _model: "{{ ((lookup('ansible.builtin.file', __llm_mm_catalog) | from_yaml).models | first).name }}"
-        _pod: >-
-          {{ {'apiVersion': 'v1', 'kind': 'Pod',
-              'metadata': {'generateName': 'validate-', 'namespace': llm_services_mm_namespace},
-              'spec': _job.spec.template.spec | combine({'containers': [_job.spec.template.spec.containers[0]
-                        | combine({'args': ['deploy', _model, '--wait']} if item.ok else {'args': ['deploy', _model], 'command': ['/bin/sh']})]})} }}
-      ansible.builtin.command:
-        argv: [kubectl, create, --dry-run=server, -o, name, -f, "-"]
-        stdin: "{{ _pod | to_json }}"
-      environment:
-        KUBECONFIG: "{{ kubernetes_kubeconfig | default(ansible_env.HOME + '/.kube/config') }}"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: "validate-{{ item.name }}"
+            namespace: "{{ llm_services_mm_namespace }}"
+          spec: >-
+            {{ _job.spec.template.spec | combine({'containers': [_job.spec.template.spec.containers[0]
+               | combine({'args': ['deploy', _model, '--wait']} if item.ok else {'args': ['deploy', _model], 'command': ['/bin/sh']})]}) }}
+      check_mode: true
       loop: [{name: template, ok: true}, {name: tampered, ok: false}]
       loop_control:
         label: "{{ item.name }}"
       register: _llm_mm_admit
       changed_when: false
-      failed_when: (_llm_mm_admit.rc == 0) != item.ok
+      # Refused by the policy itself, not for some other reason.
+      failed_when: >-
+        (_llm_mm_admit.result is defined) != item.ok
+        or (not item.ok and 'model-manager-pods' not in _llm_mm_admit.msg | default(''))
 
 - name: "llm_services | Validation passed"
   ansible.builtin.debug:
