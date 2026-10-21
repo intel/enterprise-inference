@@ -126,6 +126,10 @@
     force: "{{ _eag_crd.resources | default([]) | length == 0 and _eag_installed_chart == _eag_target_chart }}"
     wait: true
     timeout: "5m0s"
+  register: _eaig_helm_crds
+  until: _eaig_helm_crds is succeeded
+  retries: "{{ helm_retries | default(5) }}"
+  delay: 15
 
 - name: "envoy_ai_gateway | Install/upgrade controller via Helm (OCI)"
   when: >-
@@ -142,6 +146,10 @@
         affinity: "{{ _platform_affinity | default({}) }}"
     wait: true
     timeout: "5m0s"
+  register: _eaig_helm_controller
+  until: _eaig_helm_controller is succeeded
+  retries: "{{ helm_retries | default(5) }}"
+  delay: 15
 
 - name: "envoy_ai_gateway | Wait for controller deployment"
   kubernetes.core.k8s_info:

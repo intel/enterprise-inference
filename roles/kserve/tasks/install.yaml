@@ -93,6 +93,10 @@
         create_namespace: true
         wait: true
       when: _istio_check.resources | length == 0
+      register: _kserve_helm_istio_base
+      until: _kserve_helm_istio_base is succeeded
+      retries: "{{ helm_retries | default(5) }}"
+      delay: 15
 
     - name: "kserve | Install Istio (istiod)"
       kubernetes.core.helm:
@@ -102,6 +106,10 @@
         release_namespace: "{{ kserve_istio_namespace }}"
         wait: true
       when: _istio_check.resources | length == 0
+      register: _kserve_helm_istiod
+      until: _kserve_helm_istiod is succeeded
+      retries: "{{ helm_retries | default(5) }}"
+      delay: 15
 
     - name: "kserve | Wait for istiod"
       kubernetes.core.k8s_info:
@@ -250,6 +258,9 @@
         executable: /bin/bash
       register: _kserve_crd
       changed_when: "'serverside-applied' in _kserve_crd.stdout"
+      until: _kserve_crd is succeeded
+      retries: "{{ helm_retries | default(5) }}"
+      delay: 15
 
     - name: "kserve | Install KServe resources via Helm"
       kubernetes.core.helm:
@@ -265,6 +276,10 @@
           kserve:
             controller:
               affinity: "{{ _platform_affinity | default({}) }}"
+      register: _kserve_helm_resources
+      until: _kserve_helm_resources is succeeded
+      retries: "{{ helm_retries | default(5) }}"
+      delay: 15
 
     - name: "kserve | Detect pre-existing LLMIsvc runtime configs"
       # Re-runs must not wipe LLMInferenceServiceConfig CRs already installed
@@ -293,6 +308,10 @@
         set_values:
           - value: "kserve.servingruntime.enabled=true"
           - value: "kserve.llmisvcConfigs.enabled={{ _kserve_initial_llmisvc_configs | bool | string | lower }}"
+      register: _kserve_helm_runtime_configs
+      until: _kserve_helm_runtime_configs is succeeded
+      retries: "{{ helm_retries | default(5) }}"
+      delay: 15
 
     - name: "kserve | Wait for controller"
       kubernetes.core.k8s_info:
@@ -388,6 +407,10 @@
         wait: true
         timeout: "5m0s"
       when: _lws_check.status is not defined or _lws_check.status is none
+      register: _kserve_helm_lws
+      until: _kserve_helm_lws is succeeded
+      retries: "{{ helm_retries | default(5) }}"
+      delay: 15
 
     - name: "kserve | LLMIsvc — wait for LWS operator"
       kubernetes.core.k8s_info:
@@ -467,6 +490,10 @@
         release_namespace: "{{ kserve_namespace }}"
         wait: true
       when: _llmisvc_needs_install | bool
+      register: _kserve_helm_llmisvc_crds
+      until: _kserve_helm_llmisvc_crds is succeeded
+      retries: "{{ helm_retries | default(5) }}"
+      delay: 15
 
     # kserve-llmisvc-crd uses crds/ (no Helm tracking), but
     # kserve-llmisvc-resources templates the same CRDs (tracked).
@@ -519,6 +546,10 @@
               controller:
                 affinity: "{{ _platform_affinity | default({}) }}"
       when: _llmisvc_needs_install | bool
+      register: _kserve_helm_llmisvc_resources
+      until: _kserve_helm_llmisvc_resources is succeeded
+      retries: "{{ helm_retries | default(5) }}"
+      delay: 15
 
     - name: "kserve | LLMIsvc — wait for controller"
       kubernetes.core.k8s_info:
@@ -549,6 +580,10 @@
         set_values:
           - value: "kserve.servingruntime.enabled=true"
           - value: "kserve.llmisvcConfigs.enabled=true"
+      register: _kserve_helm_llmisvc_configs
+      until: _kserve_helm_llmisvc_configs is succeeded
+      retries: "{{ helm_retries | default(5) }}"
+      delay: 15
 
     # -- Repin the scheduler preset's llm-d images (see defaults/main.yaml) --
     - name: "kserve | LLMIsvc — read scheduler preset"
@@ -695,6 +730,10 @@
           - "{{ ansible_env.HOME }}/.cache/kserve/eg-ai-gateway-values.yaml"
         wait: true
         timeout: "5m0s"
+      register: _kserve_helm_envoy_gateway
+      until: _kserve_helm_envoy_gateway is succeeded
+      retries: "{{ helm_retries | default(5) }}"
+      delay: 15
 
     - name: "kserve | Wait for Envoy Gateway to stabilise after upgrade"
       kubernetes.core.k8s_info:

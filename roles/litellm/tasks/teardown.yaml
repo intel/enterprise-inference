@@ -41,6 +41,9 @@
     label: "{{ item.kind }}/{{ item.name }}"
   failed_when: false
 
+- name: "litellm | teardown | Remove the admin UI host"
+  ansible.builtin.include_tasks: ui_remove.yaml
+
 - name: "litellm | Unpublish the litellm host"
   ansible.builtin.include_role:
     name: gateway
