@@ -128,7 +128,7 @@
     timeout: "5m0s"
   register: _eaig_helm_crds
   until: _eaig_helm_crds is succeeded
-  retries: "{{ helm_retries | default(5) }}"
+  retries: "{{ helm_retries | default(3) }}"
   delay: 15
 
 - name: "envoy_ai_gateway | Install/upgrade controller via Helm (OCI)"
@@ -148,7 +148,7 @@
     timeout: "5m0s"
   register: _eaig_helm_controller
   until: _eaig_helm_controller is succeeded
-  retries: "{{ helm_retries | default(5) }}"
+  retries: "{{ helm_retries | default(3) }}"
   delay: 15
 
 - name: "envoy_ai_gateway | Wait for controller deployment"

@@ -43,7 +43,7 @@
             repo_url: "{{ nfd_helm_repo }}"
           register: _nfd_helm_repo
           until: _nfd_helm_repo is succeeded
-          retries: "{{ helm_retries | default(5) }}"
+          retries: "{{ helm_retries | default(3) }}"
           delay: 15
 
         - name: "nfd | Install via Helm"
@@ -79,7 +79,7 @@
     # worker requires — "privileged".
           register: _nfd_helm
           until: _nfd_helm is succeeded
-          retries: "{{ helm_retries | default(5) }}"
+          retries: "{{ helm_retries | default(3) }}"
           delay: 15
     - name: "nfd | Label namespace — PSS"
       kubernetes.core.k8s:

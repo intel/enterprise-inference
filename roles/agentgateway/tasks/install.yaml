@@ -102,7 +102,7 @@
     timeout: "5m0s"
   register: _agw_helm_crds
   until: _agw_helm_crds is succeeded
-  retries: "{{ helm_retries | default(5) }}"
+  retries: "{{ helm_retries | default(3) }}"
   delay: 15
 
 - name: "agentgateway | Install/upgrade control plane via Helm (OCI)"
@@ -122,7 +122,7 @@
     timeout: "5m0s"
   register: _agw_helm_controller
   until: _agw_helm_controller is succeeded
-  retries: "{{ helm_retries | default(5) }}"
+  retries: "{{ helm_retries | default(3) }}"
   delay: 15
 
 - name: "agentgateway | Wait for controller deployment"

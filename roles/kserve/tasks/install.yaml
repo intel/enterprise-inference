@@ -95,7 +95,7 @@
       when: _istio_check.resources | length == 0
       register: _kserve_helm_istio_base
       until: _kserve_helm_istio_base is succeeded
-      retries: "{{ helm_retries | default(5) }}"
+      retries: "{{ helm_retries | default(3) }}"
       delay: 15
 
     - name: "kserve | Install Istio (istiod)"
@@ -108,7 +108,7 @@
       when: _istio_check.resources | length == 0
       register: _kserve_helm_istiod
       until: _kserve_helm_istiod is succeeded
-      retries: "{{ helm_retries | default(5) }}"
+      retries: "{{ helm_retries | default(3) }}"
       delay: 15
 
     - name: "kserve | Wait for istiod"
@@ -259,7 +259,7 @@
       register: _kserve_crd
       changed_when: "'serverside-applied' in _kserve_crd.stdout"
       until: _kserve_crd is succeeded
-      retries: "{{ helm_retries | default(5) }}"
+      retries: "{{ helm_retries | default(3) }}"
       delay: 15
 
     - name: "kserve | Install KServe resources via Helm"
@@ -278,7 +278,7 @@
               affinity: "{{ _platform_affinity | default({}) }}"
       register: _kserve_helm_resources
       until: _kserve_helm_resources is succeeded
-      retries: "{{ helm_retries | default(5) }}"
+      retries: "{{ helm_retries | default(3) }}"
       delay: 15
 
     - name: "kserve | Detect pre-existing LLMIsvc runtime configs"
@@ -310,7 +310,7 @@
           - value: "kserve.llmisvcConfigs.enabled={{ _kserve_initial_llmisvc_configs | bool | string | lower }}"
       register: _kserve_helm_runtime_configs
       until: _kserve_helm_runtime_configs is succeeded
-      retries: "{{ helm_retries | default(5) }}"
+      retries: "{{ helm_retries | default(3) }}"
       delay: 15
 
     - name: "kserve | Wait for controller"
@@ -409,7 +409,7 @@
       when: _lws_check.status is not defined or _lws_check.status is none
       register: _kserve_helm_lws
       until: _kserve_helm_lws is succeeded
-      retries: "{{ helm_retries | default(5) }}"
+      retries: "{{ helm_retries | default(3) }}"
       delay: 15
 
     - name: "kserve | LLMIsvc — wait for LWS operator"
@@ -492,7 +492,7 @@
       when: _llmisvc_needs_install | bool
       register: _kserve_helm_llmisvc_crds
       until: _kserve_helm_llmisvc_crds is succeeded
-      retries: "{{ helm_retries | default(5) }}"
+      retries: "{{ helm_retries | default(3) }}"
       delay: 15
 
     # kserve-llmisvc-crd uses crds/ (no Helm tracking), but
@@ -548,7 +548,7 @@
       when: _llmisvc_needs_install | bool
       register: _kserve_helm_llmisvc_resources
       until: _kserve_helm_llmisvc_resources is succeeded
-      retries: "{{ helm_retries | default(5) }}"
+      retries: "{{ helm_retries | default(3) }}"
       delay: 15
 
     - name: "kserve | LLMIsvc — wait for controller"
@@ -582,7 +582,7 @@
           - value: "kserve.llmisvcConfigs.enabled=true"
       register: _kserve_helm_llmisvc_configs
       until: _kserve_helm_llmisvc_configs is succeeded
-      retries: "{{ helm_retries | default(5) }}"
+      retries: "{{ helm_retries | default(3) }}"
       delay: 15
 
     # -- Repin the scheduler preset's llm-d images (see defaults/main.yaml) --
@@ -732,7 +732,7 @@
         timeout: "5m0s"
       register: _kserve_helm_envoy_gateway
       until: _kserve_helm_envoy_gateway is succeeded
-      retries: "{{ helm_retries | default(5) }}"
+      retries: "{{ helm_retries | default(3) }}"
       delay: 15
 
     - name: "kserve | Wait for Envoy Gateway to stabilise after upgrade"
