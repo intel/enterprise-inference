@@ -6,6 +6,14 @@
 # Multi-node:  2 replicas, HPA enabled (scales to 2x).
 # =============================================================================
 
+# The guard endpoint is the AI Gateway data plane, in the namespace the platform
+# gateway exports (envoy_gateway_namespace).
+- name: "litellm | Load the platform gateway"
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: platform.yaml
+  when: guardrails_enabled | bool
+
 # ── Idempotency check ─────────────────────────────────────────────────────────
 
 - name: "litellm | Check for existing Helm release"
@@ -15,13 +23,106 @@
   register: _litellm_release
   failed_when: false
 
+# The guardrail is fail-closed and LiteLLM refuses its guard call unless the guard
+# host is in litellm_settings.user_url_allowed_hosts, so an existing release whose
+# config lacks it is upgraded as well.
+- name: "litellm | Read the running proxy configuration"
+  kubernetes.core.k8s_info:
+    kind: ConfigMap
+    name: litellm-config
+    namespace: "{{ litellm_namespace }}"
+  register: _litellm_running_cfg
+  when:
+    - guardrails_enabled | bool
+    - _litellm_release.status is defined and _litellm_release.status is not none
+
+# LiteLLM sends the guard call to the guard host's resolved address. Behind a proxy
+# that address matches neither the .svc/.cluster.local suffixes nor the CIDR entries
+# of no_proxy (the HTTP client does not honour CIDRs), so the call would leave
+# through the proxy; the guard Service's ClusterIP is added to the pod's no_proxy.
+- name: "litellm | Look up the guard Service address"
+  vars:
+    _litellm_guard_host: "{{ (guard_service_url | urlsplit).hostname }}"
+  kubernetes.core.k8s_info:
+    kind: Service
+    name: "{{ _litellm_guard_host.split('.')[0] }}"
+    namespace: "{{ _litellm_guard_host.split('.')[1] }}"
+  register: _litellm_guard_svc
+  when:
+    - guardrails_enabled | bool
+    - http_proxy | default('') | length > 0 or https_proxy | default('') | length > 0
+    - _litellm_guard_host.split('.') | length > 1
+    - _litellm_guard_host is not match('^[0-9.]+$')
+
+- name: "litellm | Set the guard addresses that bypass the proxy"
+  vars:
+    _litellm_guard_host: "{{ (guard_service_url | urlsplit).hostname }}"
+  ansible.builtin.set_fact:
+    _litellm_guard_no_proxy: >-
+      {{ [_litellm_guard_host] if _litellm_guard_host is match('^[0-9.]+$') and guardrails_enabled | bool
+         else ((_litellm_guard_svc.resources | default([]) | first | default({})).spec | default({})).clusterIPs | default([], true)
+              | reject('equalto', 'None') | list }}
+
+- name: "litellm | Warn when the guard Service address is unknown"
+  ansible.builtin.debug:
+    msg: >-
+      Could not resolve the guard Service for {{ guard_service_url }}; behind a proxy the
+      content-safety guardrail may not reach its guard model. Add its address to no_proxy.
+  when:
+    - _litellm_guard_svc is not skipped
+    - _litellm_guard_no_proxy | length == 0
+
+- name: "litellm | Read the running LiteLLM Deployment"
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    name: "{{ guardrail_litellm_deployment }}"
+    namespace: "{{ litellm_namespace }}"
+  register: _litellm_running_deploy
+  when:
+    - _litellm_guard_no_proxy | length > 0
+    - _litellm_release.status is defined and _litellm_release.status is not none
+
+- name: "litellm | Check the guard settings of the running release"
+  vars:
+    _litellm_running_allowed: >-
+      {{ ((((_litellm_running_cfg.resources | default([]) | first | default({})).data | default({})).get('config.yaml', '{}')
+         | from_yaml | default({}, true)).litellm_settings | default({})).user_url_allowed_hosts | default([], true) }}
+    _litellm_running_no_proxy: >-
+      {{ ((((_litellm_running_deploy.resources | default([]) | first | default({})).spec | default({})).template | default({})).spec | default({})).containers | default([])
+         | selectattr('name', 'equalto', guardrail_litellm_container) | map(attribute='env') | flatten
+         | selectattr('name', 'equalto', 'NO_PROXY') | map(attribute='value') | first | default('') }}
+  ansible.builtin.set_fact:
+    _litellm_needs_guard_settings: >-
+      {{ (_litellm_running_cfg is not skipped
+          and (_litellm_guard_hosts | difference(_litellm_running_allowed) | length > 0))
+         or (_litellm_running_deploy is not skipped
+          and (_litellm_guard_no_proxy | difference(_litellm_running_no_proxy.split(',')) | length > 0)) }}
+
 - name: "litellm | Already installed — skipping"
   ansible.builtin.debug:
-    msg: "LiteLLM already deployed in {{ litellm_namespace }} — skipping install."
-  when: _litellm_release.status is defined and _litellm_release.status is not none
+    msg: >-
+      LiteLLM already deployed in {{ litellm_namespace }} — skipping install
+      (litellm_reconcile: true upgrades it with the current settings).
+  when:
+    - _litellm_release.status is defined and _litellm_release.status is not none
+    - not litellm_reconcile | bool
+    - not _litellm_needs_guard_settings | bool
+
+- name: "litellm | Upgrading the release to apply the guard settings"
+  ansible.builtin.debug:
+    msg: >-
+      LiteLLM in {{ litellm_namespace }} does not allowlist the guard host
+      {{ _litellm_guard_hosts | join(', ') }} (litellm_settings.user_url_allowed_hosts) or does not
+      keep its address {{ _litellm_guard_no_proxy | join(', ') }} off the proxy (no_proxy), which the
+      content-safety guardrail needs — upgrading the release with the current settings.
+  when:
+    - _litellm_needs_guard_settings | bool
+    - not litellm_reconcile | bool
 
 - name: "litellm | Install"
-  when: _litellm_release.status is not defined or _litellm_release.status is none
+  when: >-
+    _litellm_release.status is not defined or _litellm_release.status is none
+    or litellm_reconcile | bool or _litellm_needs_guard_settings | bool
   block:
 
     # ── Detect cluster topology for sizing ───────────────────────────────────
@@ -54,8 +155,8 @@
               'HTTPS_PROXY': https_proxy | default(''),
               'http_proxy': http_proxy | default(''),
               'https_proxy': https_proxy | default(''),
-              'NO_PROXY': no_proxy | default(''),
-              'no_proxy': no_proxy | default('')
+              'NO_PROXY': ([no_proxy | default('')] + _litellm_guard_no_proxy) | select | join(','),
+              'no_proxy': ([no_proxy | default('')] + _litellm_guard_no_proxy) | select | join(',')
             }
             if (http_proxy | default('') | length > 0 or https_proxy | default('') | length > 0)
             else {}
@@ -184,6 +285,12 @@
         label: "{{ item.item }}"
       no_log: true
 
+    # ── Hybrid router wiring ──────────────────────────────────────────────────
+    # Creates the router-code ConfigMap and computes the volumes/mounts/model/
+    # callbacks/router_settings the Helm values below consume (empty when off).
+    - name: "litellm | Configure hybrid router wiring (before Helm)"
+      ansible.builtin.include_tasks: hybrid_router_setup.yaml
+
     # ── Helm install ──────────────────────────────────────────────────────────
     # Chart is vendored at charts/litellm-helm (no internet required at install).
     # Valkey subchart deploys response cache when redis.enabled=true.
@@ -232,8 +339,17 @@
           environmentSecrets:
             - litellm-master-key
           # Proxy vars merged in when the cluster is behind a corporate proxy.
-          envVars: "{{ {'UI_USERNAME': 'admin'} | combine(_litellm_proxy_env) }}"
+          # PYTHONPATH = the config dir (hybrid router) so the router package next
+          # to config.yaml is importable regardless of how litellm resolves it.
+          envVars: >-
+            {{ {'UI_USERNAME': 'admin'} | combine(_litellm_proxy_env)
+               | combine({'PYTHONPATH': hybrid_router_mount_dir} if hybrid_router_enabled | bool else {}) }}
           extraEnvVars: "{{ _litellm_extra_env }}"
+          # Router-code ConfigMap mounts that rebuild the package tree next to
+          # config.yaml (hybrid router only).
+          volumes: "{{ _litellm_hybrid_volumes }}"
+          volumeMounts: "{{ _litellm_hybrid_volume_mounts }}"
+          podAnnotations: "{{ _litellm_hybrid_pod_annotations }}"
           # LiteLLM trips its Redis circuit breaker if it starts before the cache
           # answers, so wait for an authenticated PING.
           extraInitContainers: >-
@@ -276,9 +392,16 @@
                 ttl: "{{ litellm_cache_ttl | default(600) }}"
               success_callback: "{{ ['langfuse'] if _litellm_langfuse | bool else [] }}"
               failure_callback: "{{ ['langfuse'] if _litellm_langfuse | bool else [] }}"
-            model_list: []
-            router_settings:
-              routing_strategy: least-busy
+              # The content-safety guardrail calls its guard model inside the
+              # cluster; only that host is let through LiteLLM's SSRF check
+              # (empty while the guardrail is off).
+              user_url_allowed_hosts: "{{ _litellm_guard_hosts }}"
+              # Hybrid router callback (empty unless hybrid_router_enabled) — imports
+              # custom_hybrid_router at startup and patches litellm.router.Router.
+              callbacks: "{{ _litellm_hybrid_callbacks }}"
+            # hybrid-router virtual model (empty list unless hybrid_router_enabled)
+            model_list: "{{ _litellm_hybrid_model_list }}"
+            router_settings: "{{ _litellm_hybrid_router_settings if _litellm_hybrid_router_settings else {'routing_strategy': 'least-busy'} }}"
           # Response cache. Keeps the Bitnami valkey subchart wiring (Service
           # name, wait logic) but runs the official upstream valkey/valkey image
           # instead of the deprecated bitnamilegacy/valkey. The Bitnami
@@ -395,6 +518,16 @@
       retries: 60
       delay: 5
 
+    # After the upgrade, so no pod still mounts it.
+    - name: "litellm | Remove the hybrid router code when the router is off"
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: ConfigMap
+        name: litellm-router-code
+        namespace: "{{ litellm_namespace }}"
+      when: not hybrid_router_enabled | bool
+
 # ── Gateway integration (runs even on re-runs to stay idempotent) ─────────────
 
 # The gateway no longer delegates auth to LiteLLM (extAuth), so the grant
@@ -443,15 +576,16 @@
           {%- set hdrs = {'type': 'ResponseHeaderModifier', 'responseHeaderModifier': {'set': litellm_route_headers}} -%}
           {%- set backend = [{'name': 'litellm', 'port': 4000}] -%}
           {%- set nocookie = {'type': 'RequestHeaderModifier', 'requestHeaderModifier': {'remove': ['Cookie']}} -%}
+          {%- set tmo = {'request': litellm_route_timeout} -%}
           {%- if gateway_publish.mode == 'subdomain' -%}
           {%- set m = [] -%}
           {%- for p in litellm_public_paths -%}{%- set _ = m.append({'path': {'type': 'Exact', 'value': p}}) -%}{%- endfor -%}
-          {%- set _ = out.append({'matches': m, 'filters': [hdrs], 'backendRefs': backend}) -%}
+          {%- set _ = out.append({'matches': m, 'filters': [hdrs], 'backendRefs': backend, 'timeouts': tmo}) -%}
           {%- else -%}
           {%- for p in litellm_public_paths -%}
           {%- set _ = out.append({'matches': [{'path': {'type': 'Exact', 'value': litellm_path ~ p}}],
                                   'filters': [hdrs, nocookie, {'type': 'URLRewrite', 'urlRewrite': {'path': {'type': 'ReplaceFullPath', 'replaceFullPath': p}}}],
-                                  'backendRefs': backend}) -%}
+                                  'backendRefs': backend, 'timeouts': tmo}) -%}
           {%- endfor -%}
           {%- endif -%}
           {{ out }}
@@ -486,8 +620,9 @@
     gateway_rate_limit_client_header: "{{ litellm_rate_limit_client_header | default('x-forwarded-for') }}"
 
 # ── In-cluster lockdown (Istio ambient, L4) ───────────────────────────────────
-# Mesh mTLS gives every caller an identity; only the allowed namespaces may
-# reach LiteLLM, and only LiteLLM may reach the cache.
+# Mesh mTLS gives every caller an identity; only the allowed namespaces (and the
+# source ranges in litellm_allowed_source_cidrs) may reach LiteLLM, and only
+# LiteLLM may reach the cache.
 - name: "litellm | Restrict in-cluster access (AuthorizationPolicy)"
   when: istio_enabled | default(false) | bool
   kubernetes.core.k8s:
@@ -515,6 +650,32 @@
     - { name: litellm-redis, app: redis, from: ["{{ litellm_namespace }}"], port: "6379" }   # valkey subchart, aliased redis
   loop_control:
     label: "{{ item.name }}"
+
+# Callers outside the mesh carry no identity for the namespace rule above, so the
+# listed source ranges get their own ALLOW policy on the API port (ALLOW policies
+# add up); emptying litellm_allowed_source_cidrs removes it.
+- name: "litellm | Allow source ranges outside the mesh (AuthorizationPolicy)"
+  when: istio_enabled | default(false) | bool
+  kubernetes.core.k8s:
+    state: "{{ 'present' if litellm_allowed_source_cidrs | length > 0 else 'absent' }}"
+    definition:
+      apiVersion: security.istio.io/v1
+      kind: AuthorizationPolicy
+      metadata:
+        name: litellm-ingress-cidrs
+        namespace: "{{ litellm_namespace }}"
+      spec:
+        selector:
+          matchLabels:
+            app.kubernetes.io/name: litellm
+        action: ALLOW
+        rules:
+          - from:
+              - source:
+                  ipBlocks: "{{ litellm_allowed_source_cidrs }}"
+            to:
+              - operation:
+                  ports: ["4000"]
 
 # ── Print credentials ─────────────────────────────────────────────────────────
 
@@ -544,3 +705,7 @@
       - >-
         Admin API: not published; break-glass with the master key over
         kubectl -n {{ litellm_namespace }} port-forward svc/litellm 4000 (Secret litellm-master-key)
+
+- name: "litellm | Register the content-safety guardrail"
+  ansible.builtin.include_tasks: register_guardrail.yaml
+  when: guardrails_enabled | bool

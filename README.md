@@ -147,6 +147,8 @@ The Quick Start deploys one catalog model with defaults. From here you can chang
 | All configuration options | [Configuration](docs/customize/configuration.md) |
 | Components, roles, and how this repo plugs in | [Architecture](docs/reference/architecture.md) |
 | How a request reaches a model | [Inference Request Flow](docs/reference/request_flow.md) |
+| Content-safety screening of LiteLLM requests | [Guardrails](docs/customize/guardrails.md) |
+| Route each request to a model by prompt | [Hybrid Router](docs/customize/hybrid-router.md), [vLLM Semantic Router](docs/customize/vllm-semantic-router.md) |
 | NUMA-aware CPU pinning | [CPU Pinning & NUMA](docs/reference/cpu_pinning.md) |
 | Something isn't working | [Troubleshooting](docs/troubleshooting.md) |
 

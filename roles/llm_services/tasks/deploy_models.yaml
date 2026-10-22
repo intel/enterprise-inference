@@ -6,6 +6,12 @@
 # Deployment is driven per-model through the `model-manager` CLI over the model
 # catalog (models.yaml). This task enumerates the catalog and runs
 # `./model-manager deploy <name>` for each entry.
+#
+# Included with _mm_only_models it deploys exactly those catalog models (a
+# solution's default model, the guard model) instead of the `autodeploy: true`
+# ones; _mm_strict makes any failure fatal regardless of model_deploy_strict.
+# A requested model the environment's catalog lacks is taken from the shipped
+# catalog.
 
 - name: Check if model deployment should be skipped
   set_fact:
@@ -22,6 +28,7 @@
     - name: Resolve model catalog path (env copy preferred)
       set_fact:
         _mm_dir: "{{ inference_extension_dir }}/model_manager"
+        _mm_shipped_catalog: "{{ inference_extension_dir }}/model_manager/models.yaml"
         _mm_catalog: >-
           {{ (env_dir ~ '/models.yaml')
              if (env_dir is defined and (env_dir ~ '/models.yaml') is exists)
@@ -55,6 +62,7 @@
       retries: 3
       delay: 10
       until: kserve_ready.rc == 0
+      changed_when: false
 
     - name: Check if Hugging Face token is available
       set_fact:
@@ -78,28 +86,122 @@
         namespace: "{{ litellm_namespace | default('litellm') }}"
       register: _deploy_litellm_secret
       failed_when: false
+      no_log: true
       when: auth_type | default('jwt') == 'litellm_vkey'
+
+    # LiteLLM reaches the models through the AI Gateway data plane, in the
+    # namespace the platform gateway exports (envoy_gateway_namespace).
+    - name: "Deploy models | Load the platform gateway (when auth_type=litellm_vkey)"
+      ansible.builtin.include_role:
+        name: gateway
+        tasks_from: platform.yaml
+      when:
+        - auth_type | default('jwt') == 'litellm_vkey'
+        - (ai_gateway_provider | default('envoy')) == 'envoy'
 
     # Enumerate the catalog model names (jq over the YAML->JSON, the same shape
     # the CLI itself uses). Select only models opted in with `autodeploy: true`
     # so a full install does not accidentally serve the entire catalog (which
     # can include large models like an 8B). Models without the flag are left for
     # the operator to deploy manually with `./model-manager deploy <name>`.
+    # With _mm_only_models, exactly the requested catalog models.
     - name: Enumerate autodeploy models from the catalog
       shell: |
         set -o pipefail
+        {% if _mm_only_models is defined %}
+        yq -o=json '.' "{{ _mm_catalog }}" | jq -r --argjson only '{{ _mm_only_models | to_json }}' '.models[] | select(.name as $n | $only | index($n)) | .name'
+        {% else %}
         yq -o=json '.' "{{ _mm_catalog }}" | jq -r '.models[] | select(.autodeploy == true) | .name'
+        {% endif %}
       args:
         executable: /bin/bash
       register: _mm_model_names
       changed_when: false
 
+    # An environment's models.yaml is seeded once, at init, so it lacks models
+    # added to the shipped catalog later. A requested one is taken from there into
+    # a copy of the environment's catalog, which keeps that catalog's defaults,
+    # storage, network and runtimes.
+    - name: Find requested models the environment catalog lacks in the shipped catalog
+      shell: |
+        set -o pipefail
+        yq -o=json '.' "{{ _mm_shipped_catalog }}" | jq -r --argjson only '{{ _mm_env_missing | to_json }}' '.models[] | select(.name as $n | $only | index($n)) | .name'
+      args:
+        executable: /bin/bash
+      vars:
+        _mm_env_missing: "{{ _mm_only_models | default([]) | difference(_mm_model_names.stdout_lines) }}"
+      register: _mm_shipped_names
+      changed_when: false
+      when:
+        - _mm_only_models is defined
+        - _mm_catalog != _mm_shipped_catalog
+        - _mm_env_missing | length > 0
+
+    - name: Add them to a copy of the environment catalog
+      when: _mm_shipped_names.stdout_lines | default([]) | length > 0
+      block:
+        - name: Create the merged catalog file
+          ansible.builtin.tempfile:
+            state: file
+            suffix: .models.yaml
+          register: _mm_merged_catalog
+          changed_when: false   # scratch file, removed after the deploy
+
+        # JSON is valid YAML, so the CLI reads the merged catalog as it is.
+        - name: Write the merged catalog
+          shell: |
+            set -o pipefail
+            jq -n --argjson only '{{ _mm_shipped_names.stdout_lines | to_json }}' \
+              --slurpfile env <(yq -o=json '.' "{{ _mm_catalog }}") \
+              --slurpfile shipped <(yq -o=json '.' "{{ _mm_shipped_catalog }}") \
+              '$env[0] | .models += [$shipped[0].models[] | select(.name as $n | $only | index($n))]' \
+              > "{{ _mm_merged_catalog.path }}"
+          args:
+            executable: /bin/bash
+          changed_when: false
+
+        - name: Report requested models taken from the shipped catalog
+          debug:
+            msg: >-
+              NOTICE: {{ _mm_shipped_names.stdout_lines | join(', ') }} not in {{ _mm_catalog }} (seeded at
+              init, before the entries were added) — deploying the entries of the shipped catalog
+              {{ _mm_shipped_catalog }} with the rest of {{ _mm_catalog }}. Copy them into
+              {{ _mm_catalog }} to customise them.
+
+    - name: Resolve the models to deploy and their catalog
+      set_fact:
+        _mm_deploy: "{{ _mm_model_names.stdout_lines + (_mm_shipped_names.stdout_lines | default([])) }}"
+        _mm_deploy_catalog: >-
+          {{ _mm_merged_catalog.path
+             if _mm_shipped_names.stdout_lines | default([]) | length > 0 else _mm_catalog }}
+
+    # A requested model no catalog has would otherwise be skipped without a word.
+    - name: Requested models missing from the catalog
+      vars:
+        _mm_missing: "{{ _mm_only_models | default([]) | difference(_mm_deploy) }}"
+        _mm_missing_msg: >-
+          {{ _mm_missing | join(', ') }} not found in the model catalog {{ _mm_catalog }}{{
+          (' or in the shipped catalog ' ~ _mm_shipped_catalog) if _mm_catalog != _mm_shipped_catalog else '' }}.
+          Add an entry for it, or drop the name from llm_services_autodeploy_models / guardrail_model.
+      when: _mm_missing | length > 0
+      block:
+        - name: Fail on a missing required model
+          ansible.builtin.fail:
+            msg: "{{ _mm_missing_msg }}"
+          when: (_mm_strict | default(model_deploy_strict | default(false))) | bool
+
+        - name: Warn about missing requested models
+          ansible.builtin.debug:
+            msg: "WARNING: {{ _mm_missing_msg }}"
+          when: not (_mm_strict | default(model_deploy_strict | default(false))) | bool
+
     - name: Show models to deploy
       debug:
         msg: >-
-          {{ (_mm_model_names.stdout_lines | length)
-             ~ ' model(s) marked autodeploy: '
-             ~ (_mm_model_names.stdout_lines | join(', ') if _mm_model_names.stdout_lines | length
+          {{ (_mm_deploy | length)
+             ~ (' requested model(s): ' if _mm_only_models is defined else ' model(s) marked autodeploy: ')
+             ~ (_mm_deploy | join(', ') if _mm_deploy | length
+                else '(none)' if _mm_only_models is defined
                 else '(none — set autodeploy: true in models.yaml to auto-deploy on install)') }}
 
     # Deploy each catalog model through the v2 CLI. MM_CONFIG points the CLI at
@@ -114,7 +216,7 @@
       environment:
         KUBECONFIG: "{{ kubernetes_kubeconfig | default(ansible_env.HOME + '/.kube/config') }}"
         HF_TOKEN: "{{ lookup('env', 'HF_TOKEN') | default('') }}"
-        MM_CONFIG: "{{ _mm_catalog }}"
+        MM_CONFIG: "{{ _mm_deploy_catalog }}"
         # Proxy — pass through so weight downloads work behind a corporate proxy.
         MM_HTTP_PROXY: "{{ http_proxy | default(lookup('env', 'http_proxy')) | default('') }}"
         MM_HTTPS_PROXY: "{{ https_proxy | default(lookup('env', 'https_proxy')) | default('') }}"
@@ -134,21 +236,33 @@
         MM_LITELLM_ENABLED: "{{ 'true' if auth_type | default('jwt') == 'litellm_vkey' else 'false' }}"
         MM_LITELLM_URL: "{{ 'http://litellm.' + (litellm_namespace | default('litellm')) + '.svc.cluster.local:4000' if auth_type | default('jwt') == 'litellm_vkey' else '' }}"
         MM_LITELLM_MASTER_KEY: "{{ (_deploy_litellm_secret.resources[0].data.master_key | b64decode) if (auth_type | default('jwt') == 'litellm_vkey' and _deploy_litellm_secret.resources | default([]) | length > 0) else '' }}"
-        MM_LITELLM_KSERVE_URL: "http://envoy-gateway.{{ gateway_namespace | default('envoy-gateway-system') }}.svc.cluster.local"
+        # The in-cluster AI Gateway DATA PLANE (KServe attaches per-model HTTPRoutes
+        # here), NOT the "envoy-gateway" control-plane service (xDS/admin ports) — the
+        # latter resets plain HTTP :80, so LiteLLM could never reach the model.
+        MM_LITELLM_KSERVE_URL: "{{ _llm_ai_gateway_url }}"
         # AIGatewayRoute unified endpoint — only when auth_type=jwt.
         MM_AIGATEWAY_ENABLED: "{{ 'true' if auth_type | default('jwt') == 'jwt' else 'false' }}"
         MM_EG_GATEWAY_NAME: "{{ gateway_name | default('eg-gateway') }}"
         MM_EG_GATEWAY_NS: "{{ gateway_namespace | default('envoy-gateway-system') }}"
-      loop: "{{ _mm_model_names.stdout_lines }}"
+      loop: "{{ _mm_deploy }}"
       loop_control:
         label: "{{ item }}"
       register: model_deployment
+      # A re-run of an unchanged model leaves it as it is.
+      changed_when: model_deployment.rc == 0 and 'spec unchanged' not in (model_deployment.stdout | default(''))
       # Auto-deploy is a convenience: a single model failing to deploy (e.g. a
       # gated model with no HF_TOKEN, or a transient download error) must NOT
       # abort the whole install — the serving infrastructure is already up and
       # other models may succeed. Record the outcome and continue; failures are
       # summarised below. Set model_deploy_strict=true to make any failure fatal.
-      failed_when: model_deploy_strict | default(false) | bool and model_deployment.rc != 0
+      failed_when: (_mm_strict | default(model_deploy_strict | default(false))) | bool and model_deployment.rc != 0
+
+    - name: Remove the merged catalog
+      ansible.builtin.file:
+        path: "{{ _mm_merged_catalog.path }}"
+        state: absent
+      changed_when: false
+      when: _mm_deploy_catalog != _mm_catalog
 
     # Split the loop results into succeeded / failed for a clear summary.
     - name: Summarise autodeploy outcomes
@@ -173,24 +287,31 @@
 
           Check status (via kubectl):
             kubectl get llminferenceservices,inferenceservices -n {{ llm_services_namespace | default('llm-inference') }}
-      when: _mm_model_names.stdout_lines | length > 0
+      when: _mm_deploy | length > 0
 
     - name: Warn about failed auto-deploys
       debug:
         msg: "WARNING: {{ _mm_deployed_failed | length }} model(s) failed to auto-deploy: {{ _mm_deployed_failed | join(', ') }}. Install continued; deploy them manually (see summary above)."
       when:
-        - _mm_model_names.stdout_lines | length > 0
+        - _mm_deploy | length > 0
         - _mm_deployed_failed | length > 0
 
     - name: Report that no models were auto-deployed
       debug:
         msg: |
+          {% if _mm_only_models is defined %}
+          None of the requested models ({{ _mm_only_models | join(', ') }}) are in the catalog {{ _mm_catalog }}{{
+          (' or in the shipped catalog ' ~ _mm_shipped_catalog) if _mm_catalog != _mm_shipped_catalog else '' }}.
+          {% else %}
           No models were auto-deployed (none flagged `autodeploy: true` in the catalog).
+          {% endif %}
           Serving infrastructure is ready. Deploy models on demand:
             cd {{ _mm_dir }}
             ./model-manager deploy <model-name> --wait
+          {% if _mm_only_models is not defined %}
           Or set `autodeploy: true` on a model in {{ _mm_catalog }} and re-run install.
-      when: _mm_model_names.stdout_lines | length == 0
+          {% endif %}
+      when: _mm_deploy | length == 0
 
   when: not skip_model_deployment
 

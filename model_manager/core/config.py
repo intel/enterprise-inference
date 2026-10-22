@@ -146,6 +146,7 @@ class Model:
     namespace: str
     kind: str = ""
     model_id: str = ""
+    draft_model_id: str = ""                  # speculative-decoding draft, fetched to <weights>/draft
     runtime: str = ""
     rt: dict = field(default_factory=dict)    # merged runtime config
     ver: dict = field(default_factory=dict)   # selected runtime version entry (env/args deltas)
@@ -174,6 +175,9 @@ class Model:
         if not HF_REPO.fullmatch(self.model_id):
             abort(f"Invalid model_id '{self.model_id}' for '{self.name}': expected a HuggingFace repo id "
                   "such as org/name.")
+        if self.draft_model_id and not HF_REPO.fullmatch(self.draft_model_id):
+            abort(f"Invalid draft_model_id '{self.draft_model_id}' for '{self.name}': expected a HuggingFace "
+                  "repo id such as org/name.")
 
 
 def resolve(catalog: Catalog, target: str, o: Any) -> Model:
@@ -210,7 +214,7 @@ def resolve(catalog: Catalog, target: str, o: Any) -> Model:
     if o.routing:
         m.routing = o.routing
     elif not explicit_routing and m.category in ("embed", "rerank"):
-        m.routing = "direct"  # no KV cache, so EPP's cache-aware routing buys nothing
+        m.routing = "direct"  # no generation, so EPP's prefix-cache-aware routing buys nothing
     elif not m.routing:
         m.routing = text(pick(m.rt, "routing"))
     m.image = m.image or m.runtime_image
@@ -230,12 +234,18 @@ def _from_catalog(catalog: Catalog, name: str, o: Any) -> Model:
               'publish a list of named templates — copy the single template you want (e.g. the one named "default") '
               "as a block scalar.")
     m = Model(name=name, namespace=text(pick(e, "namespace", catalog.namespace)), kind=text(pick(e, "kind")),
-              model_id=text(pick(e, "model_id")), cpu=text(pick(e, "cpu")), memory=text(pick(e, "memory")),
+              model_id=text(pick(e, "model_id")), draft_model_id=text(pick(e, "draft_model_id")),
+              cpu=text(pick(e, "cpu")), memory=text(pick(e, "memory")),
               replicas=text(pick(e, "replicas", catalog.replicas)), category=text(pick(e, "category")),
               image=text(pick(e, "image")), node=text(pick(e, "node")), routing=text(pick(e, "routing")),
               chat_template=text(pick(e, "chat_template")).rstrip("\n"),  # as legacy $(jq) did
               env=shaped(f"model '{name}' env", pick(e, "env", {}), dict, catalog.path),
               args=shaped(f"model '{name}' args", pick(e, "args", []), list, catalog.path))
+    template_file = text(pick(e, "chat_template_file"))
+    if template_file:
+        if m.chat_template:
+            abort(f"Model '{name}': set either chat_template OR chat_template_file, not both.")
+        m.chat_template = _chat_template_file(name, template_file)
 
     # Server binding: a servers: map is an allow-list; runtime:/server_version: is shorthand without one.
     servers = shaped(f"model '{name}' servers", pick(e, "servers", {}), dict, catalog.path)
@@ -254,6 +264,18 @@ def _from_catalog(catalog: Catalog, name: str, o: Any) -> Model:
         abort(f"Model '{name}' is not declared to support '{m.runtime}' version '{m.version}'. "
               f"Declared versions: {', '.join(declared)}")
     return m
+
+
+def _chat_template_file(name: str, file: str) -> str:
+    """A chat_template_file's content, used exactly like inline chat_template: a file under MM_CHAT_TEMPLATES
+    (default chat-templates/), or an absolute path on the deploy host, so one template serves many models."""
+    path = Path(file) if file.startswith("/") else mm_path("MM_CHAT_TEMPLATES", "chat-templates") / file
+    if not path.is_file():
+        abort(f"Model '{name}' chat_template_file not found: {path}")
+    try:
+        return path.read_text(encoding="utf-8").rstrip("\n")  # as legacy $(cat) did
+    except (OSError, ValueError) as e:
+        abort(f"Cannot read {path}: {e}")
 
 
 def _select_image(catalog: Catalog, m: Model, o: Any) -> None:

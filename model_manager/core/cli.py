@@ -16,7 +16,7 @@ from pathlib import Path
 from . import __version__, k8s, renderer, routing
 from .config import MM_DIR, Catalog, Model, is_uint, mm_path, pick, resolve, text, truthy
 from .download import download_weights
-from .policy import preflight_gate, resolve_policy
+from .policy import preflight_gate, resolve_auto_cpu, resolve_policy
 from .ui import BOLD, CYAN, DIM, GREEN, RESET, YELLOW, abort, fmt_duration, info, ok, warn
 
 USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubernetes
@@ -301,8 +301,9 @@ def deploy(o: Options, target: str) -> None:
         info(f"  Node: {m.node}")
     policy = resolve_policy(o.cpu_policy, m.node)
     info(f"  CPU policy: {policy.name}")
-    policy.prepare(m)
     cli_args, tp = _engine_cli_args(o)
+    resolve_auto_cpu(policy, m, tp)
+    policy.prepare(m)
     annotations, cpu = policy.annotations(m, tp)
     manifest = renderer.manifest(m, catalog, o, annotations, cpu, cli_args)
     if o.dry_run:

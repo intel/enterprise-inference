@@ -1,0 +1,97 @@
+---
+# =============================================================================
+# vLLM Semantic Router (vllm-sr) — Role Defaults
+# =============================================================================
+# Opt-in, and Envoy AI Gateway only (ai_gateway_provider: envoy): the router
+# hooks into a dedicated Envoy Gateway through ext_proc and AIGatewayRoutes.
+# =============================================================================
+
+vllm_sr_enabled: false
+vllm_sr_namespace: "vllm-semantic-router-system"
+vllm_sr_release_name: "semantic-router"
+
+# Router image — chart default; empty tag => chart appVersion
+vllm_sr_image_repository: "ghcr.io/vllm-project/semantic-router/extproc"
+vllm_sr_image_tag: ""
+
+vllm_sr_replicas: 1
+
+# Persistence — the BERT classifier + embedding (mmbert) models are cached here,
+# so they survive pod restarts and are not re-downloaded.
+vllm_sr_persistence_enabled: true
+vllm_sr_storage_class: ""          # empty = cluster default StorageClass
+vllm_sr_storage_size: "10Gi"
+
+# gRPC ext_proc port the gateway's ext_proc filter calls.
+vllm_sr_grpc_port: 50051
+vllm_sr_api_port: 8080
+
+# HuggingFace token for the classifier/embedding model download. Read from the
+# environment (export HF_TOKEN=... before install). Empty is fine for ungated models.
+vllm_sr_hf_token: "{{ lookup('env', 'HF_TOKEN') | default('', true) }}"
+
+# --- Models that participate in semantic routing ---------------------------
+# The router emits `x-ai-eg-model` = one of these served model names; our
+# existing per-model AIGatewayRoutes dispatch it to that model's InferencePool.
+# List the models you have actually deployed (models.yaml autodeploy / model-manager).
+vllm_sr_model_namespace: "{{ llm_services_namespace | default('llm-inference') }}"
+# Defaults follow the model a solution layer auto-deploys (llm_services_autodeploy_models,
+# e.g. the agent toolkit's default model), so the router targets a model that is up;
+# qwen3-4b otherwise.
+vllm_sr_route_models:
+  - "{{ vllm_sr_default_model }}"
+vllm_sr_default_model: "{{ (llm_services_autodeploy_models | default([]) | first) | default('qwen3-4b', true) }}"
+vllm_sr_pool_suffix: "-inference-pool"   # matches model-manager InferencePool naming
+
+# --- Dedicated gateway (opt-in; keeps normal ai-gateway traffic untouched) --
+# CRITICAL: the semantic-router gateway gets its OWN GatewayClass + EnvoyProxy
+# (own envoyService.name) so it runs on an ISOLATED Envoy. Reusing the
+# ai-gateway's class collides on the fixed envoyService.name and merges onto the
+# ai-gateway's Envoy — then the ext_proc EnvoyPatchPolicy breaks ai-gateway
+# routing. A separate class/service keeps them fully independent.
+vllm_sr_gateway_name: "semantic-router"
+vllm_sr_gateway_namespace: "{{ vllm_sr_model_namespace }}"
+vllm_sr_gateway_class: "semantic-router"
+vllm_sr_envoyproxy_name: "semantic-router-proxy-config"
+# Envoy Gateway creates this Service beside its controller (envoy_gateway_namespace,
+# exported by the platform gateway).
+vllm_sr_gateway_service_name: "semantic-router"
+vllm_sr_route_timeout: "600s"
+
+# --- Exposure — follows auth_type unless overridden (envoy | litellm | both)
+vllm_sr_expose: "{{ 'litellm' if (auth_type | default('jwt')) == 'litellm_vkey' else 'envoy' }}"
+
+# LiteLLM virtual-model name clients call to get semantic routing (fully customizable,
+# e.g. "vllm-sr-auto"). Only used when exposure includes litellm.
+vllm_sr_litellm_model_name: "semantic-router"
+vllm_sr_litellm_namespace: "{{ litellm_namespace | default('litellm') }}"
+# The upstream keyword the router treats as "classify & route" (Mixture-of-Models).
+# LiteLLM forwards THIS to the gateway (not the client-facing name) so the router
+# classifies instead of passing an unknown model name straight through.
+vllm_sr_router_trigger_model: "auto"
+
+# Semantic response cache backend: memory (default) | redis
+vllm_sr_cache_backend: "memory"
+
+# Full canonical Router config override (advanced). When null, the role renders a
+# sensible default from vllm_sr_route_models. Author routing decisions per the
+# user guide (docs/customize/vllm-semantic-router.md).
+vllm_sr_config_override: null
+
+# --- Dashboard (official chart: its own Deployment/Service/PVC) ---------------
+# Off here; the agent toolkit turns it on. Admin login = DASHBOARD_ADMIN_* env from
+# the Secret below (password generated once); JWT signing key in the same Secret so
+# sessions survive restarts. Published at https://<hostname>/ on the platform
+# gateway with its own login (exempt from gateway auth); it serves root paths, so
+# it keeps its own host in path mode too.
+vllm_sr_dashboard_enabled: false
+# Publish the dashboard on the platform gateway.
+# Foreign var (canonical owner: enterprise-ai-solutions gateway component flag;
+# envoy_gateway_enabled is its alias).
+vllm_sr_gateway_publish: "{{ gateway_enabled | default(envoy_gateway_enabled | default(true)) | bool }}"
+vllm_sr_dashboard_hostname: "vllm-sr.{{ base_domain_name | default('inference-example.com') }}"
+vllm_sr_dashboard_admin_email: "admin@{{ base_domain_name | default('inference-example.com') }}"
+vllm_sr_dashboard_admin_name: "admin"
+vllm_sr_dashboard_secret: "vllm-sr-dashboard"  # checkov:skip=CKV_SECRET_6: Secret name, not a value
+vllm_sr_dashboard_port: 8700                   # chart dashboard.service.port
+vllm_sr_dashboard_storage_size: "1Gi"

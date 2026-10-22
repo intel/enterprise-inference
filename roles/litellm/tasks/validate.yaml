@@ -15,16 +15,37 @@
     _val_deploy.resources[0].status.conditions | default([]) |
     selectattr('type','eq','Available') | selectattr('status','eq','True') | list | length == 0
 
-- name: "litellm | validate | Check /health endpoint"
-  ansible.builtin.uri:
-    url: "http://litellm.{{ litellm_namespace }}.svc.cluster.local:4000/health"
-    method: GET
-    status_code: 200
-    timeout: 10
+- name: "litellm | validate | Resolve running pod"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ litellm_namespace }}"
+    label_selectors:
+      - app.kubernetes.io/name=litellm
+  register: _val_pods
+  failed_when: >-
+    _val_pods.resources | default([]) | length == 0 or
+    _val_pods.resources | selectattr('status.phase', 'eq', 'Running') | list | length == 0
+
+- name: "litellm | validate | Running pod"
+  ansible.builtin.set_fact:
+    _val_pod: "{{ (_val_pods.resources | selectattr('status.phase', 'eq', 'Running') | first).metadata.name }}"
+
+- name: "litellm | validate | Check readiness endpoint"
+  # Run inside the workload because the Ansible host neither resolves *.svc
+  # names nor participates in the cluster's ambient-mesh network.
+  kubernetes.core.k8s_exec:
+    namespace: "{{ litellm_namespace }}"
+    pod: "{{ _val_pod }}"
+    container: litellm
+    command: >-
+      python -c "import urllib.request;
+      print(urllib.request.urlopen('http://127.0.0.1:4000/health/readiness', timeout=10).status)"
   register: _val_health
   retries: 5
   delay: 5
-  until: _val_health.status == 200
+  until: _val_health.stdout | default('') | trim == '200'
+  changed_when: false
   failed_when: false
 
 - name: "litellm | validate | Check master key is set"
@@ -35,10 +56,57 @@
     namespace: "{{ litellm_namespace }}"
   register: _val_secret
   failed_when: _val_secret.resources | default([]) | length == 0
+  no_log: true
+
+# A short benign user message through the proxy: the fail-closed guardrail runs
+# before routing, so any block means the guard model cannot be reached (down, not
+# deployed, or refused by LiteLLM's outbound URL check) and every request is blocked.
+- name: "litellm | validate | Content-safety guardrail lets a benign request through"
+  when: guardrails_enabled | bool
+  block:
+    - name: "litellm | validate | Send a user message through LiteLLM"
+      kubernetes.core.k8s_exec:
+        namespace: "{{ litellm_namespace }}"
+        pod: "{{ _val_pod }}"
+        container: litellm
+        command: |
+          python -c "
+          import json, os, urllib.error, urllib.request
+          key = os.environ.get('PROXY_MASTER_KEY') or os.environ.get('LITELLM_MASTER_KEY') or ''
+          body = {'model': '{{ guardrail_model }}', 'max_tokens': 1,
+                  'messages': [{'role': 'user', 'content': 'Hello, how are you?'}]}
+          req = urllib.request.Request('http://127.0.0.1:4000/v1/chat/completions', method='POST',
+                                       data=json.dumps(body).encode(),
+                                       headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'})
+          try:
+              print(urllib.request.urlopen(req, timeout=120).status)
+          except urllib.error.HTTPError as err:
+              print(err.code, err.read().decode()[:1000])
+          "
+      register: _val_guard
+      retries: 3
+      delay: 10
+      until: "'Blocked by the content-safety guardrail' not in (_val_guard.stdout | default(''))"
+      changed_when: false
+      failed_when: false
+
+    - name: "litellm | validate | Guardrail reached its guard model"
+      ansible.builtin.assert:
+        that:
+          - _val_guard.rc | default(1) == 0
+          - "'Blocked by the content-safety guardrail' not in (_val_guard.stdout | default(''))"
+        fail_msg: >-
+          The content-safety guardrail blocked a benign request, so every request through LiteLLM is
+          blocked: {{ (_val_guard.stdout | default('') ~ ' ' ~ _val_guard.stderr | default('')) | trim | truncate(600) }}.
+          Check that {{ guardrail_model }} is deployed and Ready in {{ guardrail_guard_namespace }}, and that
+          litellm_settings.user_url_allowed_hosts in ConfigMap litellm-config lists the host of {{ guard_service_url }}
+          (re-running the install upgrades a release that lacks it).
+        quiet: true
 
 - name: "litellm | validate | Summary"
   ansible.builtin.debug:
     msg:
       - "LiteLLM deployment: {{ 'OK' if _val_deploy.resources | length > 0 else 'FAIL' }}"
-      - "LiteLLM /health: {{ 'OK' if _val_health.status | default(0) == 200 else 'WARN (check manually)' }}"
+      - "LiteLLM readiness: {{ 'OK' if _val_health.stdout | default('') | trim == '200' else 'WARN (check manually)' }}"
       - "Master key secret: {{ 'OK' if _val_secret.resources | length > 0 else 'FAIL' }}"
+      - "Content-safety guardrail: {{ 'OK (' ~ guardrail_model ~ ')' if guardrails_enabled | bool else 'off' }}"

@@ -81,7 +81,10 @@ gateway, before it reaches a model.
 
 LiteLLM is the auth boundary. The edge gateway terminates TLS and forwards to LiteLLM,
 which validates the bearer key, enforces that key's model allow-list, budget, and rate
-limit, then routes on to the AI gateway.
+limit, then routes on to the AI gateway. The content-safety guardrail (on by default in
+this mode) screens each request with a guard model first: a blocked request returns
+HTTP 500 "Blocked by the content-safety guardrail: …", and while the guard model is not
+Ready every request is blocked — see [Guardrails](../customize/guardrails.md).
 
 Retrieve the master key:
 

@@ -2,7 +2,7 @@
 --- stdout
 [INFO ]  Deploying bge-reranker (LLMInferenceService)
 [INFO ]    Runtime: vllm @ 0.24.0 | Category: rerank | Routing: epp
-[INFO ]    CPU: 6 | Memory: 12Gi | Replicas: 1
+[INFO ]    CPU: 6 | Memory: 16Gi | Replicas: 1
 [INFO ]    CPU policy: best-effort
 apiVersion: serving.kserve.io/v1alpha2
 kind: LLMInferenceService
@@ -41,6 +41,8 @@ spec:
           value: "1"
         - name: USER
           value: "vllm"
+        - name: VLLM_CPU_KVCACHE_SPACE
+          value: "16"
         - name: VLLM_CPU_NUM_OF_RESERVED_CPU
           value: "1"
         - name: VLLM_CPU_SGL_KERNEL
@@ -50,10 +52,10 @@ spec:
         resources:
           requests:
             cpu: "6"
-            memory: 12Gi
+            memory: 16Gi
           limits:
             cpu: "6"
-            memory: 12Gi
+            memory: 16Gi
         startupProbe:
           httpGet:
             path: /health

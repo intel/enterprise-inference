@@ -13,6 +13,9 @@ from .config import Model, is_uint, pick, text, truthy
 from .ui import abort, info, warn
 
 ANN = "cpu-policy.model-manager.io"
+# Where a deployed serving CR keeps its container's CPU request.
+LIVE_CPU = {"LLMInferenceService": "{.spec.template.containers[0].resources.requests.cpu}",
+            "InferenceService": "{.spec.predictor.model.resources.requests.cpu}"}
 NRI_FALLBACK_BOX = """\
 ┌─────────────────────────────────────────────────────────────────────┐
 │  NRI BALLOONS FALLBACK — Model will deploy WITHOUT CPU pinning      │
@@ -206,6 +209,35 @@ def resolve_policy(requested: str, node: str) -> BestEffort:
             warn("No CPU-pinning mechanism detected (no NRI balloons DaemonSet, kubelet cpuManagerPolicy is not "
                  "static) — deploying best-effort, without CPU pinning.")
     return POLICIES[requested]()
+
+
+def resolve_auto_cpu(policy: BestEffort, m: Model, tp: int) -> None:
+    """Turn `cpu: auto` (models.yaml) into a number, before the policy normalises m.cpu; --cpu overrides it.
+
+    A deployed model keeps its CPU, so a re-deploy leaves the spec unchanged. Otherwise nri-balloons sizes it
+    to the free balloon CPUs of tp NUMA nodes on the smallest schedulable node, and aborts below the category
+    default cpu; the other policies have no NUMA balloons to size against and take that default.
+    """
+    if m.cpu != "auto":
+        return
+    path = LIVE_CPU.get(m.kind)
+    live = k8s.out("get", m.kind, m.name, "-n", m.namespace, "-o", f"jsonpath={path}") if path else ""
+    if live:
+        if isinstance(policy, NriBalloons) and is_uint(live):
+            live = str(nri_policy.model_cpu(int(live)))  # the request carries any hideHyperthreads doubling
+        info(f"  CPU auto: keeping deployed value {live}")
+        m.cpu = live
+        return
+    default = text(pick(pick(m.cat, "defaults", {}), "cpu", 8))
+    if isinstance(policy, NriBalloons):
+        cpu = nri_policy.auto_cpu(tp, m.node)
+        if cpu < _whole_cpus(default):
+            abort(f"cpu: auto — only {cpu} free CPUs per NUMA node for {m.name} (tp={tp}, need >= {default}). "
+                  "Undeploy a model, add a node, or pass --cpu.")
+        m.cpu = str(cpu)
+    else:
+        m.cpu = default
+    info(f"  CPU auto: {m.cpu} (tp={tp}, policy {policy.name})")
 
 
 def preflight_gate(policy: BestEffort, m: Model, tp: int) -> None:

@@ -20,6 +20,31 @@ models:
     routing: aigateway
     chat_template: /mnt/models/tpl.jinja
 
+  - name: tmpl-file
+    model_id: org/file
+    category: llm
+    chat_template_file: chat.jinja
+
+  - name: tmpl-file-both
+    model_id: org/both
+    chat_template: "{{ messages }}"
+    chat_template_file: chat.jinja
+
+  - name: tmpl-file-missing
+    model_id: org/missing
+    chat_template_file: missing.jinja
+
+  - name: specdec
+    model_id: org/target
+    draft_model_id: org/draft
+    category: llm
+    args: [--speculative-config.method, draft_model, --speculative-config.model, /mnt/models/draft]
+
+  - name: auto-cpu
+    model_id: org/auto
+    category: llm
+    cpu: auto
+
   - name: multi
     model_id: org/multi
     category: llm

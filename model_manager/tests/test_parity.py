@@ -39,7 +39,10 @@ STATIC = [[r"get nodes -l", 0, "w1"],
                                                          "cpuManagerPolicyOptions": {"full-pcpus-only": "true"}}})]]
 SMALL_NODES = [[r"get nodes -o json", 0, json.dumps(
     {"items": [{"metadata": {"name": "w1"}, "spec": {}, "status": {"allocatable": {"cpu": "4"}}}]})]]
+LIVE_AUTO_CPU = [[r"(?i)^get llminferenceservice auto-cpu -n ns1 -o jsonpath=\{\.spec\.template\.containers\[0\]"
+                  r"\.resources\.requests\.cpu\}$", 0, "12"]]
 BE = {"MM_CPU_POLICY": "best-effort"}
+FX_TEMPLATES = {"MM_CHAT_TEMPLATES": str(MM / "tests" / "fixtures" / "chat-templates")}
 NRI = {"MM_CPU_POLICY": "nri-balloons"}
 # Legacy computed LiteLLM's api_base even with LiteLLM disabled, warning about it.
 NO_LITELLM_URL = (r"^\[WARN \]  AI Gateway service 'ai-gateway' not found.*\n", "")
@@ -47,6 +50,18 @@ NO_LITELLM_URL = (r"^\[WARN \]  AI Gateway service 'ai-gateway' not found.*\n", 
 HELP_SVC_NS = (r"^(  MM_INFERENCE_HOSTNAME .*\n)",
                r"\1  MM_INFERENCE_GATEWAY_SVC_NS\n                        Namespace of the AI Gateway Service LiteLLM calls\n"
                r"                        (default: MM_INFERENCE_GATEWAY_NS, else envoy-gateway-system)\n")
+
+
+def nri_node(in_use: int) -> list:
+    """One Ready NRI worker w1: 2 NUMA nodes, 128 logical CPUs, siblings reserved; in_use balloon CPUs taken."""
+    node = {"metadata": {"name": "w1", "labels": {"nri.intel.com/max-tp": "2"}}, "spec": {},
+            "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+    pod = {"metadata": {"annotations": {"balloon.balloons.resource-policy.nri.io/container.main": "vllm-balloon"}},
+           "spec": {"containers": [{"resources": {"requests": {"cpu": str(in_use)}}}]}, "status": {"phase": "Running"}}
+    return [[r"^get nodes -o json$", 0, json.dumps({"items": [node]})],
+            [r"^get pods -A --field-selector spec\.nodeName=w1 -o json$", 0, json.dumps({"items": [pod]})],
+            [r"numa-nodes\}$", 0, "2"], [r"physical-cpus\}$", 0, "64"], [r"allocatable\.cpu\}$", 0, "126"],
+            [r"capacity\.cpu\}$", 0, "128"], [r"reservedResources\.cpu\}$", 0, "cpuset:64-127"]]
 
 
 def case(name, *args, env=None, k8s=(), catalog=None, deviations=()):
@@ -69,6 +84,7 @@ CASES = [
          env={"MM_CPU_POLICY": "kubelet-static"}),
     case("ovms-nri", "deploy", "qwen3-5-2b-ovms", "--dry-run", env=NRI),
     case("embed-direct", "deploy", "bge-base-en", "--dry-run", "--cpu-policy", "BEST-EFFORT"),
+    case("agent-default-model", "deploy", "qwen2-5-coder-14b", "--dry-run", env=BE),
     case("rerank-explicit-routing", "deploy", "bge-reranker", "--dry-run", "--routing", "epp", env=BE),
     case("id-embed-detected", "deploy", "--id", "BAAI/bge-small-en-v1.5", "--dry-run",
          env={**BE, "FAKE_HF_JSON": '{"pipeline_tag": "feature-extraction"}'}),
@@ -89,7 +105,19 @@ CASES = [
     case("fx-inline-template", "deploy", "tmpl-inline", "--dry-run", "--tp", "2", "--arg", "--trust-remote-code",
          env=BE, catalog=FIXTURE),
     case("fx-path-template", "deploy", "tmpl-path", "--dry-run", env=BE, catalog=FIXTURE),
+    case("fx-template-file", "deploy", "tmpl-file", "--dry-run", env={**BE, **FX_TEMPLATES}, catalog=FIXTURE),
+    case("fx-template-file-both", "deploy", "tmpl-file-both", "--dry-run", env={**BE, **FX_TEMPLATES},
+         catalog=FIXTURE),
+    case("fx-template-file-missing", "deploy", "tmpl-file-missing", "--dry-run", env=BE, catalog=FIXTURE),
     case("fx-servers-sorted-default", "deploy", "multi", "--dry-run", env=BE, catalog=FIXTURE),
+    case("fx-cpu-auto-best-effort", "deploy", "auto-cpu", "--dry-run", env=BE, catalog=FIXTURE),
+    case("fx-cpu-auto-nri", "deploy", "auto-cpu", "--dry-run", "--tp", "2", env=NRI, catalog=FIXTURE,
+         k8s=nri_node(8)),
+    case("fx-cpu-auto-nri-full", "deploy", "auto-cpu", "--dry-run", env=NRI, catalog=FIXTURE, k8s=nri_node(124)),
+    case("fx-cpu-auto-keep-live", "deploy", "auto-cpu", "--dry-run", env=NRI, catalog=FIXTURE,
+         k8s=LIVE_AUTO_CPU + nri_node(8)),
+    case("fx-cpu-auto-override", "deploy", "auto-cpu", "--dry-run", "--cpu", "10", env=NRI, catalog=FIXTURE,
+         k8s=nri_node(8)),
     case("fx-version-not-allowed", "deploy", "multi", "--server", "vllm", "--server-version", "0.30.0",
          "--dry-run", env=BE, catalog=FIXTURE),
     case("fx-category-detected", "deploy", "nocat", "--dry-run",
@@ -130,6 +158,12 @@ CASES = [
          k8s=QWEN_EXISTS + [[r"^diff", 2, ""]] + POOL + QWEN_READY, deviations=[NO_LITELLM_URL]),
     case("deploy-inline-template", "deploy", "tmpl-inline", "--wait", env=BE, catalog=FIXTURE, k8s=DOWNLOAD + POOL + [
         [r"get LLMInferenceService tmpl-inline -n ns1 -o json$", 0, _ready("MainWorkloadReady")]],
+         deviations=[NO_LITELLM_URL]),
+    case("deploy-template-file", "deploy", "tmpl-file", "--wait", env={**BE, **FX_TEMPLATES}, catalog=FIXTURE,
+         k8s=DOWNLOAD + POOL + [[r"get LLMInferenceService tmpl-file -n ns1 -o json$", 0, _ready("MainWorkloadReady")]],
+         deviations=[NO_LITELLM_URL]),
+    case("deploy-draft", "deploy", "specdec", "--wait", env=BE, catalog=FIXTURE, k8s=DOWNLOAD + POOL + [
+        [r"get LLMInferenceService specdec -n ns1 -o json$", 0, _ready("MainWorkloadReady")]],
          deviations=[NO_LITELLM_URL]),
     case("kubelet-static-preflight-blocks", "deploy", "llama3-8b-awq", env={"MM_CPU_POLICY": "kubelet-static"},
          k8s=STATIC + SMALL_NODES),

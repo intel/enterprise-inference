@@ -87,7 +87,7 @@ models:
 | `name` | Deploy name, and the `model` id used in API requests |
 | `model_id` | The Hugging Face repo to pull weights from |
 | `category` | Workload class — `llm`, `embed`, `rerank`, or `vlm`. Drives default args, CPU, and memory |
-| `cpu` / `memory` | Resource requests (default: from the category) |
+| `cpu` / `memory` | Resource requests (default: from the category). `cpu: auto` sizes CPU to a NUMA node — see [below](#cpu-auto) |
 | `replicas` | Replica count (default: 1) |
 | `tp` | Tensor parallelism — split the model across N CPU sockets |
 | `namespace` | Target namespace (default: `llm-inference`) |
@@ -98,6 +98,8 @@ models:
 | `env` | Extra env vars, merged over the runtime env |
 | `autodeploy` | `true` → bring the model up during install. See [below](#auto-deploy-on-install) |
 | `chat_template` | Inline Jinja or an absolute path → vLLM `--chat-template`. See [below](#chat-templates) |
+| `chat_template_file` | A Jinja file whose content is used as `chat_template`, so models share one template. See [below](#chat-templates) |
+| `draft_model_id` | Hugging Face repo of a speculative-decoding draft model (vLLM). See [below](#speculative-decoding) |
 
 Plus the server binding, described next.
 
@@ -138,6 +140,32 @@ side by side with `--as <alt-name>`. See [Deploy a Model](../deploy/deploy_model
 The engines themselves — images, available versions, and shared settings — are defined
 once under `runtimes:`. See [Runtimes](runtimes.md).
 
+## CPU auto
+
+`cpu: auto` sizes a model's CPU to the node it lands on instead of a fixed number:
+
+```yaml
+- name: qwen2-5-coder-14b
+  model_id: Qwen/Qwen2.5-Coder-14B-Instruct
+  cpu: auto
+```
+
+| CPU policy | `cpu: auto` becomes |
+|---|---|
+| `nri-balloons` | The free physical cores of one NUMA node per TP rank, minus the reserved CPUs, on the smallest schedulable node — so the pod fits wherever it is placed |
+| `kubelet-static`, `best-effort` | The category's default `cpu` |
+
+- A model that is already deployed keeps its current CPU, so re-running a deploy or the
+  install leaves it unchanged.
+- `--cpu N` overrides it for one deploy, and `--cpu auto` asks for the sizing from the
+  command line. `--dry-run` shows the number it resolves to.
+- Under `nri-balloons` it reads the `nri.intel.com/max-tp` node labels the solutions
+  repo's NRI balloons role sets. When fewer CPUs than the category default are free, the
+  deploy stops with `cpu: auto — only N free CPUs per NUMA node …`: undeploy a model,
+  add a node, or pass `--cpu`.
+
+See [CPU Pinning & NUMA](../reference/cpu_pinning.md).
+
 ## Chat templates
 
 `chat_template` accepts either inline Jinja or an absolute path.
@@ -158,6 +186,55 @@ file is genuinely external.
 > templates, copy just the one you want (usually `default`). To preserve a literal CR,
 > use a double-quoted scalar with `\r` escapes — a `|` block scalar cannot carry CR,
 > because YAML normalizes line breaks.
+
+**A shared file** — `chat_template_file` names a Jinja file whose content is used exactly
+like inline Jinja (the same ConfigMap and `--chat-template`), so several models share one
+template instead of each carrying a copy:
+
+```yaml
+- name: qwen2-5-coder-14b
+  model_id: Qwen/Qwen2.5-Coder-14B-Instruct
+  chat_template_file: tool_chat_template_qwen3coder.jinja
+```
+
+- A relative name is looked up in `model_manager/chat-templates/`, or in the directory
+  `MM_CHAT_TEMPLATES` points at — never next to the catalog, so a seeded
+  `env/<env>/models.yaml` works unchanged.
+- An absolute path is read on the host running `model-manager`, not in the pod.
+- Setting both `chat_template` and `chat_template_file`, or naming a file that does not
+  exist, stops the deploy before anything changes on the cluster.
+
+Bundled templates:
+
+| File | Used for |
+|---|---|
+| `tool_chat_template_qwen3coder.jinja` | Qwen2.5-Coder, Qwen3-Coder and Qwen3-30B-A3B tool calling |
+| `tool_chat_template_gemma4.jinja` | Gemma 4 tool calling (`gemma-4-26b`) |
+| `tool_chat_template_hermes.jinja` | Hermes-style tool calling |
+
+## Speculative decoding
+
+`draft_model_id` names a small draft model for vLLM speculative decoding. The download
+Job fetches it into the model's own directory on the model store, so the pod — which
+mounts only that directory and serves offline — finds it at `/mnt/models/draft`.
+Point vLLM at that path in `args`:
+
+```yaml
+- name: llama-3-1-8b-specdec
+  model_id: meta-llama/Llama-3.1-8B-Instruct
+  draft_model_id: meta-llama/Llama-3.2-1B-Instruct
+  args: [ "--speculative-config.method", "draft_model",
+          "--speculative-config.model", "/mnt/models/draft",
+          "--speculative-config.num_speculative_tokens", "5" ]
+```
+
+- The draft has its own download marker: adding one to a model whose weights are
+  already on disk fetches only the draft.
+- It downloads with the same `HF_TOKEN`. A gated draft — such as
+  `meta-llama/Llama-3.2-1B-Instruct` — without a token stops the deploy before the Job
+  starts.
+- Write JSON-valued vLLM flags in dot notation (`--flag.key value`): KServe evaluates the
+  arg string, which strips the quotes from inline JSON.
 
 ## Auto-deploy on install
 
@@ -184,6 +261,18 @@ up serving infrastructure. Bringing a model up automatically takes **two** setti
 > a full install never serves the whole catalog, which may include large models.
 
 Once enabled, only models flagged `autodeploy: true` are deployed.
+
+> [!NOTE]
+> Two kinds of model deploy without either setting: models a solution layer requests by
+> name in `llm_services_autodeploy_models` (the agent toolkit sets its default model
+> there), and the guardrail's guard model (`guardrail_model`) whenever the guardrail is
+> on. The guard model deploys first, so models with `cpu: auto` size themselves around it.
+> They come from the same catalog. The environment copy is seeded once, at `init`, so an
+> environment created before a catalog update lacks the new entries: a requested model
+> missing there is taken from `model_manager/models.yaml` (the rest of
+> `env/<env>/models.yaml` still applies) and the install prints a notice. To customise
+> such a model, copy its entry into `env/<env>/models.yaml`. See
+> [Configuration](configuration.md#llm-services-and-model-deployment).
 
 **Auto-deploy is fault-tolerant.** If a flagged model fails — a gated model with no
 `HF_TOKEN`, a transient download error — the install **does not abort**. The serving

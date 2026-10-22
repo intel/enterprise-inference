@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from core import cli, config, download, k8s, routing  # noqa: E402
+from core import cli, config, download, k8s, nri_policy, policy, routing  # noqa: E402
 from core.config import Catalog, Model  # noqa: E402
 from core.policy import _whole_cpus  # noqa: E402
 from core.renderer import dedupe_args, engine_args  # noqa: E402
@@ -56,10 +56,44 @@ def test_whole_cpus(cpu, whole):
     assert _whole_cpus(cpu) == whole
 
 
+@pytest.mark.parametrize("hide_ht, tp, want", [("false", 1, 28), ("false", 2, 56), ("true", 1, 14)])
+def test_auto_cpu_sizes_to_smallest_node(monkeypatch, hide_ht, tp, want):
+    monkeypatch.setenv("MM_NRI_HIDE_HT", hide_ht)  # hidden: the request doubles, so half the free CPUs
+    monkeypatch.setattr(nri_policy, "_schedulable_nri_nodes", lambda _: ["w1", "w2"])
+    monkeypatch.setattr(nri_policy, "_balloon_pods_cpu_on_node", lambda n: {"w1": 8, "w2": 0}[n])
+    monkeypatch.setattr(nri_policy, "_per_numa_capacity", lambda _: [64, 64])
+    monkeypatch.setattr(nri_policy, "_reserved_cpus_count", lambda _: 64)
+    assert nri_policy.auto_cpu(tp) == want  # w1 (28 free per NUMA node) decides
+
+
+def test_cpu_auto_keeps_live_request_without_ht_doubling(monkeypatch):
+    monkeypatch.setenv("MM_NRI_HIDE_HT", "true")
+    monkeypatch.setattr(k8s, "out", lambda *args: "16")
+    m = Model(name="m", namespace="n", kind="LLMInferenceService", cpu="auto")
+    policy.resolve_auto_cpu(policy.NriBalloons(), m, 1)
+    assert m.cpu == "8"  # renders the live request of 16 again instead of doubling it on every re-deploy
+
+
 @pytest.mark.parametrize("name, model_id", [("ok", "org/m'; rm -rf /models #"), ("Bad_Name", "org/m")])
 def test_unsafe_names_rejected(name, model_id):
     with pytest.raises(SystemExit):
         Model(name=name, namespace="n", model_id=model_id).check()
+
+
+def test_unsafe_draft_id_rejected():
+    with pytest.raises(SystemExit):
+        Model(name="m", namespace="n", model_id="org/m", draft_model_id="org/d'; rm -rf /models #").check()
+
+
+def test_gated_draft_needs_token(kubectl, monkeypatch, capsys):
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setattr(download, "_curl_ok", lambda *_: True)
+    monkeypatch.setattr(download, "hf_model_info", lambda repo, _: {"gated": "manual"} if repo == "org/draft" else {})
+    m = Model(name="m", namespace="n", model_id="org/m", draft_model_id="org/draft", runtime="vllm",
+              runtime_image="img")
+    with pytest.raises(SystemExit):
+        download.download_weights(m, Catalog(cli.MM_DIR / "models.yaml"), [])
+    assert "Model 'org/draft' is gated" in capsys.readouterr().err and not kubectl
 
 
 def test_hf_token_only_on_stdin(kubectl, monkeypatch):
@@ -87,6 +121,15 @@ def test_cpu_collisions_check_runs_report(monkeypatch):
         cli.cpu_collisions_check(cli.Options(), "")
     assert exit_.value.code == 3 and seen[0][1:] == [str(cli.MM_DIR / "scripts" / "nri-cpu-report.py"),
                                                        "--namespace", "llm-inference"]
+
+
+def test_chat_template_file_absolute_path(tmp_path):
+    template = tmp_path / "t.jinja"
+    template.write_text("{{ messages }}\n\n")
+    catalog = tmp_path / "models.yaml"
+    catalog.write_text(f"models:\n  - name: m\n    model_id: org/m\n    chat_template_file: {template}\n")
+    m = config._from_catalog(Catalog(catalog), "m", cli.Options())
+    assert m.chat_template == "{{ messages }}"  # used like inline Jinja, trailing newlines dropped
 
 
 @pytest.mark.parametrize("flag", ["--tp", "--replicas", "--wait-timeout"])
