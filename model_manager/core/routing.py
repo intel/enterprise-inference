@@ -7,6 +7,8 @@ import json
 import os
 import secrets
 import time
+import urllib.error
+import urllib.request
 
 from . import k8s
 from .config import MM_DIR, Model, config_value, env, gateway_ref, gateway_service, global_config, inference_config
@@ -129,12 +131,13 @@ def litellm_enabled() -> bool:
 
 
 def _internal_url(m: Model) -> str:
-    """api_base LiteLLM calls: the AI Gateway for vLLM (EPP routing), the predictor for OVMS."""
-    if os.environ.get("MM_LITELLM_KSERVE_URL"):
-        return f"{os.environ['MM_LITELLM_KSERVE_URL'].rstrip('/')}/{m.namespace}/{m.name}/v1"
+    """api_base LiteLLM calls: the AI Gateway for vLLM (EPP routing), the predictor for OVMS.
+    MM_LITELLM_KSERVE_URL overrides the gateway only: OVMS has no route there with the AI Gateway off."""
     if m.kind == "InferenceService":
         port = k8s.out("get", "svc", f"{m.name}-predictor", "-n", m.namespace, "-o", "jsonpath={.spec.ports[0].port}")
         return f"http://{m.name}-predictor.{m.namespace}.svc.cluster.local:{port or 80}/v1"
+    if os.environ.get("MM_LITELLM_KSERVE_URL"):
+        return f"{os.environ['MM_LITELLM_KSERVE_URL'].rstrip('/')}/{m.namespace}/{m.name}/v1"
     gw, gw_ns = gateway_service()
     if k8s.out("get", "svc", gw, "-n", gw_ns, "-o", "jsonpath={.metadata.name}"):
         return f"http://{gw}.{gw_ns}.svc.cluster.local/{m.namespace}/{m.name}/v1"
@@ -169,9 +172,27 @@ def _litellm_key() -> str:
         return ""
 
 
+def _litellm_direct(method: str, url: str, payload: dict | None, key: str) -> str | None:
+    """Call LiteLLM over HTTP from inside the cluster (a pod, e.g. a Headlamp deploy Job)."""
+    if not url.startswith(("http://", "https://")):
+        return None
+    req = urllib.request.Request(url, method=method, data=json.dumps(payload).encode() if payload else None,
+                                 headers={"Content-Type": "application/json",
+                                          **({"Authorization": f"Bearer {key}"} if key else {})})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # in-cluster Service, never via a proxy
+    try:
+        with opener.open(req, timeout=30) as r:  # nosec B310 - scheme checked above
+            return r.read().decode()
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+
 def _litellm(method: str, url: str, payload: dict | None = None) -> str | None:
-    """Call LiteLLM from a throwaway in-cluster curl pod; the key goes in on stdin, never in the pod spec."""
+    """Call LiteLLM directly when running in a pod, else from a throwaway in-cluster curl pod; the key
+    goes in on stdin, never in the pod spec."""
     key = _litellm_key()
+    if os.environ.get("KUBERNETES_SERVICE_HOST"):
+        return _litellm_direct(method, url, payload, key)
     curl = ["curl", "-sf", "-X", method, "-H", "Content-Type: application/json", *(["-H", "@-"] if key else []),
             *(["-d", json.dumps(payload)] if payload else []), url]
     pod = f"mm-curl-{secrets.token_hex(4)}"
