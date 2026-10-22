@@ -175,3 +175,19 @@ def test_endpoint_env_overrides(monkeypatch, tmp_path):
     monkeypatch.setenv("MM_INFERENCE_HOSTNAME", "api.ex.test")
     monkeypatch.setenv("MM_INFERENCE_PATH", "")  # set but empty: no path, as in subdomain mode
     assert (routing.inference_hostname(), routing.inference_path()) == ("api.ex.test", "")
+
+
+@pytest.mark.parametrize("routing_mode, want", [
+    ("subdomain", "https://litellm.ex.test/v1/chat/completions"),
+    ("path", "https://ex.test/litellm/v1/chat/completions"),
+])
+def test_litellm_endpoint_is_unified(monkeypatch, tmp_path, capsys, routing_mode, want):
+    for var in ("MM_INFERENCE_HOSTNAME", "MM_INFERENCE_PATH"):
+        monkeypatch.delenv(var, raising=False)
+    (tmp_path / "global.yaml").write_text(f"base_domain_name: ex.test\nrouting_mode: {routing_mode}\n")
+    monkeypatch.setenv("MM_GLOBAL_CONFIG", str(tmp_path / "global.yaml"))
+    monkeypatch.setenv("MM_LITELLM_ENABLED", "true")
+    monkeypatch.setenv("MM_AIGATEWAY_ENABLED", "false")
+    monkeypatch.setattr(k8s, "out", lambda *a: "")
+    routing.print_endpoints(Model(name="m", namespace="n", kind="LLMInferenceService"))
+    assert f"Endpoint: {want}" in capsys.readouterr().out

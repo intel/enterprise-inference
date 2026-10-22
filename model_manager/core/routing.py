@@ -277,7 +277,8 @@ def print_endpoints(m: Model) -> None:
                     f"gateway.envoyproxy.io/owning-gateway-name={env('MM_EG_GATEWAY_NAME', 'eg-gateway')}",
                     "-o", "jsonpath={.items[0].status.loadBalancer.ingress[0].ip}")
     api = {"embed": "v1/embeddings", "rerank": "v1/score"}.get(m.category, "v1/chat/completions")
-    if gateway_enabled():
+    # The AI Gateway and LiteLLM both serve every model on one URL, picked by "model" in the body.
+    if gateway_enabled() or litellm:
         endpoint = f"https://{host}{inference_path()}/{api}"
     elif m.kind == "LLMInferenceService":
         endpoint = f"https://{host}/{m.namespace}/{m.name}/{api}"
