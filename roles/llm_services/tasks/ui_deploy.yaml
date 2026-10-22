@@ -106,6 +106,39 @@
                      if __llm_mm_litellm | bool and _llm_mm_litellm_key.resources | default([]) | length > 0 else {}) }}
   no_log: true
 
+# ── Serving runtimes the catalogue uses ──────────────────────────────────────
+# model-manager installs a ClusterServingRuntime on a model's first deploy. The
+# Job may only read them (a cluster-scoped write would reach past its
+# namespace), so they are installed here, image filled in the same way.
+- name: "llm_services | ui deploy | Runtimes with their own ClusterServingRuntime"
+  vars:
+    _cat: "{{ lookup('ansible.builtin.file', __llm_mm_catalog) | from_yaml }}"
+    _used: >-
+      {{ _cat.models | default([]) | map(attribute='runtime', default=(_cat.defaults | default({})).runtime | default('vllm'))
+         | unique | list }}
+  ansible.builtin.set_fact:
+    __llm_mm_runtimes: >-
+      {%- set out = [] -%}
+      {%- for r in _used -%}
+      {%- set v = lookup('ansible.builtin.file', __llm_mm_dir ~ '/runtimes/' ~ r ~ '/values.yaml', errors='ignore') | default('', true) | from_yaml or {} -%}
+      {%- if v.serving_runtime_manifest is defined -%}
+      {%- set _ = out.append({'name': v.runtime_name | default(r ~ '-runtime'),
+                              'manifest': __llm_mm_dir ~ '/runtimes/' ~ v.serving_runtime_manifest,
+                              'image': ((_cat.runtimes | default({}))[r] | default({})).image | default(v.image)}) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+# Applied every run, so an image change in the runtime reaches the cluster.
+# Rendered in one expression: the manifest's own {{.Name}} placeholders stay as they are.
+- name: "llm_services | ui deploy | ClusterServingRuntimes"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('ansible.builtin.file', item.manifest) | replace('{{RUNTIME_IMAGE}}', item.image) | from_yaml }}"
+  loop: "{{ __llm_mm_runtimes }}"
+  loop_control:
+    label: "{{ item.name }}"
+
 # ── Job template (read by the Models page, enforced by the admission policy) ─
 
 # Settings first, then the two secrets, by reference.
