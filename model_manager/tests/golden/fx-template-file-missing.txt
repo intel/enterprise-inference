@@ -1,5 +1,0 @@
-# rc: 1
---- stdout
---- stderr
-[ERROR]  Model 'tmpl-file-missing' chat_template_file not found: <MM>/chat-templates/missing.jinja
---- kubectl

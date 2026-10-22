@@ -26,10 +26,8 @@ Model selected by `"model": "<name>"` in the JSON body (Envoy AI Gateway extract
                          EXTERNAL                          INTERNAL (cluster)
 
  Client ──HTTPS──► eg-gateway ──HTTP──► LiteLLM ──HTTP──► ai-gateway ──► vLLM
-                   (TLS term)           (auth,guardrail,   (EPP sched)   (model)
-                                         cache)
+                   (TLS term)           (auth,cache)       (EPP sched)   (model)
                                             │
-                                            ├──► ai-gateway ──► guard model (content-safety pre-call screen)
                                             ├──► Valkey (response cache)
                                             └──► Langfuse (traces)
 ```
@@ -44,7 +42,7 @@ Model selected by `"model": "<name>"` in the JSON body (Envoy AI Gateway extract
 `eg-gateway` carries a deny-by-default Keycloak JWT policy. Routes that authenticate themselves (the LiteLLM API in `litellm_vkey` mode, the Langfuse UI) attach their own no-auth `SecurityPolicy`.
 
 In `jwt` mode, `eg-gateway` validates the JWT and forwards directly to `ai-gateway`. No LiteLLM in the path.
-In `litellm_vkey` mode, `eg-gateway` routes to LiteLLM (which validates the virtual key and, with the content-safety guardrail on, screens the request), and LiteLLM forwards to `ai-gateway`.
+In `litellm_vkey` mode, `eg-gateway` routes to LiteLLM (which validates the virtual key), and LiteLLM forwards to `ai-gateway`.
 
 ## Request Flow — `jwt` + Unified Routing (Default)
 
@@ -156,16 +154,10 @@ curl https://litellm.inference-example.com/v1/chat/completions \
 
 **What LiteLLM does:**
 1. Authenticates the virtual key
-2. Screens the last user message with the content-safety guardrail (`guardrails_enabled`,
-   on by default in this mode): a pre-call request through `ai-gateway` to the guard model
-   (`qwen3guard`). Unsafe content returns HTTP 500 "Blocked by the content-safety
-   guardrail: …" and the request stops here. The guardrail is fail-closed: while the guard
-   model cannot be reached, every request is blocked. See
-   [Guardrails](../customize/guardrails.md).
-3. Checks Redis cache (hit → return cached response, skip steps 4-6)
-4. Resolves model name to backend `api_base` (from DB: `store_model_in_db: true`)
-5. Forwards to the model endpoint
-6. On response: writes to Langfuse (async), caches in Valkey
+2. Checks Redis cache (hit → return cached response, skip steps 3-5)
+3. Resolves model name to backend `api_base` (from DB: `store_model_in_db: true`)
+4. Forwards to the model endpoint
+5. On response: writes to Langfuse (async), caches in Valkey
 
 ---
 
@@ -288,8 +280,7 @@ If the gateway isn't routable yet (e.g., EPP not configured), falls back to the 
 | File | Purpose |
 |------|---------|
 | `roles/litellm/tasks/install.yaml` | Deploys LiteLLM + Valkey subchart via Helm |
-| `roles/litellm/defaults/main.yaml` | Topology-aware sizing, cache config, guardrail settings |
-| `roles/litellm/tasks/register_guardrail.yaml` | Registers the content-safety guardrail with LiteLLM |
+| `roles/litellm/defaults/main.yaml` | Topology-aware sizing, cache config |
 | `charts/litellm-helm/` | Vendored chart with bitnami/valkey subchart |
 | `model_manager/mm/litellm.py` | Auto-registration with LiteLLM API |
 | `model_manager/mm/manifests.py` | LLMInferenceService manifest (gateway ref) |
@@ -301,8 +292,6 @@ If the gateway isn't routable yet (e.g., EPP not configured), falls back to the 
 | Failure | Behavior |
 |---------|----------|
 | Invalid virtual key | Rejected at LiteLLM (401), never reaches model |
-| Unsafe prompt (guardrail on) | Blocked at LiteLLM (500, "Blocked by the content-safety guardrail"), never reaches model |
-| Guard model down or not Ready (guardrail on) | Every request blocked (500) — the guardrail is fail-closed |
 | Model not registered in LiteLLM | LiteLLM returns 404 model not found |
 | ai-gateway down | LiteLLM returns 503, no inference |
 | EPP scheduler down | `failureMode: FailOpen` — routes to any available pod |

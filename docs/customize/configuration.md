@@ -43,10 +43,6 @@ No. The defaults deploy a working inference stack. Reach for this file when:
 | Use agentgateway instead of Envoy AI Gateway | `ai_gateway_provider: "agentgateway"` |
 | Authenticate API clients with LiteLLM virtual keys | `auth_type: "litellm_vkey"` |
 | Add LiteLLM alongside Keycloak JWT auth | `litellm_enabled: true` |
-| Turn the content-safety guardrail off (on with `litellm_vkey`) | `guardrails_enabled: false` |
-| Route by prompt complexity inside LiteLLM | `hybrid_router_enabled: true` |
-| Route with the vLLM Semantic Router | `vllm_sr_enabled: true` |
-| Apply changed LiteLLM settings to an installed release | `litellm_reconcile: true` |
 | Auto-deploy catalog models during install | `llm_services_deploy_models: true` |
 | Make an auto-deploy failure abort the install | `model_deploy_strict: true` |
 | Pin a component version | `kserve_version`, `litellm_version`, `envoy_ai_gateway_version` |
@@ -90,7 +86,6 @@ Every hostname defaults to a prefix on the platform's `base_domain_name`.
 | `inference_prefix` | `inference` | Prefix used when `inference_hostname` is unset |
 | `litellm_hostname` | `litellm.<base_domain_name>` | LiteLLM API (the model API with `auth_type: litellm_vkey`) |
 | `langfuse_hostname` | `langfuse.<base_domain_name>` | Langfuse UI |
-| `vllm_sr_dashboard_hostname` | `vllm-sr.<base_domain_name>` | vLLM Semantic Router dashboard (when enabled) |
 
 > [!NOTE]
 > The two auth modes serve on **different** hostnames. See
@@ -150,40 +145,6 @@ The LiteLLM master key is generated at install and stored in the `litellm-master
 secret in the `litellm` namespace. Langfuse's admin password comes from the
 `LANGFUSE_ADMIN_PASSWORD` environment variable, not from this file.
 
-An installed LiteLLM release is left as it is on later installs, except that one whose
-config lacks the guardrail's guard host allowlist is upgraded. `litellm_reconcile: true`
-upgrades it with the current settings — needed after changing the hybrid router or the
-sizing on a running stack.
-
-```yaml
-# litellm_reconcile: true       # upgrade an existing release with the current settings
-# guardrails_enabled: false     # content-safety guardrail; default: on with auth_type=litellm_vkey
-# guardrail_model: "qwen3guard" # guard model from the catalog
-```
-
-The guardrail screens every LiteLLM request with a guard model that llm_services deploys
-alongside the other models → [Guardrails](guardrails.md).
-
-## Optional routing
-
-Both are off by default and leave direct model calls unchanged.
-
-```yaml
-# Hybrid router: one virtual model in LiteLLM picks a model per prompt complexity tier.
-# hybrid_router_enabled: true
-# hybrid_router_tier_candidates:
-#   SIMPLE:  [qwen3-4b]
-#   COMPLEX: [qwen3-coder-30b]
-
-# vLLM Semantic Router (ai_gateway_provider: envoy only)
-# vllm_sr_enabled: true
-# vllm_sr_route_models: [qwen3-4b, qwen3-coder-30b]
-# vllm_sr_litellm_model_name: "semantic-router"   # with auth_type=litellm_vkey
-# vllm_sr_dashboard_enabled: true                 # vllm-sr.<base_domain_name>
-```
-
-Details → [Hybrid Router](hybrid-router.md), [vLLM Semantic Router](vllm-semantic-router.md).
-
 ## CPU policy
 
 A single switch controlling all CPU-pinning infrastructure. Dependent settings — NRI
@@ -231,7 +192,6 @@ Full detail → [CPU Pinning & NUMA](../reference/cpu_pinning.md).
 # llm_services_deploy_runtimes: true   # deploy namespace-scoped ServingRuntimes
 
 llm_services_deploy_models: false      # run the model auto-deploy phase
-# llm_services_autodeploy_models: []   # catalog models deployed whatever the line above says
 # model_deploy_strict: false           # true = an auto-deploy failure aborts the install
 # model_deploy_flags: ""               # extra flags for every auto-deploy invocation
 ```
@@ -241,13 +201,6 @@ llm_services_deploy_models: false      # run the model auto-deploy phase
 > `true`. It gates the whole auto-deploy phase, so flagging a model `autodeploy: true`
 > has no effect until you also set this to `true`. See
 > [Auto-deploy on install](catalog.md#auto-deploy-on-install).
-
-`llm_services_autodeploy_models` is for a solution layer that needs a model to be up — the
-agent toolkit sets its default model here. Those models, and the guardrail's guard model
-when the guardrail is on (deployed first), deploy even with `llm_services_deploy_models:
-false`. A name `env/<env>/models.yaml` lacks is taken from the shipped
-`model_manager/models.yaml`; a name neither has is reported — fatal for the guard model, or
-with `model_deploy_strict: true`.
 
 `llm_services_deploy_runtimes` deploys `files/runtimes/*.yaml` as namespace-scoped
 `ServingRuntime`s. These are needed for `InferenceService` CRs (OpenVINO);
@@ -285,7 +238,6 @@ Disabling NFD means those affinity rules cannot be satisfied.
 |----------|---------|
 | `HF_TOKEN` | Hugging Face token for gated models |
 | `MM_CONFIG` | Path to the model catalog (`models.yaml`) |
-| `MM_CHAT_TEMPLATES` | Directory a model's relative `chat_template_file` is read from (default `model_manager/chat-templates`) |
 | `MM_GLOBAL_CONFIG` | Path to the platform's `global_config.yaml` |
 | `MM_INFERENCE_HOSTNAME` | Override the resolved endpoint hostname in either auth mode |
 | `MM_INFERENCE_GATEWAY` / `MM_INFERENCE_GATEWAY_NS` | Gateway a model's routes attach to (default `ai-gateway` in `llm-inference`) |

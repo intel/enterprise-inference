@@ -24,12 +24,6 @@ litellm_run_as_user: 65534
 litellm_namespace: "litellm"
 litellm_valkey_tag: "9.1.2-alpine"              # valkey/valkey (official upstream image, Alpine for smaller footprint)
 
-# An existing release is left as it is, except that one whose config lacks the
-# guard host allowlist (guardrails_enabled) is upgraded. true runs the install
-# path on it too, upgrading the Helm release so changed settings (hybrid router,
-# sizing) reach the running proxy.
-litellm_reconcile: false
-
 # Publish LiteLLM on the platform gateway.
 # Foreign var (canonical owner: enterprise-ai-solutions gateway component flag;
 # envoy_gateway_enabled is its alias).
@@ -56,13 +50,6 @@ litellm_public_paths:
 litellm_allowed_namespaces:
   - "{{ gateway_namespace | default('envoy-gateway-system') }}"
   - "{{ litellm_namespace }}"
-# Let callers outside the mesh (for example agent sandboxes) reach LiteLLM's API port
-# from the cluster pod network: their plaintext traffic carries no namespace identity
-# to match. A solution layer turns this on; callers still need a LiteLLM key.
-litellm_allow_pod_network: false
-# Source address ranges (CIDRs) allowed in addition to the namespaces above. Default:
-# the pod network when litellm_allow_pod_network is on, otherwise none.
-litellm_allowed_source_cidrs: "{{ [kubernetes_cluster_cidr | default('10.233.64.0/18')] if litellm_allow_pod_network | bool else [] }}"
 
 # Edge protection on the LiteLLM API route. Response headers on every reply
 # (OWASP secure-headers baseline; HSTS keeps keys off plaintext :80).
@@ -77,11 +64,6 @@ litellm_rate_limit_enabled: true
 litellm_rate_limit_requests: 600                  # requests per unit, per client IP
 litellm_rate_limit_unit: "Minute"                 # Second | Minute | Hour | Day
 litellm_rate_limit_client_header: "x-forwarded-for"
-# Request timeout on the API route. A route-level policy (the rate limit above)
-# replaces the gateway-wide default timeout, so the route states its own, or
-# Envoy's 15s default cuts long generations off (504).
-# Foreign var (canonical owner: enterprise-ai-solutions gateway role).
-litellm_route_timeout: "{{ gateway_request_timeout | default('600s') }}"
 
 # PostgreSQL — stores virtual keys, spend logs, team/org data
 litellm_db_name: "litellm"
@@ -100,16 +82,8 @@ litellm_ui_password: "{{ lookup('password', '/dev/null length=32 chars=ascii_let
 litellm_redis_password: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
 
 # Model routing — models are managed via LiteLLM UI/API (store_model_in_db: true)
-# KServe gateway URL used when adding models via the UI: the in-cluster AI Gateway
-# data plane the per-model routes attach to, not the Envoy Gateway control plane.
-# Envoy AI Gateway runs it beside the Envoy Gateway controller (envoy_gateway_namespace,
-# exported by the platform gateway); agentgateway in its gateway namespace
-# (ai_gateway_namespace, the model namespace by default).
-litellm_kserve_gateway_url: >-
-  http://{{ ai_gateway_service_name | default('ai-gateway') }}.{{
-  (envoy_gateway_namespace | default('envoy-gateway-system'))
-  if (ai_gateway_provider | default('envoy')) == 'envoy'
-  else (ai_gateway_namespace | default(kserve_llmisvc_namespace | default('llm-inference'))) }}.svc.cluster.local
+# KServe gateway URL used when adding models via the UI
+litellm_kserve_gateway_url: "http://envoy-gateway.envoy-gateway-system.svc.cluster.local"
 litellm_kserve_namespace: "llm-inference"
 
 # Redis cache — reduces latency for repeated prompts
@@ -165,71 +139,3 @@ litellm_multi_node_resources:
 # Trace to Langfuse unless it is turned off (langfuse_enabled: false). The
 # langfuse role supplies host and keys and re-wires this when toggled later.
 _litellm_langfuse: "{{ langfuse_enabled | default(true) | bool }}"
-
-# --- Content-safety guardrail ---
-# A LiteLLM custom_code guardrail (Qwen3Guard) that screens every request pre-call
-# against a small guard model (fail-closed). llm_services deploys the guard model
-# (guardrail_model) whenever this is on. On by default with auth_type: litellm_vkey,
-# where LiteLLM is the only way to the models.
-guardrails_enabled: "{{ (auth_type | default('jwt')) == 'litellm_vkey' }}"
-guardrail_name: "content_safety"
-# The gateway/vLLM served model name (catalog id), NOT the HF repo — the endpoint
-# rejects the repo id (Qwen/Qwen3Guard-Gen-0.6B) with a 404.
-guardrail_model: "qwen3guard"
-guardrail_guard_namespace: "{{ llm_services_namespace | default('llm-inference') }}"
-# Guard endpoint — the guard model reached directly through the in-cluster AI gateway
-# data plane (litellm_kserve_gateway_url); the route prefix is the model's own
-# namespace (/<model-ns>/<model>/v1). Not via LiteLLM itself (would recurse the
-# guardrail). guardrail_service_url is accepted as an alias.
-guard_service_url: >-
-  {{ guardrail_service_url | default(litellm_kserve_gateway_url ~ '/' ~ guardrail_guard_namespace
-     ~ '/' ~ guardrail_model ~ '/v1/chat/completions', true) }}
-guard_max_tokens: 32
-guard_timeout: 60
-guard_block_on_controversial: false
-guardrail_litellm_namespace: "{{ litellm_namespace | default('litellm') }}"
-guardrail_litellm_deployment: "litellm"
-guardrail_litellm_container: "litellm"
-# LiteLLM refuses guardrail HTTP calls to cluster-internal addresses unless the
-# host is allowlisted, so exactly the guard host (and host:port when the URL has a
-# port) is allowed while the guardrail is on.
-_litellm_guard_hosts: >-
-  {%- set u = guard_service_url | urlsplit -%}
-  {{ ([u.hostname] + ([u.hostname ~ ':' ~ u.port] if u.port else []))
-     if guardrails_enabled | bool else [] }}
-
-# --- Hybrid Router (optional) ---
-# A LiteLLM custom router (monkey-patches litellm.router to add an
-# `auto_router/hybrid_router` prefix) that classifies prompt complexity and uses
-# an online multi-armed bandit to pick the cheapest capable model per tier. The
-# router package is mounted from a ConfigMap into the config dir (next to
-# config.yaml) and wired via litellm_settings.callbacks. Off by default (opt-in);
-# clients reach it through LiteLLM. Uses LiteLLM's Router.async_pre_routing_hook /
-# PreRoutingHookResponse. Applied at install; on an existing release only with
-# litellm_reconcile: true.
-hybrid_router_enabled: false
-# LiteLLM resolves `callbacks` modules by file path relative to the config-file
-# directory, so the router code is mounted here (where config.yaml lives).
-hybrid_router_mount_dir: "/etc/litellm"
-hybrid_router_model_name: "hybrid-router"          # client-facing virtual model name
-# Default and tier targets follow the model a solution layer auto-deploys
-# (llm_services_autodeploy_models, e.g. the agent toolkit's default); qwen3-4b otherwise.
-hybrid_router_default_model: "{{ (llm_services_autodeploy_models | default([]) | first) | default('qwen3-4b', true) }}"
-hybrid_router_bandit: "thompson"
-hybrid_router_delta: 0.1
-hybrid_router_epsilon: 0.1
-hybrid_router_target_tpt: 1.0
-hybrid_router_quality_weight: 0.0
-# Candidate models per complexity tier — use your DEPLOYED served model names.
-hybrid_router_tier_candidates:
-  SIMPLE: ["{{ hybrid_router_default_model }}"]
-  MEDIUM: ["{{ hybrid_router_default_model }}"]
-  COMPLEX: ["{{ hybrid_router_default_model }}"]
-  REASONING: ["{{ hybrid_router_default_model }}"]
-hybrid_router_tier_boundaries:
-  simple_medium: 0.15
-  medium_complex: 0.35
-  complex_reasoning: 0.60
-# LiteLLM base routing strategy used when the hybrid router is enabled (the bandit
-# runs pre-routing; this is the underlying deployment strategy).
-hybrid_router_base_strategy: "usage-based-routing-v2"

@@ -60,7 +60,6 @@
     namespace: "{{ litellm_namespace }}"
   loop:
     - litellm-credentials
-    - litellm-router-code
   failed_when: false
 
 - name: "litellm | teardown | Remove Secrets"

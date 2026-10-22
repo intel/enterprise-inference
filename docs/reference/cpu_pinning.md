@@ -80,12 +80,6 @@ server-side and skips both pre-flight and apply when nothing changed, so a runni
 model's own cores are never counted against it. Set `MM_FORCE_REDEPLOY=1` to force a full
 re-apply.
 
-### Sizing a model to a NUMA node
-
-A catalog model with `cpu: auto` takes its CPU from the same balloon data: the free
-physical cores of one NUMA node per TP rank, on the smallest schedulable node. A deployed
-model keeps the CPU it has. See [Model Catalog](../customize/catalog.md#cpu-auto).
-
 ### Inspecting what got pinned
 
 A helper script reports the actual CPU assignment for running vLLM pods — pod, balloon,

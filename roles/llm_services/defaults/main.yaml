@@ -78,11 +78,6 @@ llm_services_deploy_runtimes: true
 # Override via: ./es_auto_installer.sh install inference --skip-models
 llm_services_deploy_models: true
 
-# Catalog models to deploy on install regardless of llm_services_deploy_models /
-# `autodeploy:` — set by a solution layer that needs a default model (the agent
-# toolkit sets its default). Empty here, so inference-only installs deploy none.
-llm_services_autodeploy_models: []
-
 # Extra flags appended to each `model-manager deploy <name> --wait` invocation.
 # Examples:
 #   model_deploy_flags: "--wait-timeout 1800"   # allow longer for large models
@@ -95,17 +90,6 @@ model_deploy_flags: ""
 # models can be deployed manually afterward. Set true to make any auto-deploy
 # failure fatal to the install.
 model_deploy_strict: false
-
-# In-cluster AI Gateway data plane LiteLLM calls the models through
-# (MM_LITELLM_KSERVE_URL): the ai-gateway Service beside the Envoy Gateway
-# controller (envoy_gateway_namespace, exported by the platform gateway), or in
-# the agentgateway gateway namespace (ai_gateway_namespace, the model namespace
-# by default).
-_llm_ai_gateway_url: >-
-  http://{{ ai_gateway_service_name | default('ai-gateway') }}.{{
-  (envoy_gateway_namespace | default('envoy-gateway-system'))
-  if (ai_gateway_provider | default('envoy')) == 'envoy'
-  else (ai_gateway_namespace | default(kserve_llmisvc_namespace | default('llm-inference'))) }}.svc.cluster.local
 
 # =============================================================================
 # Inference engine observability

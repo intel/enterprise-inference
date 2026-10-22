@@ -134,26 +134,6 @@
   set_fact:
     inference_extension_dir: "{{ playbook_dir }}/../ext/enterprise.ai-inference"
 
-# The content-safety guardrail (litellm role) is registered default-on and
-# fail-closed, so its guard model must be served whenever the guardrail is on —
-# otherwise every LiteLLM request is blocked. A failed guard deploy is fatal for
-# the same reason, whatever model_deploy_strict says. Same default as the litellm
-# role's guardrails_enabled. It deploys first: it is small, fixed-size and
-# required, and models with `cpu: auto` then size themselves around it.
-- name: "llm_services | Deploy guard model for the content-safety guardrail"
-  ansible.builtin.include_tasks: deploy_models.yaml
-  vars:
-    _mm_only_models: ["{{ guardrail_model | default('qwen3guard') }}"]
-    _mm_strict: true
-  when: guardrails_enabled | default((auth_type | default('jwt')) == 'litellm_vkey') | bool
-
 - name: "llm_services | Deploy default models"
   include_tasks: deploy_models.yaml
   when: llm_services_deploy_models | default(true) | bool
-
-# Default model(s) requested by a solution layer (llm_services_autodeploy_models).
-- name: "llm_services | Deploy solution-requested default models"
-  ansible.builtin.include_tasks: deploy_models.yaml
-  vars:
-    _mm_only_models: "{{ llm_services_autodeploy_models }}"
-  when: llm_services_autodeploy_models | default([]) | length > 0

@@ -47,15 +47,13 @@ runtimes:
     versions:
       "0.24.0":
         image: "docker.io/vllm/vllm-openai-cpu:v0.24.0"
-      "0.28.0":                  # only models that pin it use it (qwen3-6-35b-a3b)
-        image: "docker.io/vllm/vllm-openai-cpu:v0.28.0"
       "0.19.1":
         image: "docker.io/vllm/vllm-openai-cpu:v0.19.1"
         # optional env:/args: DELTAS layer on top of the common env and category args
     categories:
       llm:    { defaults: { cpu: 8,  memory: "16Gi", kv_cache_gb: 8 } }
-      embed:  { defaults: { cpu: 6,  memory: "16Gi", kv_cache_gb: 16 } }
-      rerank: { defaults: { cpu: 6,  memory: "16Gi", kv_cache_gb: 16 } }
+      embed:  { defaults: { cpu: 6,  memory: "12Gi" } }
+      rerank: { defaults: { cpu: 6,  memory: "12Gi" } }
       vlm:    { defaults: { cpu: 16, memory: "48Gi", kv_cache_gb: 8 } }
 ```
 
@@ -72,9 +70,8 @@ against it with `--server-version`, then promote it by moving `default_version`.
 per-category from that category's `kv_cache_gb`, so each workload class sizes its CPU KV
 cache appropriately.
 
-`embed` and `rerank` do no autoregressive generation, but vLLM CPU still sizes a KV cache
-at startup: without the variable it needs most of the NUMA node's memory free, and crashes
-when an LLM already runs on that node. So they set it too, from `kv_cache_gb: 16`.
+`embed` and `rerank` do no autoregressive generation, so they set no `kv_cache_gb` and
+the variable is omitted entirely — vLLM uses its own default.
 
 ### Plumbing
 

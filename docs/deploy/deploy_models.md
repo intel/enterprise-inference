@@ -48,7 +48,7 @@ apply. Set `MM_FORCE_REDEPLOY=1` to force a full re-apply regardless.
 | `--as <name>` | Deploy a catalog model under a different name — run several variants at once |
 | `--server <name>` | Which engine serves the model: `vllm` (default) or `openvino` (alias: `--runtime`) |
 | `--server-version <v>` | Which version of that engine to use — see [below](#pick-an-engine-and-version) |
-| `--cpu N` | Number of CPU cores to give the model. `--cpu auto` sizes it to a NUMA node — see [CPU auto](../customize/catalog.md#cpu-auto) |
+| `--cpu N` | Number of CPU cores to give the model |
 | `--memory NGi` | Memory limit, e.g. `32Gi` |
 | `--replicas N` | How many copies to run (default: 1) |
 | `--tp N` | Split one model across N CPU sockets for more throughput (advanced) |

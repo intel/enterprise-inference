@@ -193,14 +193,6 @@ def effective_cpu_request(cpu: int, node: str = "") -> int:
     return cpu
 
 
-def model_cpu(effective: int) -> int:
-    """Inverse of effective_cpu_request(): the model cpu whose container
-    request is `effective` balloon CPUs."""
-    if hyperthreads_hidden():
-        return effective // 2
-    return effective
-
-
 # ── Annotations ──────────────────────────────────────────────────────────────
 
 def build_annotations(
@@ -564,31 +556,6 @@ def _node_capacity_report(
         f"(pool={pool}, in-use={in_use}, per-NUMA free={usable})"
     )
     return (fits, slots, detail)
-
-
-def auto_cpu(tp: int, node: str = "") -> int:
-    """CPU for a `cpu: auto` model: the free balloon CPUs of `tp` NUMA nodes.
-
-    NUMA-aware sizing: a TP=1 model gets one NUMA node's worth of physical
-    cores, minus the reserved seed. Free (not total) CPUs, so models already
-    on the node still fit; the smallest schedulable node decides, so the pod
-    fits wherever it lands. Returned as the model's cpu (see model_cpu), so
-    the request it renders fits the pool. 0 = nothing free.
-    """
-    nodes = [node] if node else _schedulable_nri_nodes(tp)
-    sizes: list[int] = []
-    for n in nodes:
-        in_use = _balloon_pods_cpu_on_node(n)
-        caps = _per_numa_capacity(n)
-        if not caps:
-            sizes.append(max(0, _node_balloon_pool(n) - in_use))
-            continue
-        reserved_per_numa = _reserved_cpus_count(n) // len(caps)
-        per_numa_used = in_use // len(caps)
-        usable = sorted((max(0, c - reserved_per_numa - per_numa_used) for c in caps), reverse=True)
-        span = max(1, min(tp, len(usable)))
-        sizes.append(usable[span - 1] * span)
-    return model_cpu(min(sizes)) if sizes else 0
 
 
 # ── Pre-flight validation ───────────────────────────────────────────────────
