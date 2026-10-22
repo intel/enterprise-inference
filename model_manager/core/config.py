@@ -158,6 +158,7 @@ class Model:
     cpu: str = ""
     memory: str = ""
     replicas: str = "1"
+    gpus: str = ""                            # per-pod GPU count; "" for CPU runtimes
     node: str = ""
     chat_template: str = ""
     args: list = field(default_factory=list)
@@ -167,6 +168,17 @@ class Model:
     @property
     def cat(self) -> dict:
         return pick(pick(self.rt, "categories", {}), self.category or "llm", {})
+
+    @property
+    def gpu(self) -> bool:
+        """A device: gpu runtime (vllm-cuda): accelerator limits, /dev/shm, toleration, no CPU pinning."""
+        return text(pick(self.rt, "device", "cpu")) == "gpu"
+
+    @property
+    def accel_resource(self) -> str:
+        """The extended resource the cluster advertises (MM_ACCEL_RESOURCE); the runtime's
+        accelerator_resource is only the default a --dry-run preview renders with."""
+        return env("MM_ACCEL_RESOURCE", text(pick(self.rt, "accelerator_resource")))
 
     def check(self) -> None:
         """Reject names/ids that are not safe to embed in manifests and the download script."""
@@ -210,6 +222,8 @@ def resolve(catalog: Catalog, target: str, o: Any) -> Model:
     m.cpu = o.cpu or m.cpu or text(pick(defaults, "cpu", 8))
     m.memory = o.memory or m.memory or text(pick(defaults, "memory", "16Gi"))
     m.replicas = o.replicas or m.replicas
+    if m.gpu:  # --gpus > models.yaml gpus > category defaults.gpus > 1
+        m.gpus = o.gpus or m.gpus or text(pick(defaults, "gpus", 1))
     m.node = o.node or m.node
     if o.routing:
         m.routing = o.routing
@@ -235,7 +249,7 @@ def _from_catalog(catalog: Catalog, name: str, o: Any) -> Model:
               "as a block scalar.")
     m = Model(name=name, namespace=text(pick(e, "namespace", catalog.namespace)), kind=text(pick(e, "kind")),
               model_id=text(pick(e, "model_id")), draft_model_id=text(pick(e, "draft_model_id")),
-              cpu=text(pick(e, "cpu")), memory=text(pick(e, "memory")),
+              cpu=text(pick(e, "cpu")), memory=text(pick(e, "memory")), gpus=text(pick(e, "gpus")),
               replicas=text(pick(e, "replicas", catalog.replicas)), category=text(pick(e, "category")),
               image=text(pick(e, "image")), node=text(pick(e, "node")), routing=text(pick(e, "routing")),
               chat_template=text(pick(e, "chat_template")).rstrip("\n"),  # as legacy $(jq) did

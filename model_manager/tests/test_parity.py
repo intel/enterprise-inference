@@ -6,6 +6,10 @@ every mutating kubectl call with the manifest it applied. Regenerate them with
 launcher end to end against fake kubectl/curl (tests/fakebin). Intended changes
 in behaviour are declared per case as `deviations`: (regex on the legacy text,
 replacement).
+
+The gpu-* cases come from the legacy GPU branch (DCAIDSE8-2342, commit 0d38ae1),
+which served Llama 3.1 70B on 8x NVIDIA B300 and reproduces every other golden
+here; regenerate them from that branch, with bash 5.2's patsub_replacement off.
 """
 from __future__ import annotations
 
@@ -50,6 +54,26 @@ NO_LITELLM_URL = (r"^\[WARN \]  AI Gateway service 'ai-gateway' not found.*\n", 
 HELP_SVC_NS = (r"^(  MM_INFERENCE_HOSTNAME .*\n)",
                r"\1  MM_INFERENCE_GATEWAY_SVC_NS\n                        Namespace of the AI Gateway Service LiteLLM calls\n"
                r"                        (default: MM_INFERENCE_GATEWAY_NS, else envoy-gateway-system)\n")
+# --help documents --gpus and MM_ACCEL_RESOURCE (GPU runtimes), which are new.
+HELP_GPU = [(r"^(  --tp N .*\n)",
+             r"\1  --gpus N             GPUs per pod (device: gpu runtimes, e.g. vllm-cuda); default --tensor-parallel-size\n"),
+            (r"^(  MM_CONFIG .*\n)",
+             r"\1  MM_ACCEL_RESOURCE     Accelerator extended resource the cluster advertises (e.g. nvidia.com/gpu).\n"
+             r"                            Required to deploy a device: gpu runtime (vllm-cuda); ai-solutions sets\n"
+             r"                            it in rack-scale mode only\n")]
+# The catalog's GPU examples, its last entries, are undeployed too; the legacy catalog had none.
+GPU_MODELS = ("qwen3-0-6b-cuda", "llama-3-1-70b-instruct-cuda")
+UNDEPLOY_GPU_MODELS = [
+    (r"^(?=--- stderr\n)", "".join(
+        f"[INFO ]  Undeploying {n}\n[INFO ]  Waiting for {n} pods to terminate (timeout: 180s)...\n"
+        f"[  OK ]  {n} undeployed (all pods terminated, CPUs released)\n" for n in GPU_MODELS)),
+    (r"\Z", "".join(
+        f"$ kubectl delete LLMInferenceService {n} -n llm-inference --ignore-not-found\n"
+        f"$ kubectl delete configmap {n}-chat-template -n llm-inference --ignore-not-found\n"
+        f"$ kubectl delete httproute aigw-{n} -n llm-inference --ignore-not-found\n" for n in GPU_MODELS))]
+GPU = {"MM_ACCEL_RESOURCE": "nvidia.com/gpu"}
+LLAMA_GPU_READY = [[r"get LLMInferenceService llama-3-1-70b-instruct-cuda -n llm-inference -o json$", 0,
+                    _ready("MainWorkloadReady")]]
 
 
 def nri_node(in_use: int) -> list:
@@ -126,10 +150,18 @@ CASES = [
          env=BE, catalog=FIXTURE),
     case("fx-bad-env", "deploy", "badenv", "--dry-run", env=BE, catalog=FIXTURE),
     case("fx-bad-template", "deploy", "badtpl", "--dry-run", env=BE, catalog=FIXTURE),
+    # GPU runtime (vllm-cuda). gpu-llama-70b is the manifest that served on B300.
+    case("gpu-llama-70b", "deploy", "llama-3-1-70b-instruct-cuda", "--dry-run", env=GPU),
+    case("gpu-dry-run-ungated", "deploy", "qwen3-0-6b-cuda", "--dry-run"),
+    case("gpu-count-node", "deploy", "qwen3-0-6b-cuda", "--gpus", "2", "--node", "w1", "--dry-run", env={**GPU, **NRI}),
+    case("gpu-explicit-tp", "deploy", "llama-3-1-70b-instruct-cuda", "--tp", "4", "--dry-run", env=GPU),
+    case("gpu-flag-ignored-on-cpu", "deploy", "qwen3-0-6b", "--gpus", "2", "--dry-run", env=BE),
+    case("gpu-gate-refuses", "deploy", "qwen3-0-6b-cuda"),
+    case("gpu-bad-count", "deploy", "qwen3-0-6b-cuda", "--gpus", "x", env=GPU),
     # CLI surface and validation errors.
-    case("no-args", deviations=[HELP_SVC_NS]),
-    case("help", "--help", deviations=[HELP_SVC_NS]),
-    case("help-command", "help", deviations=[HELP_SVC_NS]),
+    case("no-args", deviations=[HELP_SVC_NS, *HELP_GPU]),
+    case("help", "--help", deviations=[HELP_SVC_NS, *HELP_GPU]),
+    case("help-command", "help", deviations=[HELP_SVC_NS, *HELP_GPU]),
     case("version", "version"),
     case("version-flag", "-v"),
     case("unknown-option", "deploy", "qwen3-0-6b", "--bogus"),
@@ -167,13 +199,16 @@ CASES = [
          deviations=[NO_LITELLM_URL]),
     case("kubelet-static-preflight-blocks", "deploy", "llama3-8b-awq", env={"MM_CPU_POLICY": "kubelet-static"},
          k8s=STATIC + SMALL_NODES),
+    case("gpu-deploy-wait", "deploy", "llama-3-1-70b-instruct-cuda", "--wait", env=GPU,
+         k8s=DOWNLOAD + POOL + LLAMA_GPU_READY, deviations=[NO_LITELLM_URL]),
     case("undeploy-embed", "undeploy", "bge-base-en"),
     case("undeploy-ovms", "undeploy", "qwen3-5-2b-ovms"),
     case("undeploy-live-alias", "undeploy", "qwen-alt", k8s=[
         [r"get LLMInferenceService qwen-alt -n llm-inference -o jsonpath", 0, "llm-inference"],
         [r"get httproute direct-qwen-alt", 0, ""]]),
     case("undeploy-missing", "undeploy", "ghost"),
-    case("undeploy-all-agentgateway", "undeploy", "all", "--wait", env={"MM_AI_GATEWAY_PROVIDER": "agentgateway"}),
+    case("undeploy-all-agentgateway", "undeploy", "all", "--wait", env={"MM_AI_GATEWAY_PROVIDER": "agentgateway"},
+         deviations=UNDEPLOY_GPU_MODELS),
 ]
 
 

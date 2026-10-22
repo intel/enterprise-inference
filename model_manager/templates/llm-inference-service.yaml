@@ -26,10 +26,10 @@ spec:
 {{CHAT_TEMPLATE_MOUNT}}        resources:
           requests:
             cpu: "{{CPU}}"
-            memory: {{MEMORY}}
+            memory: {{MEMORY}}{{GPU_RESOURCE}}
           limits:
             cpu: "{{CPU}}"
-            memory: {{MEMORY}}
+            memory: {{MEMORY}}{{GPU_RESOURCE}}
         startupProbe:
           httpGet:
             path: /health
@@ -63,4 +63,4 @@ spec:
     securityContext:
       seccompProfile:
         type: RuntimeDefault
-{{CHAT_TEMPLATE_VOLUME}}{{AFFINITY}}
+{{CHAT_TEMPLATE_VOLUME}}{{AFFINITY}}{{TOLERATIONS}}

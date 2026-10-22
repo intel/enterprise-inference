@@ -52,6 +52,7 @@ apply. Set `MM_FORCE_REDEPLOY=1` to force a full re-apply regardless.
 | `--memory NGi` | Memory limit, e.g. `32Gi` |
 | `--replicas N` | How many copies to run (default: 1) |
 | `--tp N` | Split one model across N CPU sockets for more throughput (advanced) |
+| `--gpus N` | GPUs per pod for a GPU engine (`vllm-cuda`); also the default `--tp` — see [below](#deploy-on-gpu-nodes-rack-scale) |
 | `--category <cat>` | Force the workload type: `llm`, `embed`, `rerank`, or `vlm` |
 | `--node <name>` | Pin the model to a specific cluster node |
 | `--cpu-policy <p>` | Override the CPU-pinning policy for this model: `nri-balloons`, `kubelet-static`, or `best-effort`. Must match how the cluster was installed — see [CPU Pinning & NUMA](../reference/cpu_pinning.md) |
@@ -83,6 +84,56 @@ engine. This lets you upgrade deliberately, or A/B two versions side by side.
 The catalog decides which versions a model is *allowed* to use — asking for one that
 isn't listed fails with a clear message rather than deploying something untested. See
 [Model Catalog](../customize/catalog.md#choose-which-server-and-version-a-model-may-use).
+
+## Deploy on GPU nodes (rack-scale)
+
+The catalog ships a GPU engine, `vllm-cuda`, alongside the default CPU `vllm`.
+A model runs on GPU by selecting that runtime and, optionally, a GPU count:
+
+```yaml
+- name: llama-3-1-70b-instruct-cuda
+  model_id: meta-llama/Llama-3.1-70B-Instruct
+  category: llm
+  runtime: vllm-cuda
+  gpus: 8          # per pod; also the default --tensor-parallel-size
+  memory: 128Gi    # host RAM for weight loading — not the accelerator
+```
+
+What `vllm-cuda` changes in the rendered manifest, relative to CPU `vllm`:
+
+- `resources.requests` and `.limits` gain `nvidia.com/gpu: "<gpus>"` — the
+  scheduler only places the pod on a node that advertises that resource.
+- A `nvidia.com/gpu` **toleration** (`NoSchedule`), so tainted GPU nodes accept it.
+- A memory-backed **`/dev/shm`** volume (`shm_size`, default 10Gi) — required
+  by NCCL for tensor parallelism.
+- `--tensor-parallel-size <gpus>` is injected when `gpus > 1` and no TP flag
+  was given.
+- **No CPU pinning.** NRI balloon / kubelet-static annotations, their
+  pre-flight checks, and the AMX node requirement are all skipped: they are
+  Xeon placement controls and do not apply to a GPU pod.
+- A *preferred* (not required) node affinity for `gpu-vendor=<vendor>`, the
+  label the rack-scale installer applies. On clusters without that label the
+  resource request alone decides placement.
+
+### The gate
+
+A `device: gpu` runtime is **refused unless `MM_ACCEL_RESOURCE` is set** to the
+extended resource the cluster advertises (e.g. `nvidia.com/gpu`). Intel
+Enterprise AI Solutions sets it automatically when
+`rack_scale_enabled: true` and the rack-profile declares an `accelerator:`;
+on a standard CPU install it is empty and GPU models cannot be deployed by
+accident. For a manual CLI deploy on a GPU cluster you already trust:
+
+```bash
+MM_ACCEL_RESOURCE=nvidia.com/gpu ./model-manager deploy llama-3-1-70b-instruct-cuda --wait
+./model-manager deploy qwen3-0-6b-cuda --dry-run        # previews are not gated
+./model-manager deploy qwen3-0-6b-cuda --gpus 2         # override the catalog count
+```
+
+Pod security is unchanged: the upstream `vllm/vllm-openai` image runs under the
+same `runAsNonRoot` / `drop: ALL` context as the CPU image, with its caches
+redirected to `/tmp` via the runtime's env (`HOME`, `XDG_CACHE_HOME`,
+`TRITON_CACHE_DIR`, `TORCHINDUCTOR_CACHE_DIR`, `FLASHINFER_WORKSPACE_BASE`).
 
 ## Ad-hoc deploy from Hugging Face
 

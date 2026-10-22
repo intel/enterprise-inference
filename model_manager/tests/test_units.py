@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import cli, config, download, k8s, nri_policy, policy, routing  # noqa: E402
 from core.config import Catalog, Model  # noqa: E402
 from core.policy import _whole_cpus  # noqa: E402
-from core.renderer import dedupe_args, engine_args  # noqa: E402
+from core.renderer import dedupe_args, engine_args, gpu_vendor  # noqa: E402
 
 
 @pytest.fixture
@@ -132,7 +132,7 @@ def test_chat_template_file_absolute_path(tmp_path):
     assert m.chat_template == "{{ messages }}"  # used like inline Jinja, trailing newlines dropped
 
 
-@pytest.mark.parametrize("flag", ["--tp", "--replicas", "--wait-timeout"])
+@pytest.mark.parametrize("flag", ["--tp", "--replicas", "--wait-timeout", "--gpus"])
 def test_zero_counts_rejected(flag):
     with pytest.raises(SystemExit):
         cli.parse_args(["deploy", "m", flag, "0"])
@@ -234,3 +234,49 @@ def test_litellm_endpoint_is_unified(monkeypatch, tmp_path, capsys, routing_mode
     monkeypatch.setattr(k8s, "out", lambda *a: "")
     routing.print_endpoints(Model(name="m", namespace="n", kind="LLMInferenceService"))
     assert f"Endpoint: {want}" in capsys.readouterr().out
+
+
+def test_gpu_tp_defaults_to_gpu_count():
+    assert cli._engine_cli_args(cli.Options(), 8) == (["--tensor-parallel-size", "8"], 8)
+    assert cli._engine_cli_args(cli.Options(), 1) == ([], 1)
+    assert cli._engine_cli_args(cli.Options(tp="4"), 8) == (["--tensor-parallel-size", "4"], 4)
+
+
+@pytest.mark.parametrize("resource, vendor", [("nvidia.com/gpu", "nvidia"), ("gpu.intel.com/xe", "intel"),
+                                              ("habana.ai/gaudi", "intel"), ("amd.com/gpu", "amd"), ("", ""),
+                                              ("example.com/fpga", ""), ("nvidia.com", "")])
+def test_gpu_vendor_label(resource, vendor):
+    assert gpu_vendor(resource) == vendor
+
+
+def test_accel_resource_prefers_cluster(monkeypatch):
+    m = Model(name="m", namespace="n", rt={"device": "gpu", "accelerator_resource": "nvidia.com/gpu"})
+    monkeypatch.delenv("MM_ACCEL_RESOURCE", raising=False)
+    assert m.gpu and m.accel_resource == "nvidia.com/gpu"  # --dry-run preview default
+    monkeypatch.setenv("MM_ACCEL_RESOURCE", "nvidia.com/mig-1g.10gb")
+    assert m.accel_resource == "nvidia.com/mig-1g.10gb"
+    assert not Model(name="m", namespace="n", rt={}).gpu
+
+
+@pytest.mark.parametrize("gpus", ["0", "two", ""])
+def test_invalid_catalog_gpu_count_refused(monkeypatch, gpus):
+    # --gpus is checked by the parser; a catalog or category value only reaches the gate.
+    monkeypatch.setenv("MM_ACCEL_RESOURCE", "nvidia.com/gpu")
+    m = Model(name="m", namespace="n", runtime="vllm-cuda", rt={"device": "gpu"}, gpus=gpus)
+    with pytest.raises(SystemExit):
+        cli._gpu_gate(m, dry_run=True)
+
+
+def test_gpu_gate_is_inert_on_cpu(monkeypatch):
+    monkeypatch.delenv("MM_ACCEL_RESOURCE", raising=False)
+    cli._gpu_gate(Model(name="m", namespace="n", runtime="vllm", rt={"device": "cpu"}), dry_run=False)
+
+
+def test_gpu_resolution_precedence(monkeypatch):
+    monkeypatch.setenv("MM_CONFIG", str(cli.MM_DIR / "models.yaml"))
+    catalog = Catalog.load()
+    resolve = lambda name, **o: config.resolve(catalog, name, cli.Options(**o))  # noqa: E731
+    assert resolve("llama-3-1-70b-instruct-cuda").gpus == "8"            # models.yaml gpus
+    assert resolve("llama-3-1-70b-instruct-cuda", gpus="2").gpus == "2"  # --gpus wins
+    assert resolve("qwen3-0-6b", gpus="2").gpus == ""                    # CPU runtime: never set
+    assert resolve("", id="org/m", server="vllm-cuda", category="llm").gpus == "1"  # category default

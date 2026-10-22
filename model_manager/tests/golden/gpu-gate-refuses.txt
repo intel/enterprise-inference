@@ -1,0 +1,5 @@
+# rc: 1
+--- stdout
+--- stderr
+[ERROR]  Runtime 'vllm-cuda' targets a GPU (device: gpu) but no accelerator resource is enabled (MM_ACCEL_RESOURCE is empty). In Intel Enterprise AI Solutions this is set automatically when rack_scale_enabled=true and rack-profile.yaml declares an accelerator: on at least one node. To deploy manually on a cluster you trust: MM_ACCEL_RESOURCE=nvidia.com/gpu ./model-manager deploy qwen3-0-6b-cuda
+--- kubectl
