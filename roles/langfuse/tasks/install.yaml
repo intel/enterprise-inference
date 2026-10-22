@@ -251,7 +251,7 @@
         repo_url: "{{ langfuse_helm_repo }}"
       register: _langfuse_helm_repo
       until: _langfuse_helm_repo is succeeded
-      retries: "{{ helm_retries | default(5) }}"
+      retries: "{{ helm_retries | default(3) }}"
       delay: 15
 
     - name: "langfuse | Install via Helm"
@@ -461,7 +461,7 @@
     # ── Fix failed Prisma migrations (Langfuse bug: some migrations not idempotent on empty DB)
       register: _langfuse_helm
       until: _langfuse_helm is succeeded
-      retries: "{{ helm_retries | default(5) }}"
+      retries: "{{ helm_retries | default(3) }}"
       delay: 15
     - name: "langfuse | Wait for initial migration attempt (45s)"
       ansible.builtin.pause:
