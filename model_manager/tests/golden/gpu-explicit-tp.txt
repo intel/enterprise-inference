@@ -1,0 +1,130 @@
+# rc: 0
+--- stdout
+[INFO ]  Deploying llama-3-1-70b-instruct-cuda (LLMInferenceService)
+[INFO ]    Runtime: vllm-cuda @ 0.28.0 | Category: llm | Routing: epp
+[INFO ]    CPU: 8 | Memory: 128Gi | Replicas: 1
+[INFO ]    GPUs: 8 x nvidia.com/gpu
+[INFO ]    CPU policy: n/a (GPU runtime — no CPU pinning)
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: llama-3-1-70b-instruct-cuda
+  namespace: llm-inference
+  labels:
+    app.kubernetes.io/name: llama-3-1-70b-instruct-cuda
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  model:
+    uri: pvc://model-store/llama-3-1-70b-instruct-cuda
+  replicas: 1
+  router:
+    gateway:
+      refs:
+        - name: ai-gateway
+          namespace: llm-inference
+    route: {}
+    scheduler: {}
+  template:
+    containers:
+      - name: main
+        image: docker.io/vllm/vllm-openai:v0.28.0
+        args: 
+        - "--dtype"
+        - "bfloat16"
+        - "--max-num-seqs"
+        - "256"
+        - "--enable-prefix-caching"
+        - "--max-model-len"
+        - "131072"
+        - "--enable-auto-tool-choice"
+        - "--tool-call-parser"
+        - "llama3_json"
+        - "--served-model-name"
+        - "llama-3-1-70b-instruct-cuda"
+        - "--tensor-parallel-size"
+        - "4"
+        env: 
+        - name: FLASHINFER_WORKSPACE_BASE
+          value: "/tmp"
+        - name: HF_HUB_DISABLE_XET
+          value: "1"
+        - name: HF_HUB_ENABLE_HF_TRANSFER
+          value: "0"
+        - name: HOME
+          value: "/tmp"
+        - name: TORCHINDUCTOR_CACHE_DIR
+          value: "/tmp/torchinductor_cache"
+        - name: TRITON_CACHE_DIR
+          value: "/tmp/.triton"
+        - name: USER
+          value: "vllm"
+        - name: VLLM_NO_USAGE_STATS
+          value: "1"
+        - name: XDG_CACHE_HOME
+          value: "/tmp/.cache"
+        volumeMounts:
+          - name: shm
+            mountPath: /dev/shm
+        resources:
+          requests:
+            cpu: "8"
+            memory: 128Gi
+            nvidia.com/gpu: "8"
+          limits:
+            cpu: "8"
+            memory: 128Gi
+            nvidia.com/gpu: "8"
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 120
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 12
+          periodSeconds: 10
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
+    securityContext:
+      seccompProfile:
+        type: RuntimeDefault
+    volumes:
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 10Gi
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+                - key: gpu-vendor
+                  operator: In
+                  values:
+                    - nvidia
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+--- stderr
+--- kubectl
