@@ -6,9 +6,10 @@ import binascii
 import json
 import os
 import secrets
+import socket
 import time
 
-from . import k8s
+from . import k8s, platform
 from .config import MM_DIR, Model, config_value, env, gateway_ref, gateway_service, global_config, inference_config
 from .renderer import render, template
 from .ui import BOLD, CYAN, DIM, RESET, info, ok, warn
@@ -98,7 +99,10 @@ def deregister(m: Model) -> None:
 
 
 def patch_pool_status(m: Model) -> None:
-    """Mark the InferencePool Accepted so the gateway route goes live (done at ready time, after KServe creates it)."""
+    """Mark the InferencePool Accepted so the gateway route goes live (done at ready time, after KServe creates it).
+    On OpenShift the Gateway controller reports the status itself."""
+    if platform.is_openshift():
+        return
     pool = f"{m.name}-inference-pool"
     for _ in range(24):
         if k8s.succeeds("get", "inferencepool", pool, "-n", m.namespace):
@@ -248,11 +252,23 @@ def inference_hostname() -> str:
     return ""
 
 
+def _resolves(host: str) -> bool:
+    try:
+        socket.getaddrinfo(host, 443)
+        return True
+    except (OSError, UnicodeError):
+        return False
+
+
 def print_endpoints(m: Model) -> None:
     host, litellm = inference_hostname(), litellm_enabled()
-    gw_ip = k8s.out("get", "svc", "-n", env("MM_EG_GATEWAY_NS", "envoy-gateway-system"), "-l",
-                    f"gateway.envoyproxy.io/owning-gateway-name={env('MM_EG_GATEWAY_NAME', 'eg-gateway')}",
-                    "-o", "jsonpath={.items[0].status.loadBalancer.ingress[0].ip}")
+    if platform.is_openshift():
+        # Published through the router. No --resolve when the hostname resolves here, as with *.apps DNS.
+        gw_ip = "" if _resolves(host) else platform.router_ip()
+    else:
+        gw_ip = k8s.out("get", "svc", "-n", env("MM_EG_GATEWAY_NS", "envoy-gateway-system"), "-l",
+                        f"gateway.envoyproxy.io/owning-gateway-name={env('MM_EG_GATEWAY_NAME', 'eg-gateway')}",
+                        "-o", "jsonpath={.items[0].status.loadBalancer.ingress[0].ip}")
     api = {"embed": "v1/embeddings", "rerank": "v1/score"}.get(m.category, "v1/chat/completions")
     if gateway_enabled():
         endpoint = f"https://{host}/{api}"
