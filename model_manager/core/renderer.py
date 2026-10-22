@@ -10,6 +10,8 @@ from .config import Catalog, Model, gateway_ref, mm_path, pick, text
 from .ui import abort
 
 CHAT_TEMPLATE_DIR = "/etc/chat-template"
+# Value of the gpu-vendor node label the rack-scale installer applies, by accelerator resource prefix.
+GPU_VENDORS = {"nvidia.com/": "nvidia", "gpu.intel.com/": "intel", "habana.ai/": "intel", "amd.com/": "amd"}
 
 
 def render(path: Path, **values: str) -> str:
@@ -87,20 +89,29 @@ def proxy_env(catalog: Catalog) -> list[tuple[str, str]]:
     return [(k, v) for key, v in pairs if v for k in (key, key.lower())]
 
 
-def _affinity(node: str, require_amx: bool) -> str:
-    lines = ["    affinity:", "      nodeAffinity:"] if node or require_amx else []
+def gpu_vendor(resource: str) -> str:
+    return next((v for prefix, v in GPU_VENDORS.items() if resource.startswith(prefix)), "")
+
+
+def _affinity(node: str, require_amx: bool, vendor: str = "") -> str:
+    lines = ["    affinity:", "      nodeAffinity:"] if node or require_amx or vendor else []
     if require_amx:
         lines += ["        requiredDuringSchedulingIgnoredDuringExecution:", "          nodeSelectorTerms:",
                   "            - matchExpressions:", "                - key: feature.node.kubernetes.io/cpu-cpuid.AMXBF16",
                   "                  operator: In", "                  values:", '                    - "true"']
+    if node or vendor:
+        lines.append("        preferredDuringSchedulingIgnoredDuringExecution:")
     if node:
-        lines += ["        preferredDuringSchedulingIgnoredDuringExecution:", "          - weight: 100",
-                  "            preference:", "              matchExpressions:",
+        lines += ["          - weight: 100", "            preference:", "              matchExpressions:",
                   "                - key: kubernetes.io/hostname", "                  operator: In",
                   "                  values:", f"                    - {node}", "          - weight: 50",
                   "            preference:", "              matchExpressions:",
                   "                - key: node-role.kubernetes.io/control-plane",
                   "                  operator: DoesNotExist"]
+    if vendor:  # soft: on a cluster without the label the resource request alone decides placement
+        lines += ["          - weight: 100", "            preference:", "              matchExpressions:",
+                  "                - key: gpu-vendor", "                  operator: In", "                  values:",
+                  f"                    - {vendor}"]
     return "\n".join(lines)
 
 
@@ -108,6 +119,34 @@ def _annotations(annotations: dict, kind: str) -> str:
     pad = "  " if kind == "LLMInferenceService" else "    "
     return f"{pad}annotations:\n" + "".join(
         f"{pad}  {k}: {quote(v) if v.isdigit() or v in ('true', 'false') else v}\n" for k, v in annotations.items())
+
+
+def _volumes(m: Model) -> tuple[str, str]:
+    """volumeMounts and volumes: the inline chat template's ConfigMap and, on GPU runtimes, a memory-backed
+    /dev/shm (NCCL needs more shared memory for tensor parallelism than the container's 64Mi)."""
+    mounts, volumes = [], []
+    if inline_chat_template(m):
+        mounts.append(f"          - name: chat-template\n            mountPath: {CHAT_TEMPLATE_DIR}\n"
+                      "            readOnly: true\n")
+        volumes.append(f"      - name: chat-template\n        configMap:\n          name: {m.name}-chat-template\n")
+    shm = text(pick(m.rt, "shm_size")) if m.gpu else ""
+    if shm:
+        mounts.append("          - name: shm\n            mountPath: /dev/shm\n")
+        volumes.append(f"      - name: shm\n        emptyDir:\n          medium: Memory\n          sizeLimit: {shm}\n")
+    if not mounts:
+        return "", ""
+    return "        volumeMounts:\n" + "".join(mounts), "    volumes:\n" + "".join(volumes)
+
+
+def _gpu(m: Model, affinity: str) -> tuple[str, str]:
+    """The accelerator line appended to requests and limits, and the toleration; both empty on CPU."""
+    if not m.gpu:
+        return "", ""
+    resource, key = m.accel_resource, text(pick(m.rt, "accelerator_toleration_key"))
+    limit = f'\n            {resource}: "{m.gpus}"' if resource else ""
+    toleration = (f"    tolerations:\n      - key: {key}\n        operator: Exists\n        effect: NoSchedule"
+                  if key else "")
+    return limit, ("\n" if affinity and toleration else "") + toleration
 
 
 def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_args: list[str]) -> str:
@@ -121,20 +160,21 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
     common = {
         "MODEL_NAME": m.name, "NAMESPACE": m.namespace, "MODEL_URI": m.uri, "CPU": cpu, "MEMORY": m.memory,
         "REPLICAS": m.replicas, "ARGS": _list([f"        - {quote(a)}" for a in dedupe_args(args + cli_args)]),
-        "ENV": _env(m, catalog, cli_args, o.env), "NRI_ANNOTATIONS": _annotations(annotations, m.kind),
-        "AFFINITY": _affinity(m.node, catalog.require_amx),
+        "ENV": _env(m, catalog, cli_args, o.env),
+        "NRI_ANNOTATIONS": _annotations(annotations, m.kind) if annotations else "",
+        # GPU pods skip the AMX requirement (a Xeon placement control) and prefer the vendor's nodes.
+        "AFFINITY": _affinity(m.node, catalog.require_amx and not m.gpu,
+                              gpu_vendor(os.environ.get("MM_ACCEL_RESOURCE", "")) if m.gpu else ""),
         "EXTRA_LABELS": "".join(f"\n    {p.split('=', 1)[0]}: {quote(p.split('=', 1)[1])}" for p in o.label),
     }
     if m.kind == "LLMInferenceService":
-        inline = inline_chat_template(m)
+        mounts, volumes = _volumes(m)
+        gpu_limit, tolerations = _gpu(m, common["AFFINITY"])
         gateway, gateway_ns = gateway_ref()
         return render(
             template("llm-inference-service.yaml"), **common, IMAGE=m.image,
-            GATEWAY_NAME=gateway, GATEWAY_NAMESPACE=gateway_ns,
-            CHAT_TEMPLATE_MOUNT=(f"        volumeMounts:\n          - name: chat-template\n"
-                                 f"            mountPath: {CHAT_TEMPLATE_DIR}\n            readOnly: true\n") if inline else "",
-            CHAT_TEMPLATE_VOLUME=(f"    volumes:\n      - name: chat-template\n        configMap:\n"
-                                  f"          name: {m.name}-chat-template\n") if inline else "")
+            GATEWAY_NAME=gateway, GATEWAY_NAMESPACE=gateway_ns, CHAT_TEMPLATE_MOUNT=mounts,
+            CHAT_TEMPLATE_VOLUME=volumes, GPU_RESOURCE=gpu_limit, TOLERATIONS=tolerations)
     if m.kind == "InferenceService":
         name = "inference-service-ovms.yaml" if m.runtime == "openvino" else "inference-service.yaml"
         return render(template(name), **common, MODEL_ID=m.model_id, PVC_NAME=catalog.pvc,

@@ -527,6 +527,29 @@ models:
       VLLM_CPU_SGL_KERNEL: "1"
       TORCHDYNAMO_DISABLE: "1"
 
+  # ── GPU examples (runtime: vllm-cuda) ───────────────────────────────────────
+  # Deployable only when MM_ACCEL_RESOURCE is set — in ai-solutions that means
+  # rack_scale_enabled=true with an accelerator: in rack-profile.yaml. Neither
+  # autodeploys; opt in per model.
+
+  # LLM — small Qwen3 on 1 NVIDIA GPU. Smoke test for the GPU path.
+  - name: qwen3-0-6b-cuda
+    model_id: Qwen/Qwen3-0.6B
+    category: llm
+    runtime: vllm-cuda
+    gpus: 1
+    autodeploy: false
+
+  # LLM — Llama 3.1 70B on 8 NVIDIA GPUs (TP=8). Gated model: needs HF_TOKEN.
+  - name: llama-3-1-70b-instruct-cuda
+    model_id: meta-llama/Llama-3.1-70B-Instruct
+    category: llm
+    runtime: vllm-cuda
+    gpus: 8
+    memory: 128Gi
+    args: [ --max-model-len, "131072", --enable-auto-tool-choice, --tool-call-parser, llama3_json ]
+    autodeploy: false
+
 
 # =============================================================================
 # Runtimes — per-engine deploy config (images, versions, env, categories)
@@ -601,6 +624,54 @@ runtimes:
         args: [ --dtype, bfloat16, --max-num-seqs, "64", --max-num-batched-tokens, "1024" ]
         env: { VLLM_CPU_KVCACHE_SPACE: "${KV_CACHE_GB}" }
         defaults: { cpu: 16, memory: "48Gi", kv_cache_gb: 8 }
+
+  # ── vLLM (NVIDIA GPU / CUDA) ────────────────────────────────────────────────
+  # GPU counterpart of `vllm`. Plumbing (device: gpu, accelerator resource,
+  # toleration, shm) is in runtimes/vllm-cuda/values.yaml. A model opts in with
+  # `runtime: vllm-cuda` (+ optional `gpus: N`; default from its category).
+  #
+  # Deploys are GATED: model-manager refuses a device: gpu runtime unless
+  # MM_ACCEL_RESOURCE is set. In ai-solutions that happens automatically when
+  # rack_scale_enabled=true and the rack-profile declares an accelerator; on a
+  # standard (CPU) install the gate stays closed and nothing here is reachable.
+  # --dry-run previews are not gated.
+  vllm-cuda:
+    default_version: "0.28.0"
+
+    # Common env. The cache redirects let the upstream vllm-openai image run
+    # under the hardened pod securityContext (runAsNonRoot, drop ALL): its
+    # defaults write under /root, which is not writable there.
+    env:
+      USER: "vllm"
+      HOME: "/tmp"
+      XDG_CACHE_HOME: "/tmp/.cache"
+      TRITON_CACHE_DIR: "/tmp/.triton"
+      TORCHINDUCTOR_CACHE_DIR: "/tmp/torchinductor_cache"
+      FLASHINFER_WORKSPACE_BASE: "/tmp"
+      HF_HUB_DISABLE_XET: "1"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      VLLM_NO_USAGE_STATS: "1"
+
+    versions:
+      "0.28.0":
+        image: "docker.io/vllm/vllm-openai:v0.28.0"
+
+    # Per-category args + resource defaults. `gpus` is the per-pod GPU count and
+    # the default --tensor-parallel-size. cpu/memory are host-side (weight
+    # loading, tokenizer, API server), not the accelerator.
+    categories:
+      llm:
+        args: [ --dtype, bfloat16, --max-num-seqs, "256", --enable-prefix-caching ]
+        defaults: { cpu: 8, memory: "64Gi", gpus: 1 }
+      vlm:
+        args: [ --dtype, bfloat16, --max-num-seqs, "64" ]
+        defaults: { cpu: 8, memory: "64Gi", gpus: 1 }
+      embed:
+        args: [ --dtype, bfloat16 ]
+        defaults: { cpu: 4, memory: "16Gi", gpus: 1 }
+      rerank:
+        args: [ --dtype, bfloat16 ]
+        defaults: { cpu: 4, memory: "16Gi", gpus: 1 }
 
   # ── OpenVINO Model Server ─────────────────────────────────────────────────────
   # Flat runtime (no version axis). image + plumbing live in
