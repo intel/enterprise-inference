@@ -105,8 +105,7 @@ runtimes:
 Plumbing in `model_manager/runtimes/openvino/values.yaml`:
 
 ```yaml
-image: "openvino/model_server:2026.3"                     # serving image
-model_downloader_image: "openvino/model_server:latest-py" # weights download job
+image: "openvino/model_server:2026.4.1"                   # serving and weights download
 device: cpu
 kind: InferenceService
 format: openvino

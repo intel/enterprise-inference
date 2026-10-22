@@ -234,3 +234,13 @@ def test_litellm_endpoint_is_unified(monkeypatch, tmp_path, capsys, routing_mode
     monkeypatch.setattr(k8s, "out", lambda *a: "")
     routing.print_endpoints(Model(name="m", namespace="n", kind="LLMInferenceService"))
     assert f"Endpoint: {want}" in capsys.readouterr().out
+@pytest.mark.parametrize("current, applied", [("", True), ("img:new", False), ("img:old", True)])
+def test_runtime_installed_or_updated_on_image_change(monkeypatch, current, applied):
+    calls = []
+    monkeypatch.setattr(k8s, "out", lambda *a: current)
+    monkeypatch.setattr(k8s, "apply", lambda manifest, **kw: calls.append(manifest))
+    m = Model(name="m", namespace="n", kind="InferenceService", runtime="openvino", runtime_image="img:new",
+              rt={"serving_runtime_manifest": "openvino/serving-runtime.yaml", "runtime_name": "openvino-runtime"})
+    cli._install_runtime(m)
+    assert bool(calls) == applied
+    assert all("image: img:new" in c for c in calls)
