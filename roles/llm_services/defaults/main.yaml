@@ -49,8 +49,13 @@ _llm_storage_backend: >-
 # model-store is one PVC mounted by every predictor pod, so it needs
 # ReadWriteMany as soon as pods can land on more than one node. Only local-path
 # cannot provide it (node-local directories); nfs, CephFS and ontap-nas all can.
+# A custom (bring-your-own) class says so with storage_custom_rwx, e.g. LVMS on
+# a single-node OpenShift is RWO-only.
 llm_services_model_store_access_mode: >-
-  {{ 'ReadWriteOnce' if _llm_storage_backend == 'local-path' else 'ReadWriteMany' }}
+  {{ 'ReadWriteOnce'
+     if _llm_storage_backend == 'local-path'
+        or (_llm_storage_backend == 'custom' and not (storage_custom_rwx | default(true) | bool))
+     else 'ReadWriteMany' }}
 
 # StorageClass for model-store. Named only for the backends whose *default*
 # StorageClass is not the right one for a shared model cache (ceph defaults to

@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import __version__, k8s, renderer, routing
+from . import __version__, k8s, platform, renderer, routing
 from .config import MM_DIR, Catalog, Model, is_uint, mm_path, pick, resolve, text, truthy
 from .download import download_weights
 from .policy import preflight_gate, resolve_policy
@@ -72,6 +72,9 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
   {GREEN}MM_PREFLIGHT{RESET}          'warn' ⇒ report placement failures, don't block
   {GREEN}MM_SKIP_PREFLIGHT{RESET}     1 ⇒ skip the placement pre-flight entirely
   {GREEN}MM_INFERENCE_HOSTNAME{RESET} Override inference gateway hostname
+  {GREEN}MM_PLATFORM{RESET}           openshift | kubernetes (default: detected). On
+                        OpenShift models attach to OpenShift AI's inference
+                        Gateway and run with the namespace's SCC UIDs.
   {GREEN}MM_INFERENCE_GATEWAY_SVC_NS{RESET}
                         Namespace of the AI Gateway Service LiteLLM calls
                         (default: MM_INFERENCE_GATEWAY_NS, else envoy-gateway-system)
@@ -459,4 +462,5 @@ def main() -> None:
         abort("curl not found. Install it with your OS package manager.")
     if command not in COMMANDS:
         abort(f"Unknown command: {command} (run ./model-manager --help)")
+    platform.detect()
     COMMANDS[command](o, target)
