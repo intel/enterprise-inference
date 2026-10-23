@@ -87,6 +87,24 @@ kind: LLMInferenceService
 routing: epp
 ```
 
+### vLLM on NVIDIA GPU (`vllm-cuda`)
+
+The GPU engine is configured the same way under `runtimes.vllm-cuda` (per-category
+`defaults` add `gpus`, the per-pod GPU count). Its plumbing in
+`model_manager/runtimes/vllm-cuda/values.yaml` selects the GPU render path:
+
+```yaml
+device: gpu                                 # accelerator limits, /dev/shm, toleration, no CPU pinning
+kind: LLMInferenceService
+routing: epp
+accelerator_resource: nvidia.com/gpu        # --dry-run preview only; a deploy uses MM_ACCEL_RESOURCE
+accelerator_toleration_key: nvidia.com/gpu  # taint GPU nodes commonly carry (NoSchedule)
+shm_size: 10Gi                              # /dev/shm for NCCL tensor parallelism
+```
+
+See [Deploy on GPU nodes](../deploy/deploy_models.md#deploy-on-gpu-nodes-rack-scale) for
+the deploy gate and what changes in the rendered manifest.
+
 ## OpenVINO (OVMS)
 
 A **flat** runtime — there is no version axis. `server_version` does not apply, and

@@ -206,6 +206,36 @@
                 else '(none)' if _mm_only_models is defined
                 else '(none — set autodeploy: true in models.yaml to auto-deploy on install)') }}
 
+    # GPU runtimes (device: gpu, e.g. vllm-cuda) are gated in the CLI on
+    # MM_ACCEL_RESOURCE (the extended resource the cluster advertises). Resolve
+    # it ONLY when the solutions layer is in rack-scale mode, from the vendor the
+    # rack-profile parser wrote to the flags file. Otherwise it stays empty and
+    # model-manager behaves exactly as on a standard CPU install.
+    - name: "Deploy models | Resolve GPU vendor from rack-scale flags"
+      shell: |
+        set -o pipefail
+        grep '^rack_scale_gpu_vendor=' "{{ env_dir }}/inventory/metadata/rack-scale-flags.env" 2>/dev/null | cut -d= -f2
+      args:
+        executable: /bin/bash
+      register: _mm_gpu_vendor_raw
+      changed_when: false
+      failed_when: false
+      when:
+        - rack_scale_enabled | default(false) | bool
+        - env_dir is defined
+
+    - name: "Deploy models | Set GPU vendor fact"
+      set_fact:
+        _mm_gpu_vendor: >-
+          {{ (_mm_gpu_vendor_raw.stdout | default('') | trim)
+             if (rack_scale_enabled | default(false) | bool) else '' }}
+
+    - name: "Deploy models | Map GPU vendor to accelerator resource"
+      set_fact:
+        _mm_accel_resource: >-
+          {{ {'nvidia': 'nvidia.com/gpu', 'intel': 'gpu.intel.com/xe', 'amd': 'amd.com/gpu'}[_mm_gpu_vendor]
+             if _mm_gpu_vendor in ['nvidia', 'intel', 'amd'] else '' }}
+
     # Deploy each catalog model through the v2 CLI. MM_CONFIG points the CLI at
     # the resolved catalog; --wait blocks until Ready unless model_deploy_flags
     # overrides it. Runtime behavior (proxy, LiteLLM/AIGateway registration,
@@ -234,6 +264,9 @@
         # SMT width override for kubelet-static's full-pcpus-only alignment.
         # Empty ⇒ the CLI auto-detects.
         MM_KUBELET_THREADS_PER_CORE: "{{ mm_kubelet_threads_per_core | default('') }}"
+        # GPU deploy gate (see "Resolve GPU vendor" above). Empty ⇒ device: gpu
+        # runtimes are refused; the CPU path is unaffected either way.
+        MM_ACCEL_RESOURCE: "{{ _mm_accel_resource | default('') | trim }}"
         # LiteLLM auto-registration — only when auth_type=litellm_vkey.
         MM_LITELLM_ENABLED: "{{ 'true' if auth_type | default('jwt') == 'litellm_vkey' else 'false' }}"
         MM_LITELLM_URL: "{{ 'http://litellm.' + (litellm_namespace | default('litellm')) + '.svc.cluster.local:4000' if auth_type | default('jwt') == 'litellm_vkey' else '' }}"
