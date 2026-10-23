@@ -227,11 +227,34 @@ def litellm_deregister(name: str) -> None:
 
 # ── Endpoint hints ────────────────────────────────────────────────────────────
 
+def path_mode() -> bool:
+    """routing_mode: path publishes every API on the base host, under its own path."""
+    return config_value(global_config(), "routing_mode") == "path"
+
+
+def inference_path() -> str:
+    """API path on the host: '' in subdomain mode, else <base>/inference (or /litellm under litellm)."""
+    if "MM_INFERENCE_PATH" in os.environ:
+        return os.environ["MM_INFERENCE_PATH"].rstrip("/")
+    if not path_mode():
+        return ""
+    key, default = ("litellm_path", "/litellm") if litellm_enabled() else ("inference_path", "/inference")
+    for cfg in (inference_config(), global_config()):
+        if config_value(cfg, key):
+            return config_value(cfg, key).rstrip("/")
+    return default
+
+
 def inference_hostname() -> str:
-    """API host: inference.<domain> under keycloak, litellm.<domain> (LiteLLM's own route) under litellm."""
+    """API host: inference.<domain> under keycloak, litellm.<domain> (LiteLLM's own route) under
+    litellm, or the base domain itself in path mode."""
     if os.environ.get("MM_INFERENCE_HOSTNAME"):
         return os.environ["MM_INFERENCE_HOSTNAME"]
     gc, prefix = global_config(), ""
+    if path_mode():
+        domain = config_value(gc, "gateway_domain") or config_value(gc, "base_domain_name")
+        if domain:
+            return domain
     if litellm_enabled():
         for cfg in (inference_config(), gc):
             if config_value(cfg, "litellm_hostname"):
@@ -254,8 +277,9 @@ def print_endpoints(m: Model) -> None:
                     f"gateway.envoyproxy.io/owning-gateway-name={env('MM_EG_GATEWAY_NAME', 'eg-gateway')}",
                     "-o", "jsonpath={.items[0].status.loadBalancer.ingress[0].ip}")
     api = {"embed": "v1/embeddings", "rerank": "v1/score"}.get(m.category, "v1/chat/completions")
-    if gateway_enabled():
-        endpoint = f"https://{host}/{api}"
+    # The AI Gateway and LiteLLM both serve every model on one URL, picked by "model" in the body.
+    if gateway_enabled() or litellm:
+        endpoint = f"https://{host}{inference_path()}/{api}"
     elif m.kind == "LLMInferenceService":
         endpoint = f"https://{host}/{m.namespace}/{m.name}/{api}"
     else:
