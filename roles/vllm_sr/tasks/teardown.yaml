@@ -63,6 +63,9 @@
     gateway_route_policy_name: vllm-sr-dashboard-no-auth
     gateway_route_state: absent
 
+- name: "vllm_sr | teardown | Resolve the routed models"
+  ansible.builtin.include_tasks: models.yaml
+
 - name: "vllm_sr | teardown | Remove Envoy AI Gateway resources"
   kubernetes.core.k8s:
     state: absent

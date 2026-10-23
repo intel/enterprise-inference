@@ -1,0 +1,48 @@
+---
+# =============================================================================
+# vLLM Semantic Router — routed models (read-only)
+# =============================================================================
+# vllm_sr_route_models, else the deployed chat models, else vllm_sr_default_model.
+
+- name: "vllm_sr | Discover deployed chat models"
+  when: vllm_sr_route_models | length == 0
+  block:
+    - name: "vllm_sr | List LLMInferenceServices"
+      kubernetes.core.k8s_info:
+        api_version: serving.kserve.io/v1alpha2
+        kind: LLMInferenceService
+        namespace: "{{ vllm_sr_model_namespace }}"
+      register: _vllm_sr_llmisvcs
+
+    # The sr-<model> AIGatewayRoutes send to <model><vllm_sr_pool_suffix>.
+    - name: "vllm_sr | List InferencePools"
+      kubernetes.core.k8s_info:
+        api_version: inference.networking.k8s.io/v1
+        kind: InferencePool
+        namespace: "{{ vllm_sr_model_namespace }}"
+      register: _vllm_sr_pools
+
+- name: "vllm_sr | Resolve routed models"
+  vars:
+    _vllm_sr_suffix_re: "{{ vllm_sr_pool_suffix | regex_escape }}$"
+    _vllm_sr_pooled: >-
+      {{ _vllm_sr_pools.resources | default([]) | map(attribute='metadata.name')
+         | select('search', _vllm_sr_suffix_re) | map('regex_replace', _vllm_sr_suffix_re, '') | list }}
+    _vllm_sr_found: >-
+      {{ _vllm_sr_llmisvcs.resources | default([]) | map(attribute='metadata.name')
+         | select('in', _vllm_sr_pooled)
+         | reject('equalto', guardrail_model | default('qwen3guard'))
+         | reject('search', vllm_sr_discover_exclude | default('(?!)', true), ignorecase=true)
+         | sort | list }}
+    _vllm_sr_list: >-
+      {{ vllm_sr_route_models if vllm_sr_route_models | length > 0
+         else _vllm_sr_found if _vllm_sr_found | length > 0
+         else [vllm_sr_default_model] }}
+    _vllm_sr_pick: "{{ vllm_sr_default_model if vllm_sr_default_model in _vllm_sr_list else _vllm_sr_list | first }}"
+  ansible.builtin.set_fact:
+    _vllm_sr_default: "{{ _vllm_sr_pick }}"
+    _vllm_sr_models: "{{ [_vllm_sr_pick] + (_vllm_sr_list | reject('equalto', _vllm_sr_pick) | list) }}"
+    _vllm_sr_models_source: >-
+      {{ 'vllm_sr_route_models' if vllm_sr_route_models | length > 0
+         else 'discovered' if _vllm_sr_found | length > 0
+         else 'none discovered, vllm_sr_default_model' }}

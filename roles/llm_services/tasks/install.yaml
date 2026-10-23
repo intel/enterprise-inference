@@ -152,8 +152,10 @@
   when: llm_services_deploy_models | default(true) | bool
 
 # Default model(s) requested by a solution layer (llm_services_autodeploy_models).
+# Required like the guard model: the solution is not usable without it.
 - name: "llm_services | Deploy solution-requested default models"
   ansible.builtin.include_tasks: deploy_models.yaml
   vars:
     _mm_only_models: "{{ llm_services_autodeploy_models }}"
+    _mm_strict: true
   when: llm_services_autodeploy_models | default([]) | length > 0

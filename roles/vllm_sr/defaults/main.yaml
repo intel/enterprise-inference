@@ -33,14 +33,15 @@ vllm_sr_hf_token: "{{ lookup('env', 'HF_TOKEN') | default('', true) }}"
 # --- Models that participate in semantic routing ---------------------------
 # The router emits `x-ai-eg-model` = one of these served model names; our
 # existing per-model AIGatewayRoutes dispatch it to that model's InferencePool.
-# List the models you have actually deployed (models.yaml autodeploy / model-manager).
 vllm_sr_model_namespace: "{{ llm_services_namespace | default('llm-inference') }}"
+# Empty = discover the chat models deployed in vllm_sr_model_namespace at install time.
+vllm_sr_route_models: []
 # Defaults follow the model a solution layer auto-deploys (llm_services_autodeploy_models,
 # e.g. the agent toolkit's default model), so the router targets a model that is up;
-# qwen3-4b otherwise.
-vllm_sr_route_models:
-  - "{{ vllm_sr_default_model }}"
+# qwen3-4b otherwise. The first routed model stands in when it is not routed.
 vllm_sr_default_model: "{{ (llm_services_autodeploy_models | default([]) | first) | default('qwen3-4b', true) }}"
+# Model names discovery skips (regex): embedding, rerank and speech models.
+vllm_sr_discover_exclude: "embed|rerank|bge|whisper"
 vllm_sr_pool_suffix: "-inference-pool"   # matches model-manager InferencePool naming
 
 # --- Dedicated gateway (opt-in; keeps normal ai-gateway traffic untouched) --
@@ -74,7 +75,7 @@ vllm_sr_router_trigger_model: "auto"
 vllm_sr_cache_backend: "memory"
 
 # Full canonical Router config override (advanced). When null, the role renders a
-# sensible default from vllm_sr_route_models. Author routing decisions per the
+# sensible default from the routed models. Author routing decisions per the
 # user guide (docs/customize/vllm-semantic-router.md).
 vllm_sr_config_override: null
 

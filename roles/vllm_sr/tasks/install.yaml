@@ -120,6 +120,9 @@
       no_log: true
 
 # --- Router chart (vendored official chart) -----------------------------------
+- name: "vllm_sr | Resolve the routed models"
+  ansible.builtin.include_tasks: models.yaml
+
 - name: "vllm_sr | Render chart values"
   ansible.builtin.set_fact:
     _vllm_sr_values: "{{ lookup('template', 'values.yaml.j2') | from_yaml }}"
@@ -167,7 +170,7 @@
 - name: "vllm_sr | Build desired AI Gateway route names"
   ansible.builtin.set_fact:
     _vllm_sr_desired_route_names: >-
-      {{ ['sr-default'] + (vllm_sr_route_models | map('regex_replace', '^', 'sr-') | list) }}
+      {{ ['sr-default'] + (_vllm_sr_models | map('regex_replace', '^', 'sr-') | list) }}
 
 - name: "vllm_sr | Remove routes for models no longer configured"
   kubernetes.core.k8s:
@@ -295,7 +298,7 @@
   ansible.builtin.debug:
     msg:
       - "vLLM Semantic Router deployed in '{{ vllm_sr_namespace }}' (opt-in)."
-      - "Routing models: {{ vllm_sr_route_models | join(', ') }} (default: {{ vllm_sr_default_model }})"
+      - "Routing models ({{ _vllm_sr_models_source }}): {{ _vllm_sr_models | join(', ') }} (default: {{ _vllm_sr_default }})"
       - "Exposure: {{ vllm_sr_expose }}{{ ' — LiteLLM model: ' ~ vllm_sr_litellm_model_name if vllm_sr_expose in ['litellm','both'] else '' }}"
       - >-
         {{ 'Dashboard: https://' ~ vllm_sr_dashboard_hostname ~ '/ (admin ' ~ vllm_sr_dashboard_admin_email

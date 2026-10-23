@@ -76,7 +76,7 @@ spec:
       name: {{ vllm_sr_gateway_name }}
   connection:
     bufferLimit: 50Mi
-{% for m in vllm_sr_route_models %}
+{% for m in _vllm_sr_models %}
 ---
 apiVersion: aigateway.envoyproxy.io/v1beta1
 kind: AIGatewayRoute
@@ -127,7 +127,7 @@ spec:
     - timeouts:
         request: {{ vllm_sr_route_timeout }}
       backendRefs:
-        - name: {{ vllm_sr_default_model }}{{ vllm_sr_pool_suffix }}
+        - name: {{ _vllm_sr_default }}{{ vllm_sr_pool_suffix }}
           kind: InferencePool
           group: inference.networking.k8s.io
 ---

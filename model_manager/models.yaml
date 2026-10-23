@@ -406,7 +406,7 @@ models:
   # Guard model — content-safety classifier backing the LiteLLM guardrail
   # (guardrail_model; deployed whenever the guardrail is on, the default with
   # auth_type: litellm_vkey).
-  # Sizing: cpu 2, memory 16Gi, KV cache 4 GiB, max-num-seqs 8, TP 1.
+  # Sizing: cpu 8, memory 16Gi, KV cache 4 GiB, max-num-seqs 8, TP 1.
   # memory: 8Gi OOM-killed the pod (exit 137, peak ~8.6GiB); the guard is
   # default-on and fail-closed, so a guard OOM blocks every LiteLLM request.
   - name: qwen3guard
@@ -414,7 +414,7 @@ models:
     category: llm
     runtime: vllm
     server_version: "0.28.0"
-    cpu: 2
+    cpu: 8
     memory: 16Gi
     args: [ "--block-size", "128", "--dtype", "bfloat16", "--max-num-seqs", "8", "--tensor-parallel-size", "1" ]
     env:
