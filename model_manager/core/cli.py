@@ -247,9 +247,15 @@ def _install_runtime(m: Model) -> None:
     if not pointer and not path.is_file():
         path = runtimes / m.runtime / "runtime.yaml"
     name = text(pick(m.rt, "runtime_name")) or f"{m.runtime}-runtime"
-    if path.is_file() and not k8s.succeeds("get", "clusterservingruntime", name):
-        info(f"Installing ClusterServingRuntime: {name}")
-        k8s.apply(renderer.render(path, RUNTIME_IMAGE=m.runtime_image))
+    if not path.is_file():
+        return
+    # Re-applied when the image changed, so an image bump reaches clusters that have the runtime.
+    current = k8s.out("get", "clusterservingruntime", name, "-o", "jsonpath={.spec.containers[0].image}")
+    if current == m.runtime_image:
+        return
+    info(f"Installing ClusterServingRuntime: {name}" if not current
+         else f"Updating ClusterServingRuntime {name}: {current} -> {m.runtime_image}")
+    k8s.apply(renderer.render(path, RUNTIME_IMAGE=m.runtime_image))
 
 
 def _apply_chat_template(m: Model) -> None:

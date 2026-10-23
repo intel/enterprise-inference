@@ -46,6 +46,8 @@ FX_TEMPLATES = {"MM_CHAT_TEMPLATES": str(MM / "tests" / "fixtures" / "chat-templ
 NRI = {"MM_CPU_POLICY": "nri-balloons"}
 # Legacy computed LiteLLM's api_base even with LiteLLM disabled, warning about it.
 NO_LITELLM_URL = (r"^\[WARN \]  AI Gateway service 'ai-gateway' not found.*\n", "")
+# OVMS moved to one image (2026.4.1) for serving and the weights download.
+OVMS_IMAGE = (r"openvino/model_server:2026\.(1-py|3)\b", "openvino/model_server:2026.4.1")
 # --help documents MM_INFERENCE_GATEWAY_SVC_NS, which is new.
 HELP_SVC_NS = (r"^(  MM_INFERENCE_HOSTNAME .*\n)",
                r"\1  MM_INFERENCE_GATEWAY_SVC_NS\n                        Namespace of the AI Gateway Service LiteLLM calls\n"
@@ -151,7 +153,8 @@ CASES = [
     case("deploy-not-ready-reconciler", "deploy", "qwen3-0-6b", "--wait-timeout", "1", env=BE, k8s=DOWNLOAD),
     case("deploy-wait-timeout", "deploy", "qwen3-0-6b", "--wait", "--wait-timeout", "1", env=BE, k8s=DOWNLOAD),
     case("deploy-ovms-wait", "deploy", "qwen3-5-2b-ovms", "--wait", env=BE, k8s=DOWNLOAD + [
-        [r"get InferenceService qwen3-5-2b-ovms -n llm-inference -o json$", 0, _ready("Ready")]]),
+        [r"get InferenceService qwen3-5-2b-ovms -n llm-inference -o json$", 0, _ready("Ready")]],
+         deviations=[OVMS_IMAGE]),
     case("redeploy-unchanged", "deploy", "qwen3-0-6b", env={**BE, "MM_FORCE_REDEPLOY": "0"},
          k8s=QWEN_EXISTS + POOL + QWEN_READY, deviations=[NO_LITELLM_URL]),
     case("redeploy-diff-error-ready", "deploy", "qwen3-0-6b", env=BE,

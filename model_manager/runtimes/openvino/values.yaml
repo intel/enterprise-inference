@@ -8,8 +8,10 @@
 # message.
 # =============================================================================
 
-image: "openvino/model_server:2026.3"                       # serving image; injected into the ClusterServingRuntime (override in models.yaml → runtimes.openvino.image)
-model_downloader_image: "openvino/model_server:2026.1-py"   # weights download inside a job
+# One image serves and pulls (`ovms --pull` of pre-exported OpenVINO models). 2026.4+
+# loads models that ship an MTP draft (e.g. Qwen3.5). Set model_downloader_image to a
+# -py tag only to convert a model that is not already in OpenVINO format.
+image: "openvino/model_server:2026.4.1"                     # injected into the ClusterServingRuntime (override in models.yaml → runtimes.openvino.image)
 device: cpu
 kind: InferenceService
 format: openvino
