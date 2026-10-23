@@ -1,0 +1,45 @@
+---
+# model-manager settings, shared by the install-time deploy (deploy_models.yaml)
+# and the deploy Jobs started from Headlamp (ui_deploy.yaml). Secrets
+# (HF_TOKEN, MM_LITELLM_MASTER_KEY) are added by each caller.
+__llm_mm_litellm: "{{ auth_type | default('jwt') == 'litellm_vkey' }}"
+__llm_mm_env:
+  # Proxy — so weight downloads work behind a corporate proxy.
+  MM_HTTP_PROXY: "{{ http_proxy | default(lookup('env', 'http_proxy')) | default('') }}"
+  MM_HTTPS_PROXY: "{{ https_proxy | default(lookup('env', 'https_proxy')) | default('') }}"
+  MM_NO_PROXY: "{{ no_proxy | default(lookup('env', 'no_proxy')) | default('') }}"
+  # CPU pinning: the cluster-wide kubernetes_cpu_policy (nri-balloons |
+  # kubelet-static | best-effort), so models match what kubelet/NRI runs.
+  MM_CPU_POLICY: "{{ kubernetes_cpu_policy | default('nri-balloons') }}"
+  # Legacy flag for older model-manager builds; MM_CPU_POLICY wins.
+  MM_NRI_ENABLED: "{{ 'true' if kubernetes_cpu_policy | default('nri-balloons') == 'nri-balloons' else 'false' }}"
+  # SMT width for kubelet-static's full-pcpus-only alignment; empty = auto-detect.
+  MM_KUBELET_THREADS_PER_CORE: "{{ mm_kubelet_threads_per_core | default('') | string }}"
+  # LiteLLM registration — only when auth_type=litellm_vkey.
+  MM_LITELLM_ENABLED: "{{ __llm_mm_litellm | string | lower }}"
+  MM_LITELLM_URL: "{{ ('http://litellm.' ~ (litellm_namespace | default('litellm')) ~ '.svc.cluster.local:4000') if __llm_mm_litellm | bool else '' }}"
+  # In-cluster AI Gateway data plane LiteLLM calls vLLM models through.
+  MM_LITELLM_KSERVE_URL: "{{ _llm_ai_gateway_url }}"
+  # AIGatewayRoute unified endpoint — only when auth_type=jwt.
+  MM_AIGATEWAY_ENABLED: "{{ 'true' if auth_type | default('jwt') == 'jwt' else 'false' }}"
+  MM_EG_GATEWAY_NAME: "{{ gateway_name | default('eg-gateway') }}"
+  MM_EG_GATEWAY_NS: "{{ gateway_namespace | default('envoy-gateway-system') }}"
+  # API host and path in the endpoint hints model-manager prints; path mode
+  # serves every API on the base host under its own path.
+  MM_INFERENCE_HOSTNAME: >-
+    {{ base_domain_name if __llm_mm_path_mode | bool
+       else (litellm_hostname | default('litellm.' ~ base_domain_name)) if __llm_mm_litellm | bool
+       else (inference_hostname | default('inference.' ~ base_domain_name)) }}
+  MM_INFERENCE_PATH: >-
+    {{ '' if not __llm_mm_path_mode | bool
+       else litellm_path | default('/litellm') if __llm_mm_litellm | bool
+       else inference_path | default('/inference') }}
+__llm_mm_path_mode: "{{ (routing_mode | default('subdomain')) == 'path' }}"
+# Catalogue: the environment's copy (env/<env>/models.yaml) first, as deploy_models.yaml.
+__llm_mm_dir: "{{ inference_extension_dir | default(playbook_dir ~ '/../ext/enterprise.ai-inference') }}/model_manager"
+__llm_mm_catalog: >-
+  {{ (env_dir ~ '/models.yaml') if (env_dir is defined and (env_dir ~ '/models.yaml') is exists)
+     else (__llm_mm_dir ~ '/models.yaml') }}
+# Where the deploy Jobs mount model-manager (read-only, from ConfigMap model-manager-code).
+__llm_mm_mount: /opt/model-manager
+__llm_mm_sa: model-manager
