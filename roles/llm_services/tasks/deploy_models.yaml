@@ -121,7 +121,8 @@
     # An environment's models.yaml is seeded once, at init, so it lacks models
     # added to the shipped catalog later. A requested one is taken from there into
     # a copy of the environment's catalog, which keeps that catalog's defaults,
-    # storage, network and runtimes.
+    # storage and network; runtimes gain the shipped entries it lacks (e.g. a newer
+    # server version the model pins), the environment's own entries winning.
     - name: Find requested models the environment catalog lacks in the shipped catalog
       shell: |
         set -o pipefail
@@ -154,7 +155,8 @@
             jq -n --argjson only '{{ _mm_shipped_names.stdout_lines | to_json }}' \
               --slurpfile env <(yq -o=json '.' "{{ _mm_catalog }}") \
               --slurpfile shipped <(yq -o=json '.' "{{ _mm_shipped_catalog }}") \
-              '$env[0] | .models += [$shipped[0].models[] | select(.name as $n | $only | index($n))]' \
+              '$env[0] | .models += [$shipped[0].models[] | select(.name as $n | $only | index($n))]
+                       | .runtimes = (($shipped[0].runtimes // {}) * (.runtimes // {}))' \
               > "{{ _mm_merged_catalog.path }}"
           args:
             executable: /bin/bash

@@ -111,7 +111,7 @@ llm_services_deploy_models: false
 # model per request. Opt-in and additive — direct model calls are unaffected.
 # Needs ai_gateway_provider: envoy. Guide: docs/customize/vllm-semantic-router.md
 # vllm_sr_enabled: true
-# vllm_sr_route_models:                     # deployed models the router may pick from
+# vllm_sr_route_models:                     # models the router may pick from (default: discovered)
 #   - qwen3-4b
 #   - qwen3-coder-30b
 # vllm_sr_litellm_model_name: "semantic-router"   # client-facing name (auth_type: litellm_vkey)

@@ -58,8 +58,8 @@ elsewhere. `vllm_sr_expose` (`envoy` | `litellm` | `both`) overrides the choice.
 
 - The inference layer is installed with `ai_gateway_provider: envoy`, with at least one
   model deployed
-- The models the router may pick are listed in `vllm_sr_route_models`
-  (default: the solution's default model)
+- The models the router may pick are the chat models deployed in the model namespace,
+  discovered at install time, or the ones listed in `vllm_sr_route_models`
 - Envoy Gateway runs with `EnvoyPatchPolicy` enabled
   (`extensionApis.enableEnvoyPatchPolicy`). The kserve role turns it on together with the
   AI Gateway extension; for an Envoy Gateway the platform did not install, set
@@ -175,10 +175,11 @@ kubectl -n vllm-semantic-router-system get secret vllm-sr-dashboard \
 2. LiteLLM authenticates the request, starts a Langfuse trace, and forwards
    to the `semantic-router` gateway
 3. vLLM-SR runs semantic signal classification on the prompt
-4. The decision engine evaluates routing rules top-down by priority. The default
-   configuration has a single `default-route` that sends every request to
-   `vllm_sr_default_model`; add your own decisions (see
-   [Routing Configuration](#routing-configuration))
+4. The decision engine matches the prompt's embedding signals to a decision. The
+   default configuration sends coding prompts to the coder models (`coding-route`),
+   reasoning prompts to all models with reasoning on (`reasoning-route`) and everything
+   else to all models (`default-route`), with `vllm_sr_default_model` as the default
+   model; add your own decisions (see [Routing Configuration](#routing-configuration))
 5. The gateway routes the request to the selected model's InferencePool
 6. The response flows back to the client
 
@@ -235,12 +236,20 @@ routing:
           use_reasoning: false
 ```
 
-Lower priority number means higher precedence. The first matching decision wins.
+The default configuration sets `global.router.strategy: confidence`: the decision whose
+signals match best wins, so any signal match beats the catch-all `default-route`, and
+priority (higher wins) only breaks ties. With the router's default `priority` strategy the
+highest matching priority wins.
 
-**Models** are the models the router can route to. They come from
-`vllm_sr_route_models` (catalog model names, as deployed with model-manager). Each one
-is listed as a model card and gets a route on the `semantic-router` gateway to its
-InferencePool (`<model>-inference-pool`).
+**Models** are the models the router can route to. With `vllm_sr_route_models` unset,
+the install discovers them: the LLMInferenceServices in `vllm_sr_model_namespace` that
+have an InferencePool, except the guard model (`guardrail_model`) and names matching
+`vllm_sr_discover_exclude` (embedding, rerank and speech models; model-manager keeps
+the category in its catalog, not on the deployed resource). When none is found,
+`vllm_sr_default_model` is used. Otherwise they come from `vllm_sr_route_models`
+(catalog model names, as deployed with model-manager). Models with `coder` in the name
+serve `coding-route`. Each one is listed as a model card and gets a route on the
+`semantic-router` gateway to its InferencePool (`<model>-inference-pool`).
 
 ### Settings
 
@@ -250,8 +259,9 @@ Set these in `env/<env>/config.inference.yaml`:
 |-------|-------------|
 | `vllm_sr_enabled` | Deploy the router (default `false`; needs `ai_gateway_provider: envoy`) |
 | `vllm_sr_expose` | `envoy`, `litellm` or `both` (default: `litellm` with `auth_type: litellm_vkey`, else `envoy`) |
-| `vllm_sr_route_models` | Deployed models the router may pick from |
-| `vllm_sr_default_model` | Model served when no other decision matches |
+| `vllm_sr_route_models` | Deployed models the router may pick from (default: discovered at install time) |
+| `vllm_sr_default_model` | Model served when no other decision matches (the first routed model if it is not routed) |
+| `vllm_sr_discover_exclude` | Regex of model names discovery skips (default `embed\|rerank\|bge\|whisper`) |
 | `vllm_sr_litellm_model_name` | Client-facing model name in LiteLLM (default `semantic-router`) |
 | `vllm_sr_config_override` | Full routing config (signals, decisions), replacing the default |
 | `vllm_sr_cache_backend` | Semantic cache backend: `memory` or `redis` |
@@ -285,8 +295,9 @@ The Helm release is upgraded in place and the router restarts when its config ch
    ./model-manager deploy <model> --wait
    ```
 
-2. Add it to `vllm_sr_route_models`, and to a decision in `vllm_sr_config_override`
-   if it should receive a specific category of prompts.
+2. With `vllm_sr_route_models` unset, the next install discovers it. Otherwise add it
+   to `vllm_sr_route_models`. Add it to a decision in `vllm_sr_config_override` if it
+   should receive a specific category of prompts.
 3. Re-run `./es_auto_installer.sh install inference`.
 
 The model then shows up in the dashboard and becomes a candidate for routing.

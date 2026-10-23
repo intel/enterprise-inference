@@ -163,7 +163,7 @@ environment's copy, `env/<env>/models.yaml`, which the install prefers):
 ```yaml
   - name: qwen3guard
     model_id: Qwen/Qwen3Guard-Gen-0.6B
-    cpu: 2         # CPUs for the guard model
+    cpu: 8         # CPUs for the guard model
     memory: 16Gi   # Memory
     args: [ "--block-size", "128", "--dtype", "bfloat16", "--max-num-seqs", "8", "--tensor-parallel-size", "1" ]
     env:
@@ -382,7 +382,7 @@ cd model_manager
 kubectl describe pod -n llm-inference <pod-name> | grep Events -A 10   # look for "Insufficient cpu"
 ```
 
-**Cause:** not enough free CPU or memory for the guard's request (`cpu: 2`, `memory: 16Gi`).
+**Cause:** not enough free CPU or memory for the guard's request (`cpu: 8`, `memory: 16Gi`).
 
 Check what is consuming CPU:
 
