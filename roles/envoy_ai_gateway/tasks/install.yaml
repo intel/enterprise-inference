@@ -267,6 +267,24 @@
                 from: All
   when: ai_gateway_create | bool
 
+- name: "envoy_ai_gateway | Raise the AI Gateway request buffer limit"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: gateway.envoyproxy.io/v1alpha1
+      kind: ClientTrafficPolicy
+      metadata:
+        name: "{{ ai_gateway_name }}"
+        namespace: "{{ ai_gateway_namespace }}"
+      spec:
+        targetRefs:
+          - group: gateway.networking.k8s.io
+            kind: Gateway
+            name: "{{ ai_gateway_name }}"
+        connection:
+          bufferLimit: "{{ ai_gateway_buffer_limit }}"
+  when: ai_gateway_create | bool
+
 # ServiceMonitors require Prometheus Operator CRDs which are installed by the
 # observability role (runs after envoy_ai_gateway). Skip silently if not yet present.
 - name: "envoy_ai_gateway | Check if Prometheus Operator CRDs are available"
