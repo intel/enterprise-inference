@@ -244,3 +244,48 @@ def test_runtime_installed_or_updated_on_image_change(monkeypatch, current, appl
     cli._install_runtime(m)
     assert bool(calls) == applied
     assert all("image: img:new" in c for c in calls)
+@pytest.mark.parametrize("kind, want", [
+    ("InferenceService", "http://m-predictor.n.svc.cluster.local:80/v1"),
+    ("LLMInferenceService", "http://ai-gateway.envoy-gateway-system.svc.cluster.local/n/m/v1"),
+])
+def test_litellm_api_base(monkeypatch, kind, want):
+    for var in ("MM_LITELLM_KSERVE_URL", "MM_INFERENCE_GATEWAY", "MM_INFERENCE_GATEWAY_NS", "MM_INFERENCE_GATEWAY_SVC_NS"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(k8s, "out", lambda *a: "80" if "m-predictor" in a else "ai-gateway")
+    assert routing._internal_url(Model(name="m", namespace="n", kind=kind)) == want
+
+
+@pytest.mark.parametrize("kind, want", [
+    ("InferenceService", "http://m-predictor.n.svc.cluster.local:80/v1"),
+    ("LLMInferenceService", "http://gw.example.svc.cluster.local/n/m/v1"),
+])
+def test_litellm_api_base_override_is_gateway_only(monkeypatch, kind, want):
+    monkeypatch.setenv("MM_LITELLM_KSERVE_URL", "http://gw.example.svc.cluster.local/")
+    monkeypatch.setattr(k8s, "out", lambda *a: "80")
+    assert routing._internal_url(Model(name="m", namespace="n", kind=kind)) == want
+
+
+def test_litellm_called_directly_in_a_pod(monkeypatch):
+    seen = {}
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"ok": true}'
+
+    class Opener:
+        def open(self, req, timeout):
+            seen.update(url=req.full_url, auth=req.get_header("Authorization"), method=req.get_method())
+            return Resp()
+
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    monkeypatch.setenv("MM_LITELLM_MASTER_KEY", "k")
+    monkeypatch.setattr(routing.urllib.request, "build_opener", lambda *a: Opener())
+    monkeypatch.setattr(k8s, "run", lambda *a, **kw: pytest.fail("no curl pod in a pod"))
+    assert routing._litellm("POST", "http://litellm.litellm.svc:4000/model/new", {"a": 1}) == '{"ok": true}'
+    assert seen == {"url": "http://litellm.litellm.svc:4000/model/new", "auth": "Bearer k", "method": "POST"}
