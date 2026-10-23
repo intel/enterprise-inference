@@ -103,6 +103,14 @@
           (re-running the install upgrades a release that lacks it).
         quiet: true
 
+- name: "litellm | validate | Admin UI signs people in through Keycloak"
+  ansible.builtin.include_role:
+    name: keycloak
+    tasks_from: check_sign_in.yaml
+  vars:
+    keycloak_sign_in: {name: LiteLLM admin UI, url: "{{ litellm_ui_url }}/ui/"}
+  when: litellm_ui_sso | bool and litellm_gateway_publish | bool
+
 - name: "litellm | validate | Summary"
   ansible.builtin.debug:
     msg:

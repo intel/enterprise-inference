@@ -205,14 +205,84 @@
         _langfuse_clickhouse_password: "{{ _langfuse_secrets.resources[0].data.clickhouse_password | b64decode }}"
       no_log: true
 
+    # ── Keycloak sign-in ─────────────────────────────────────────────────────
+
+    - name: "langfuse | Keycloak sign-in"
+      when: langfuse_sso | bool
+      block:
+        - name: "langfuse | Keycloak client"
+          ansible.builtin.include_role:
+            name: keycloak
+            tasks_from: oidc_client.yaml
+          vars:
+            keycloak_client:
+              id: "{{ langfuse_oidc_client_id }}"
+              redirect_uris: ["https://{{ langfuse_hostname }}/api/auth/callback/keycloak"]
+              post_logout_uris: ["https://{{ langfuse_hostname }}/"]
+
+        - name: "langfuse | Keycloak client secret"
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: langfuse-sso
+                namespace: "{{ langfuse_namespace }}"
+              type: Opaque
+              stringData:
+                client-secret: "{{ keycloak_client_secret }}"
+          no_log: true
+
+        # Langfuse fetches Keycloak's discovery document at its public URL.
+        - name: "langfuse | Reach Keycloak at its public URL"
+          ansible.builtin.include_role:
+            name: gateway
+            tasks_from: client_trust.yaml
+          vars:
+            gateway_trust_namespace: "{{ langfuse_namespace }}"
+            gateway_trust_configmap: langfuse-platform-ca
+
     # ── Helm install ──────────────────────────────────────────────────────────
 
     - name: "langfuse | Add Helm repo"
       kubernetes.core.helm_repository:
         name: "{{ langfuse_helm_repo_name }}"
         repo_url: "{{ langfuse_helm_repo }}"
+      register: _langfuse_helm_repo
+      until: _langfuse_helm_repo is succeeded
+      retries: "{{ helm_retries | default(3) }}"
+      delay: 15
 
     - name: "langfuse | Install via Helm"
+      vars:
+        _lf_ca: "{{ langfuse_sso | bool and gateway_trust.ca_pem | default('') | length > 0 }}"
+        _lf_ca_volumes: [{name: platform-ca, configMap: {name: langfuse-platform-ca}}]
+        _lf_env:
+          # Single-node ClickHouse, no ZooKeeper.
+          - {name: CLICKHOUSE_CLUSTER_ENABLED, value: "false"}
+          - {name: LANGFUSE_INIT_ORG_ID, valueFrom: {secretKeyRef: {name: langfuse-secrets, key: org_id}}}
+          - {name: LANGFUSE_INIT_ORG_NAME, value: inference}
+          - {name: LANGFUSE_INIT_PROJECT_ID, valueFrom: {secretKeyRef: {name: langfuse-secrets, key: project_id}}}
+          - {name: LANGFUSE_INIT_PROJECT_NAME, value: inference}
+          - {name: LANGFUSE_INIT_PROJECT_PUBLIC_KEY, valueFrom: {secretKeyRef: {name: langfuse-secrets, key: public_key}}}
+          - {name: LANGFUSE_INIT_PROJECT_SECRET_KEY, valueFrom: {secretKeyRef: {name: langfuse-secrets, key: secret_key}}}
+          - {name: LANGFUSE_INIT_USER_EMAIL, valueFrom: {secretKeyRef: {name: langfuse-secrets, key: admin_email}}}
+          - {name: LANGFUSE_INIT_USER_NAME, valueFrom: {secretKeyRef: {name: langfuse-secrets, key: admin_name}}}
+          - {name: LANGFUSE_INIT_USER_PASSWORD, valueFrom: {secretKeyRef: {name: langfuse-secrets, key: admin_password}}}
+          - {name: AUTH_SESSION_MAX_AGE, value: "{{ langfuse_session_max_age | string }}"}
+        _lf_env_sso:
+          - {name: AUTH_KEYCLOAK_NAME, value: Keycloak}
+          - {name: AUTH_KEYCLOAK_CLIENT_ID, value: "{{ langfuse_oidc_client_id }}"}
+          - {name: AUTH_KEYCLOAK_CLIENT_SECRET, valueFrom: {secretKeyRef: {name: langfuse-sso, key: client-secret}}}
+          - {name: AUTH_KEYCLOAK_ISSUER, value: "{{ keycloak_client_issuer | default('') }}"}
+          - {name: AUTH_KEYCLOAK_CHECKS, value: "pkce,state"}
+          # Everyone who signs in reads the seeded project; only the seeded admin creates orgs.
+          - {name: LANGFUSE_DEFAULT_ORG_ID, valueFrom: {secretKeyRef: {name: langfuse-secrets, key: org_id}}}
+          - {name: LANGFUSE_DEFAULT_ORG_ROLE, value: VIEWER}
+          - {name: LANGFUSE_DEFAULT_PROJECT_ID, valueFrom: {secretKeyRef: {name: langfuse-secrets, key: project_id}}}
+          - {name: LANGFUSE_DEFAULT_PROJECT_ROLE, value: VIEWER}
+          - {name: LANGFUSE_ALLOWED_ORGANIZATION_CREATORS, valueFrom: {secretKeyRef: {name: langfuse-secrets, key: admin_email}}}
       kubernetes.core.helm:
         name: langfuse
         chart_ref: "{{ langfuse_helm_chart }}"
@@ -265,6 +335,9 @@
             # Web UI sizing
             web:
               resources: "{{ _langfuse_web_resources }}"
+              hostAliases: >-
+                {{ [{'ip': gateway_trust.address, 'hostnames': [keycloak_client_issuer | urlsplit('hostname')]}]
+                   if langfuse_sso | bool and langfuse_pin_issuer_host | bool else [] }}
               livenessProbe:
                 initialDelaySeconds: 60
                 periodSeconds: 15
@@ -308,49 +381,11 @@
                 maxReplicas: "{{ (_langfuse_replicas | int) * 2 }}"
                 targetCPUUtilizationPercentage: 70
 
-            # Disable ClickHouse cluster mode — we run single-node, no ZooKeeper
-            additionalEnv:
-              - name: CLICKHOUSE_CLUSTER_ENABLED
-                value: "false"
-              - name: LANGFUSE_INIT_ORG_ID
-                valueFrom:
-                  secretKeyRef:
-                    name: langfuse-secrets
-                    key: org_id
-              - name: LANGFUSE_INIT_ORG_NAME
-                value: "inference"
-              - name: LANGFUSE_INIT_PROJECT_ID
-                valueFrom:
-                  secretKeyRef:
-                    name: langfuse-secrets
-                    key: project_id
-              - name: LANGFUSE_INIT_PROJECT_NAME
-                value: "inference"
-              - name: LANGFUSE_INIT_PROJECT_PUBLIC_KEY
-                valueFrom:
-                  secretKeyRef:
-                    name: langfuse-secrets
-                    key: public_key
-              - name: LANGFUSE_INIT_PROJECT_SECRET_KEY
-                valueFrom:
-                  secretKeyRef:
-                    name: langfuse-secrets
-                    key: secret_key
-              - name: LANGFUSE_INIT_USER_EMAIL
-                valueFrom:
-                  secretKeyRef:
-                    name: langfuse-secrets
-                    key: admin_email
-              - name: LANGFUSE_INIT_USER_NAME
-                valueFrom:
-                  secretKeyRef:
-                    name: langfuse-secrets
-                    key: admin_name
-              - name: LANGFUSE_INIT_USER_PASSWORD
-                valueFrom:
-                  secretKeyRef:
-                    name: langfuse-secrets
-                    key: admin_password
+            additionalEnv: >-
+              {{ _lf_env + (_lf_env_sso if langfuse_sso | bool else [])
+                 + ([{'name': 'NODE_EXTRA_CA_CERTS', 'value': '/etc/platform-ca/ca.crt'}] if _lf_ca | bool else []) }}
+            extraVolumes: "{{ _lf_ca_volumes if _lf_ca | bool else [] }}"
+            extraVolumeMounts: "{{ [{'name': 'platform-ca', 'mountPath': '/etc/platform-ca', 'readOnly': true}] if _lf_ca | bool else [] }}"
 
           # ── PostgreSQL — use our existing instance ────────────────────────
           postgresql:
@@ -424,6 +459,10 @@
               value: "{{ _langfuse_s3_secret_key }}"
 
     # ── Fix failed Prisma migrations (Langfuse bug: some migrations not idempotent on empty DB)
+      register: _langfuse_helm
+      until: _langfuse_helm is succeeded
+      retries: "{{ helm_retries | default(3) }}"
+      delay: 15
     - name: "langfuse | Wait for initial migration attempt (45s)"
       ansible.builtin.pause:
         seconds: 45
@@ -517,6 +556,28 @@
       retries: 60
       delay: 5
 
+# Values apply on a fresh install only: an existing release keeps its sign-in.
+- name: "langfuse | Read the web deployment"
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: langfuse-web
+    namespace: "{{ langfuse_namespace }}"
+  register: _langfuse_web_live
+
+- name: "langfuse | Sign-in settings are out of date"
+  vars:
+    _env: >-
+      {{ (_langfuse_web_live.resources | first).spec.template.spec.containers
+         | map(attribute='env') | flatten | map(attribute='name') | list }}
+  ansible.builtin.debug:
+    msg: >-
+      Langfuse runs with Keycloak sign-in {{ 'off' if langfuse_sso | bool else 'on' }}, but
+      langfuse_sso is {{ langfuse_sso | bool }}. Reinstall it: teardown langfuse, then install langfuse.
+  when:
+    - _langfuse_web_live.resources | length > 0
+    - (langfuse_sso | bool) != ('AUTH_KEYCLOAK_ISSUER' in _env)
+
 # ── Load secrets for use in tasks outside the install block ──────────────────
 # Runs unconditionally so re-runs (Helm already installed) still have keys set
 
@@ -546,6 +607,7 @@
     gateway_publish_namespace: "{{ langfuse_namespace }}"
     gateway_publish_host: "{{ langfuse_hostname }}"
     gateway_publish_mode: subdomain   # Langfuse cannot run under a path
+    gateway_publish_portal: {title: "Langfuse", description: "LLM tracing and analytics"}
   when: langfuse_gateway_publish | bool
 
 - name: "langfuse | Create HTTPRoute"
@@ -563,14 +625,17 @@
           - "{{ gateway_publish.parent_ref }}"
         hostnames:
           - "{{ langfuse_hostname }}"
-        rules:
-          - matches:
-              - path:
-                  type: PathPrefix
-                  value: /
-            backendRefs:
-              - name: langfuse-web
-                port: 3000
+        # With Keycloak sign-in, new accounts come only from Keycloak: the
+        # email/password sign-up page and API redirect to the sign-in page.
+        rules: >-
+          {{ ([{'matches': [{'path': {'type': 'Exact', 'value': '/api/auth/signup'}},
+                            {'path': {'type': 'Exact', 'value': '/auth/sign-up'}}],
+                'filters': [{'type': 'RequestRedirect',
+                             'requestRedirect': {'path': {'type': 'ReplaceFullPath', 'replaceFullPath': '/auth/sign-in'},
+                                                 'statusCode': 302}}]}]
+              if langfuse_sso | bool else [])
+             + [{'matches': [{'path': {'type': 'PathPrefix', 'value': '/'}}],
+                 'backendRefs': [{'name': 'langfuse-web', 'port': 3000}]}] }}
 
 - name: "langfuse | Exempt the route from gateway auth (Langfuse has its own login)"
   when: langfuse_gateway_publish | bool
