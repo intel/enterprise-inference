@@ -45,6 +45,11 @@ envoy_ai_gateway_namespace: "envoy-ai-gateway-system"
 # litellm_hostname: "litellm.inference-example.com"  # defaults to litellm.<base_domain_name>
 # litellm_cache_enabled: true
 # litellm_cache_ttl: 600
+# litellm_reconcile: true       # upgrade an existing release with the current settings (default: left as is)
+# litellm_allow_pod_network: true   # with Istio: let callers outside the mesh (e.g. agent sandboxes) reach LiteLLM
+# litellm_allowed_source_cidrs: ["<cidr>"]   # explicit source ranges instead of the pod network
+# guardrails_enabled: true      # content-safety guardrail (default: off)
+# guardrail_model: "qwen3guard" # guard model from the catalog (docs/customize/guardrails.md)
 
 # --- Langfuse ---
 # langfuse_enabled: false       # auto-enabled when auth_provider=litellm
@@ -87,7 +92,32 @@ kubernetes_cpu_policy: "nri-balloons"
 # Can be overridden with: ./es_auto_installer.sh install inference --skip-models
 llm_services_deploy_models: false
 
+# Catalog models deployed on install whatever llm_services_deploy_models says —
+# set by a solution layer that needs a default model (the agent toolkit sets one).
+# llm_services_autodeploy_models: []
+
 # Optional: Customize model deployment behavior
 # model_deploy_flags: ""                    # Additional flags for deploy-default-models.sh
 # model_deploy_flags: "--skip-download"     # Fast for testing (assume weights on PVC)
 # model_deploy_flags: "--no-wait"           # Don't wait for models to become Ready
+
+# --- vLLM Semantic Router (optional, off by default) ---
+# Classifier-based intelligent routing: one endpoint auto-selects the best-fit
+# model per request. Opt-in and additive — direct model calls are unaffected.
+# Needs ai_gateway_provider: envoy. Guide: docs/customize/vllm-semantic-router.md
+# vllm_sr_enabled: true
+# vllm_sr_route_models:                     # models the router may pick from (default: discovered)
+#   - qwen3-4b
+#   - qwen3-coder-30b
+# vllm_sr_litellm_model_name: "semantic-router"   # client-facing name (auth_provider: litellm)
+# vllm_sr_config_override: null             # advanced: full canonical routing config
+# vllm_sr_dashboard_enabled: true           # dashboard on vllm-sr.<base_domain_name>
+
+# --- Hybrid Router (optional, off by default; needs LiteLLM) ---
+# Complexity-tier + multi-armed-bandit routing inside LiteLLM. Clients call the
+# hybrid-router model. Router code: roles/litellm/files/router/
+# Guide: docs/customize/hybrid-router.md
+# hybrid_router_enabled: true
+# hybrid_router_tier_candidates:            # deployed models per complexity tier
+#   SIMPLE:  [qwen3-4b]
+#   COMPLEX: [qwen3-coder-30b]

@@ -1,0 +1,231 @@
+# rc: 0
+--- stdout
+[INFO ]  Deploying specdec (LLMInferenceService)
+[INFO ]    Runtime: vllm @ 0.24.0 | Category: llm | Routing: epp
+[INFO ]    CPU: 4 | Memory: 8Gi | Replicas: 2
+[INFO ]    CPU policy: best-effort
+[  OK ]  Storage ready: model-store (Bound)
+[INFO ]  Downloading model weights: org/target → PVC:/specdec
+[INFO ]  Downloading model weights: org/target
+[INFO ]    This may take several minutes depending on model size and your internet/proxy speed.
+[INFO ]    Follow progress below — do not interrupt.
+[  OK ]  Download complete: specdec
+[  OK ]  Manifest applied: LLMInferenceService/specdec in ns1
+[INFO ]  Creating AIGatewayRoute aigw-specdec (EPP → specdec-inference-pool)
+[INFO ]  Waiting for specdec to become Ready (timeout: 900s)...
+[  OK ]  specdec is Ready
+
+  ────────────────────────────────────────────────────────
+  Model:    specdec  |  Kind: LLMInferenceService  |  Category: llm
+  Auth:     keycloak
+  Endpoint: https://inference.example.com/v1/chat/completions
+  Note:     Pass "model": "specdec" in the request body
+  ────────────────────────────────────────────────────────
+
+  1. Get a Keycloak token:
+  source <MM>/scripts/get-keycloak-token.sh
+  # exports TOKEN, GATEWAY_IP, GATEWAY_DOMAIN
+
+  2. Call the model:
+  curl -sk --noproxy "*" \
+    -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"model":"specdec","messages":[{"role":"user","content":"Hello"}],"max_tokens":16}' \
+    https://inference.example.com/v1/chat/completions
+
+--- stderr
+[WARN ]  AI Gateway service 'ai-gateway' not found in envoy-gateway-system — LiteLLM will bypass gateway for specdec
+--- kubectl
+$ kubectl create namespace ns1
+$ kubectl delete job download-specdec -n ns1 --ignore-not-found
+$ kubectl apply -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: download-specdec
+  namespace: ns1
+  labels:
+    app.kubernetes.io/name: download-specdec
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 7200
+  # Garbage-collect the finished Job (and its pod) automatically once it
+  # completes or fails, so a successful download never leaves a stray pod
+  # behind even if the model-manager CLI has already exited. The window is
+  # long enough to inspect logs of a failed job before it is reaped.
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: download-specdec
+        app.kubernetes.io/managed-by: model-manager
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        # uid/gid match the serving pod for this runtime so prepared files are
+        # readable by the server (vLLM=1000, OVMS=5000). fsGroup makes the kubelet
+        # chown the mounted volume to this GID and mount it group-writable —
+        # without it, dynamically provisioned volumes (e.g. rancher.io/local-path)
+        # are created root:root 0755 and the non-root job gets "Permission denied".
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: downloader
+          image: img/vllm:0.24.0
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              export HOME=/tmp HF_HOME=/tmp/.hf XDG_CACHE_HOME=/tmp/.cache PIP_CACHE_DIR=/tmp/.pip
+              if [ ! -f /models/specdec/draft/.download_complete ]; then
+                command -v hf >/dev/null 2>&1 || pip install -q huggingface_hub[hf_xet]
+                hf download 'org/draft' --local-dir /models/specdec/draft
+                touch /models/specdec/draft/.download_complete
+              fi
+              if [ -f /models/specdec/.download_complete ]; then echo 'Weights already present, skipping download'; exit 0; fi
+              command -v hf >/dev/null 2>&1 || pip install -q huggingface_hub[hf_xet]
+              hf download 'org/target' --local-dir /models/specdec
+              touch /models/specdec/.download_complete
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          # Bound the job (CWE-400). Requests stay small so this transient job
+          # schedules easily; the memory limit tracks the model's serving
+          # envelope so OVMS `ovms --pull` conversion/quantization does not OOM.
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+          env:
+            - name: HOME
+              value: "/models"
+            - name: HF_HOME
+              value: "/models/.hf-cache"
+          volumeMounts:
+            - name: model-storage
+              mountPath: /models
+      volumes:
+        - name: model-storage
+          persistentVolumeClaim:
+            claimName: model-store
+$ kubectl apply --server-side --field-manager=model-manager --force-conflicts -f -
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: specdec
+  namespace: ns1
+  labels:
+    app.kubernetes.io/name: specdec
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  annotations:
+    cpu-policy.model-manager.io/type: best-effort
+  model:
+    uri: pvc://model-store/specdec
+  replicas: 2
+  router:
+    gateway:
+      refs:
+        - name: ai-gateway
+          namespace: llm-inference
+    route: {}
+    scheduler: {}
+  template:
+    containers:
+      - name: main
+        image: img/vllm:0.24.0
+        args: 
+        - "--dtype"
+        - "bfloat16"
+        - "--speculative-config.method"
+        - "draft_model"
+        - "--speculative-config.model"
+        - "/mnt/models/draft"
+        - "--served-model-name"
+        - "specdec"
+        env: 
+        - name: USER
+          value: "vllm"
+        - name: VLLM_CPU_KVCACHE_SPACE
+          value: "4"
+        resources:
+          requests:
+            cpu: "4"
+            memory: 8Gi
+          limits:
+            cpu: "4"
+            memory: 8Gi
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 120
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 12
+          periodSeconds: 10
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
+    securityContext:
+      seccompProfile:
+        type: RuntimeDefault
+$ kubectl apply --server-side --field-manager=model-manager --force-conflicts -f -
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIGatewayRoute
+metadata:
+  name: aigw-specdec
+  namespace: ns1
+  labels:
+    app.kubernetes.io/name: specdec
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: ai-gateway
+      namespace: llm-inference
+      sectionName: http
+  rules:
+    - matches:
+        - headers:
+            - name: x-ai-eg-model
+              type: Exact
+              value: specdec
+      timeouts:
+        request: 600s
+      backendRefs:
+        - name: specdec-inference-pool
+          kind: InferencePool
+          group: inference.networking.k8s.io
+$ kubectl patch inferencepool specdec-inference-pool -n ns1 --type=merge --subresource=status -p {"status":{"parents":[{"parentRef":{"group":"gateway.networking.k8s.io","kind":"Gateway","name":"ai-gateway","namespace":"ai-gateway"},"controllerName":"gateway.envoyproxy.io/gatewayclass-controller","conditions":[{"type":"Accepted","status":"True","reason":"Accepted","message":"Patched by model-manager","lastTransitionTime":"<TS>"}]}]}}

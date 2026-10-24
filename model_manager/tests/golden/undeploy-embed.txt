@@ -1,0 +1,9 @@
+# rc: 0
+--- stdout
+[INFO ]  Undeploying bge-base-en
+[  OK ]  bge-base-en undeployed
+--- stderr
+--- kubectl
+$ kubectl delete LLMInferenceService bge-base-en -n llm-inference --ignore-not-found
+$ kubectl delete configmap bge-base-en-chat-template -n llm-inference --ignore-not-found
+$ kubectl delete httproute direct-bge-base-en -n llm-inference --ignore-not-found

@@ -1,0 +1,4 @@
+# model-manager runtime dependencies (Python >= 3.9)
+PyYAML>=5.4
+# cpu-collisions-check only (scripts/nri-cpu-report.py)
+kubernetes>=29.0

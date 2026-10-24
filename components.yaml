@@ -52,3 +52,11 @@ components:
     layer: inference
     enabled: "{{ kserve_enabled | default(true) | bool }}"
     depends_on: [kserve]
+
+  - name: vllm_sr
+    layer: inference
+    # vLLM Semantic Router: opt-in, classifier-based model routing on a dedicated
+    # Envoy AI Gateway (ext_proc), so Envoy AI Gateway only. Runs after the models
+    # and the AI gateway are up. See docs/customize/vllm-semantic-router.md.
+    enabled: "{{ vllm_sr_enabled | default(false) | bool and (ai_gateway_provider | default('envoy')) == 'envoy' }}"
+    depends_on: [llm_services]

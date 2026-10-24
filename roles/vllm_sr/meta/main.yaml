@@ -1,0 +1,9 @@
+---
+# Ordering comes from components.yaml (layer + depends_on), never meta dependencies.
+galaxy_info:
+  role_name: vllm_sr
+  author: Intel Corporation
+  description: vLLM Semantic Router — classifier-based intelligent model routing (opt-in)
+  license: Apache-2.0
+  min_ansible_version: "2.15"
+dependencies: []

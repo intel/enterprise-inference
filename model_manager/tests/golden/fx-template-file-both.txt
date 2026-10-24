@@ -1,0 +1,5 @@
+# rc: 1
+--- stdout
+--- stderr
+[ERROR]  Model 'tmpl-file-both': set either chat_template OR chat_template_file, not both.
+--- kubectl
