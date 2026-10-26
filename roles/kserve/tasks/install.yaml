@@ -218,6 +218,27 @@
       register: _kserve_crd
       changed_when: "'serverside-applied' in _kserve_crd.stdout"
 
+    - name: "kserve | List the KServe CRDs"
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+      register: _kserve_crd_list
+
+    # The resources chart needs these served first, or Helm reports "no matches for kind"
+    - name: "kserve | Wait for the KServe CRDs to be established"
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: "{{ item }}"
+        wait: true
+        wait_condition:
+          type: Established
+          status: "True"
+        wait_timeout: 120
+      loop: "{{ _kserve_crd_list.resources | map(attribute='metadata.name') | select('search', '\\.serving\\.kserve\\.io$') | list }}"
+      loop_control:
+        label: "{{ item }}"
+
     - name: "kserve | Install KServe resources via Helm"
       kubernetes.core.helm:
         name: kserve-resources
