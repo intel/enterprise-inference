@@ -6,6 +6,8 @@ every mutating kubectl call with the manifest it applied. Regenerate them with
 launcher end to end against fake kubectl/curl (tests/fakebin). Intended changes
 in behaviour are declared per case as `deviations`: (regex on the legacy text,
 replacement).
+
+The gpu-* cases live in test_gpu.py, which reuses this harness.
 """
 from __future__ import annotations
 
@@ -52,6 +54,23 @@ OVMS_IMAGE = (r"openvino/model_server:2026\.(1-py|3)\b", "openvino/model_server:
 HELP_SVC_NS = (r"^(  MM_INFERENCE_HOSTNAME .*\n)",
                r"\1  MM_INFERENCE_GATEWAY_SVC_NS\n                        Namespace of the AI Gateway Service LiteLLM calls\n"
                r"                        (default: MM_INFERENCE_GATEWAY_NS, else envoy-gateway-system)\n")
+# --help documents --gpus and MM_ACCEL_RESOURCE (GPU runtimes), which are new.
+HELP_GPU = [(r"^(  --tp N .*\n)",
+             r"\1  --gpus N             GPUs per pod (device: gpu runtimes, e.g. vllm-cuda); default --tensor-parallel-size\n"),
+            (r"^(  MM_CONFIG .*\n)",
+             r"\1  MM_ACCEL_RESOURCE     Accelerator extended resource the cluster advertises (e.g. nvidia.com/gpu).\n"
+             r"                            Required to deploy a device: gpu runtime (vllm-cuda); ai-solutions sets\n"
+             r"                            it in rack-scale mode only\n")]
+# The catalog's GPU examples, its last entries, are undeployed too; the legacy catalog had none.
+GPU_MODELS = ("qwen3-0-6b-cuda", "llama-3-1-70b-instruct-cuda")
+UNDEPLOY_GPU_MODELS = [
+    (r"^(?=--- stderr\n)", "".join(
+        f"[INFO ]  Undeploying {n}\n[INFO ]  Waiting for {n} pods to terminate (timeout: 180s)...\n"
+        f"[  OK ]  {n} undeployed (all pods terminated, CPUs released)\n" for n in GPU_MODELS)),
+    (r"\Z", "".join(
+        f"$ kubectl delete LLMInferenceService {n} -n llm-inference --ignore-not-found\n"
+        f"$ kubectl delete configmap {n}-chat-template -n llm-inference --ignore-not-found\n"
+        f"$ kubectl delete httproute aigw-{n} -n llm-inference --ignore-not-found\n" for n in GPU_MODELS))]
 
 
 def nri_node(in_use: int) -> list:
@@ -129,9 +148,9 @@ CASES = [
     case("fx-bad-env", "deploy", "badenv", "--dry-run", env=BE, catalog=FIXTURE),
     case("fx-bad-template", "deploy", "badtpl", "--dry-run", env=BE, catalog=FIXTURE),
     # CLI surface and validation errors.
-    case("no-args", deviations=[HELP_SVC_NS]),
-    case("help", "--help", deviations=[HELP_SVC_NS]),
-    case("help-command", "help", deviations=[HELP_SVC_NS]),
+    case("no-args", deviations=[HELP_SVC_NS, *HELP_GPU]),
+    case("help", "--help", deviations=[HELP_SVC_NS, *HELP_GPU]),
+    case("help-command", "help", deviations=[HELP_SVC_NS, *HELP_GPU]),
     case("version", "version"),
     case("version-flag", "-v"),
     case("unknown-option", "deploy", "qwen3-0-6b", "--bogus"),
@@ -176,7 +195,8 @@ CASES = [
         [r"get LLMInferenceService qwen-alt -n llm-inference -o jsonpath", 0, "llm-inference"],
         [r"get httproute direct-qwen-alt", 0, ""]]),
     case("undeploy-missing", "undeploy", "ghost"),
-    case("undeploy-all-agentgateway", "undeploy", "all", "--wait", env={"MM_AI_GATEWAY_PROVIDER": "agentgateway"}),
+    case("undeploy-all-agentgateway", "undeploy", "all", "--wait", env={"MM_AI_GATEWAY_PROVIDER": "agentgateway"},
+         deviations=UNDEPLOY_GPU_MODELS),
 ]
 
 

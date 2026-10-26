@@ -1,0 +1,24 @@
+# =============================================================================
+# vLLM runtime — low-level plumbing (NVIDIA GPU / CUDA)
+# =============================================================================
+# GPU counterpart of runtimes/vllm. The deploy config users tune — image
+# versions, common env, per-category args and resource defaults — lives in
+# models.yaml → runtimes.vllm-cuda (models.yaml wins on any key clash). This
+# file holds only the stable plumbing merged in at load time.
+#
+# Plumbing keys specific to GPU runtimes:
+#   device                      gpu — selects the GPU render path (accelerator
+#                               limits, /dev/shm, toleration, no CPU pinning)
+#                               and arms the MM_ACCEL_RESOURCE deploy gate
+#   accelerator_resource        default extended resource for --dry-run previews;
+#                               a real deploy uses MM_ACCEL_RESOURCE (cluster truth)
+#   accelerator_toleration_key  taint key GPU nodes commonly carry (NoSchedule)
+#   shm_size                    /dev/shm emptyDir size — NCCL needs it for TP>1
+# =============================================================================
+
+device: gpu
+kind: LLMInferenceService
+routing: epp
+accelerator_resource: nvidia.com/gpu
+accelerator_toleration_key: nvidia.com/gpu
+shm_size: 10Gi
