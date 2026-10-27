@@ -260,7 +260,8 @@
             web:
               resources: "{{ _langfuse_web_resources }}"
               livenessProbe:
-                initialDelaySeconds: 60
+                # First start runs the ClickHouse migrations; a restart mid-migration leaves them dirty
+                initialDelaySeconds: 600
                 periodSeconds: 15
                 failureThreshold: 5
               readinessProbe:

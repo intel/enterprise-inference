@@ -1,0 +1,88 @@
+# rc: 0
+--- stdout
+[INFO ]  Deploying auto-cpu (LLMInferenceService)
+[INFO ]    Runtime: vllm @ 0.24.0 | Category: llm | Routing: epp
+[INFO ]    CPU: auto | Memory: 8Gi | Replicas: 2
+[INFO ]    CPU policy: nri-balloons
+[INFO ]    CPU auto: keeping deployed value 12
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: auto-cpu
+  namespace: ns1
+  labels:
+    app.kubernetes.io/name: auto-cpu
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  annotations:
+    cpu-policy.model-manager.io/type: nri-balloons
+    cpu-policy.model-manager.io/balloon: vllm-balloon
+    balloon.balloons.resource-policy.nri.io/container.main: vllm-balloon
+  model:
+    uri: pvc://model-store/auto-cpu
+  replicas: 2
+  router:
+    gateway:
+      refs:
+        - name: ai-gateway
+          namespace: llm-inference
+    route: {}
+    scheduler: {}
+  template:
+    containers:
+      - name: main
+        image: img/vllm:0.24.0
+        args: 
+        - "--dtype"
+        - "bfloat16"
+        - "--served-model-name"
+        - "auto-cpu"
+        env: 
+        - name: USER
+          value: "vllm"
+        - name: VLLM_CPU_KVCACHE_SPACE
+          value: "4"
+        resources:
+          requests:
+            cpu: "12"
+            memory: 8Gi
+          limits:
+            cpu: "12"
+            memory: 8Gi
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 120
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 12
+          periodSeconds: 10
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
+    securityContext:
+      seccompProfile:
+        type: RuntimeDefault
+--- stderr
+[WARN ]  NRI balloons DaemonSet not found in kube-system. Pods will be annotated for NRI but will not receive CPU pinning until the nri-resource-policy-balloons DaemonSet is deployed. Run the nri_cpu_balloons Ansible role to install it.
+[INFO ]  Binding pods to NRI balloon 'vllm-balloon'
+--- kubectl

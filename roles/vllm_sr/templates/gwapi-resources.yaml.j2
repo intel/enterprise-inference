@@ -1,0 +1,192 @@
+# Copyright (C) 2025-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+{# =============================================================================
+   Envoy AI Gateway wiring for the semantic router (adapted from the upstream
+   deploy/kubernetes/routing-strategies/aigw-resources manifest).
+
+   A DEDICATED `semantic-router` gateway carries the ext_proc so normal
+   ai-gateway model traffic is never forced through the classifier. The router
+   (ext_proc, allow_mode_override) sets `x-ai-eg-model`; the AIGatewayRoutes
+   below match that header and dispatch to the model's existing InferencePool.
+   ============================================================================= #}
+# Dedicated EnvoyProxy — its OWN envoyService.name so the router runs on an
+# isolated Envoy (never merges onto / disrupts the ai-gateway).
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: {{ vllm_sr_envoyproxy_name }}
+  namespace: {{ vllm_sr_gateway_namespace }}
+  labels:
+    app.kubernetes.io/managed-by: ansible
+    app.kubernetes.io/part-of: vllm-sr
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        type: ClusterIP
+        name: {{ vllm_sr_gateway_service_name }}
+---
+# Dedicated GatewayClass bound to the EnvoyProxy above (same Envoy Gateway
+# controller, so the AI Gateway extension — AIGatewayRoute/InferencePool — works).
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: {{ vllm_sr_gateway_class }}
+  labels:
+    app.kubernetes.io/managed-by: ansible
+    app.kubernetes.io/part-of: vllm-sr
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: {{ vllm_sr_envoyproxy_name }}
+    namespace: {{ vllm_sr_gateway_namespace }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ vllm_sr_gateway_name }}
+  namespace: {{ vllm_sr_gateway_namespace }}
+  labels:
+    app.kubernetes.io/managed-by: ansible
+    app.kubernetes.io/part-of: vllm-sr
+spec:
+  gatewayClassName: {{ vllm_sr_gateway_class }}
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
+---
+# AI workloads need a larger buffer than Envoy's 32KiB default.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: {{ vllm_sr_gateway_name }}
+  namespace: {{ vllm_sr_gateway_namespace }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ vllm_sr_gateway_name }}
+  connection:
+    bufferLimit: 50Mi
+{% for m in _vllm_sr_models %}
+---
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIGatewayRoute
+metadata:
+  name: sr-{{ m }}
+  namespace: {{ vllm_sr_gateway_namespace }}
+  labels:
+    app.kubernetes.io/managed-by: ansible
+    app.kubernetes.io/part-of: vllm-sr
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ vllm_sr_gateway_name }}
+      namespace: {{ vllm_sr_gateway_namespace }}
+      sectionName: http
+  rules:
+    - matches:
+        - headers:
+            - name: x-ai-eg-model
+              type: Exact
+              value: {{ m }}
+      timeouts:
+        request: {{ vllm_sr_route_timeout }}
+      backendRefs:
+        - name: {{ m }}{{ vllm_sr_pool_suffix }}
+          kind: InferencePool
+          group: inference.networking.k8s.io
+{% endfor %}
+---
+# Catch-all: requests the classifier does not tag fall back to the default model.
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIGatewayRoute
+metadata:
+  name: sr-default
+  namespace: {{ vllm_sr_gateway_namespace }}
+  labels:
+    app.kubernetes.io/managed-by: ansible
+    app.kubernetes.io/part-of: vllm-sr
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ vllm_sr_gateway_name }}
+      namespace: {{ vllm_sr_gateway_namespace }}
+      sectionName: http
+  rules:
+    - timeouts:
+        request: {{ vllm_sr_route_timeout }}
+      backendRefs:
+        - name: {{ _vllm_sr_default }}{{ vllm_sr_pool_suffix }}
+          kind: InferencePool
+          group: inference.networking.k8s.io
+---
+# Inject the semantic-router ext_proc filter onto this gateway's listener.
+# allow_mode_override lets the router rewrite the destination (x-ai-eg-model),
+# which the AIGatewayRoutes above then match. Requires enableEnvoyPatchPolicy
+# in the Envoy Gateway config (checked by the install task).
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyPatchPolicy
+metadata:
+  name: {{ vllm_sr_gateway_name }}-extproc
+  namespace: {{ vllm_sr_gateway_namespace }}
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: {{ vllm_sr_gateway_name }}
+  type: JSONPatch
+  jsonPatches:
+    - type: "type.googleapis.com/envoy.config.listener.v3.Listener"
+      name: {{ vllm_sr_gateway_namespace }}/{{ vllm_sr_gateway_name }}/http
+      operation:
+        op: add
+        path: /default_filter_chain/filters/0/typed_config/http_filters/0
+        value:
+          name: semantic-router-extproc
+          typedConfig:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+            allow_mode_override: true
+            grpcService:
+              envoyGrpc:
+                authority: {{ vllm_sr_release_name }}.{{ vllm_sr_namespace }}:{{ vllm_sr_grpc_port }}
+                clusterName: {{ vllm_sr_gateway_name }}-extproc
+              timeout: 60s
+            message_timeout: 60s
+            processing_mode:
+              request_body_mode: BUFFERED
+              request_header_mode: SEND
+              request_trailer_mode: SKIP
+              response_body_mode: BUFFERED
+              response_header_mode: SEND
+              response_trailer_mode: SKIP
+    - type: "type.googleapis.com/envoy.config.cluster.v3.Cluster"
+      name: {{ vllm_sr_gateway_name }}-extproc
+      operation:
+        op: add
+        path: ""
+        value:
+          name: {{ vllm_sr_gateway_name }}-extproc
+          type: STRICT_DNS
+          connect_timeout: 60s
+          lb_policy: ROUND_ROBIN
+          http2_protocol_options: {}
+          load_assignment:
+            cluster_name: {{ vllm_sr_gateway_name }}-extproc
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: {{ vllm_sr_release_name }}.{{ vllm_sr_namespace }}.svc.cluster.local
+                          port_value: {{ vllm_sr_grpc_port }}

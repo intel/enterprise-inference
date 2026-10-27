@@ -15,6 +15,7 @@ stack and the CLI that deploys and manages models at runtime.
 | **LLM services** | `roles/llm_services/` | Provisions the inference namespace and ServingRuntimes, and runs the model auto-deploy phase |
 | **Keycloak config** | `roles/keycloak_config/` | Inference realm + client for JWT-based model auth |
 | **NFD** | `roles/nfd/` | Node Feature Discovery — labels nodes with hardware capabilities (AMX, AVX512, NUMA count) |
+| **vLLM Semantic Router** | `roles/vllm_sr/`, `charts/vllm-sr/` | Opt-in classifier-based routing on a dedicated Envoy AI Gateway, plus its dashboard |
 | **Model Manager** | `model_manager/` | Bash CLI (`model-manager`) + runtime and manifest templates for the model lifecycle |
 
 ## Ansible roles
@@ -32,6 +33,7 @@ resolved by the core installer in dependency order.
 | `litellm` | `auth_provider == litellm` | — |
 | `langfuse` | `auth_provider == litellm` | `litellm` |
 | `llm_services` | `kserve_enabled` (default `true`) | `kserve` |
+| `vllm_sr` | `vllm_sr_enabled` (default `false`) and `ai_gateway_provider == envoy` | `llm_services` |
 
 > [!NOTE]
 > `nri_cpu_balloons` is **not** here — it lives in the solutions repo, because it

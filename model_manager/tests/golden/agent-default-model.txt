@@ -1,0 +1,140 @@
+# rc: 0
+--- stdout
+[INFO ]  Deploying qwen2-5-coder-14b (LLMInferenceService)
+[INFO ]    Runtime: vllm @ 0.28.0 | Category: llm | Routing: epp
+[INFO ]    CPU: auto | Memory: 96Gi | Replicas: 1
+[INFO ]    CPU policy: best-effort
+[INFO ]    CPU auto: 8 (tp=1, policy best-effort)
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: qwen2-5-coder-14b
+  namespace: llm-inference
+  labels:
+    app.kubernetes.io/name: qwen2-5-coder-14b
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  annotations:
+    cpu-policy.model-manager.io/type: best-effort
+  model:
+    uri: pvc://model-store/qwen2-5-coder-14b
+  replicas: 1
+  router:
+    gateway:
+      refs:
+        - name: ai-gateway
+          namespace: llm-inference
+    route: {}
+    scheduler: {}
+  template:
+    containers:
+      - name: main
+        image: docker.io/vllm/vllm-openai-cpu:v0.28.0
+        args: 
+        - "--enable-chunked-prefill"
+        - "--block-size"
+        - "128"
+        - "--dtype"
+        - "bfloat16"
+        - "--distributed_executor_backend"
+        - "mp"
+        - "--enable_chunked_prefill"
+        - "--enforce-eager"
+        - "--max-num-batched-tokens"
+        - "2048"
+        - "--max-num-seqs"
+        - "256"
+        - "--enable-prefix-caching"
+        - "--enable-auto-tool-choice"
+        - "--tool-call-parser"
+        - "qwen3_xml"
+        - "--tensor-parallel-size"
+        - "1"
+        - "--served-model-name"
+        - "qwen2-5-coder-14b"
+        - "--chat-template"
+        - "/etc/chat-template/chat_template.jinja"
+        env: 
+        - name: HF_HUB_DISABLE_XET
+          value: "1"
+        - name: KMP_BLOCKTIME
+          value: "1"
+        - name: TORCHDYNAMO_DISABLE
+          value: "1"
+        - name: TRITON_CACHE_DIR
+          value: "/tmp/.triton"
+        - name: USER
+          value: "vllm"
+        - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+          value: "1"
+        - name: VLLM_CPU_KVCACHE_SPACE
+          value: "40"
+        - name: VLLM_CPU_NUM_OF_RESERVED_CPU
+          value: "0"
+        - name: VLLM_CPU_SGL_KERNEL
+          value: "1"
+        - name: VLLM_ENGINE_ITERATION_TIMEOUT_S
+          value: "120"
+        - name: VLLM_NO_USAGE_STATS
+          value: "1"
+        - name: VLLM_RPC_TIMEOUT
+          value: "100000"
+        volumeMounts:
+          - name: chat-template
+            mountPath: /etc/chat-template
+            readOnly: true
+        resources:
+          requests:
+            cpu: "8"
+            memory: 96Gi
+          limits:
+            cpu: "8"
+            memory: 96Gi
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 120
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 12
+          periodSeconds: 10
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
+    securityContext:
+      seccompProfile:
+        type: RuntimeDefault
+    volumes:
+      - name: chat-template
+        configMap:
+          name: qwen2-5-coder-14b-chat-template
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: feature.node.kubernetes.io/cpu-cpuid.AMXBF16
+                  operator: In
+                  values:
+                    - "true"
+--- stderr
+--- kubectl

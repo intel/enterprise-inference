@@ -1,0 +1,9 @@
+# rc: 1
+--- stdout
+[INFO ]  Deploying auto-cpu (LLMInferenceService)
+[INFO ]    Runtime: vllm @ 0.24.0 | Category: llm | Routing: epp
+[INFO ]    CPU: auto | Memory: 8Gi | Replicas: 2
+[INFO ]    CPU policy: nri-balloons
+--- stderr
+[ERROR]  cpu: auto — only 0 free CPUs per NUMA node for auto-cpu (tp=1, need >= 4). Undeploy a model, add a node, or pass --cpu.
+--- kubectl

@@ -1,0 +1,244 @@
+# rc: 0
+--- stdout
+[INFO ]  Deploying qwen3-0-6b (LLMInferenceService)
+[INFO ]    Runtime: vllm @ 0.24.0 | Category: llm | Routing: epp
+[INFO ]    CPU: 8 | Memory: 16Gi | Replicas: 1
+[INFO ]    CPU policy: best-effort
+[  OK ]  Storage ready: model-store (Bound)
+[INFO ]  Downloading model weights: Qwen/Qwen3-0.6B → PVC:/qwen3-0-6b
+[INFO ]  Downloading model weights: Qwen/Qwen3-0.6B
+[INFO ]    This may take several minutes depending on model size and your internet/proxy speed.
+[INFO ]    Follow progress below — do not interrupt.
+[  OK ]  Download complete: qwen3-0-6b
+[  OK ]  Manifest applied: LLMInferenceService/qwen3-0-6b in llm-inference
+[INFO ]  Creating AIGatewayRoute aigw-qwen3-0-6b (EPP → qwen3-0-6b-inference-pool)
+[  OK ]  qwen3-0-6b is Ready
+
+  ────────────────────────────────────────────────────────
+  Model:    qwen3-0-6b  |  Kind: LLMInferenceService  |  Category: llm
+  Auth:     keycloak
+  Endpoint: https://inference.example.com/v1/chat/completions
+  Note:     Pass "model": "qwen3-0-6b" in the request body
+  ────────────────────────────────────────────────────────
+
+  1. Get a Keycloak token:
+  source <MM>/scripts/get-keycloak-token.sh
+  # exports TOKEN, GATEWAY_IP, GATEWAY_DOMAIN
+
+  2. Call the model:
+  curl -sk --noproxy "*" \
+    -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"model":"qwen3-0-6b","messages":[{"role":"user","content":"Hello"}],"max_tokens":16}' \
+    https://inference.example.com/v1/chat/completions
+
+--- stderr
+[WARN ]  AI Gateway service 'ai-gateway' not found in envoy-gateway-system — LiteLLM will bypass gateway for qwen3-0-6b
+--- kubectl
+$ kubectl create namespace llm-inference
+$ kubectl delete job download-qwen3-0-6b -n llm-inference --ignore-not-found
+$ kubectl apply -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: download-qwen3-0-6b
+  namespace: llm-inference
+  labels:
+    app.kubernetes.io/name: download-qwen3-0-6b
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 7200
+  # Garbage-collect the finished Job (and its pod) automatically once it
+  # completes or fails, so a successful download never leaves a stray pod
+  # behind even if the model-manager CLI has already exited. The window is
+  # long enough to inspect logs of a failed job before it is reaped.
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: download-qwen3-0-6b
+        app.kubernetes.io/managed-by: model-manager
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        # uid/gid match the serving pod for this runtime so prepared files are
+        # readable by the server (vLLM=1000, OVMS=5000). fsGroup makes the kubelet
+        # chown the mounted volume to this GID and mount it group-writable —
+        # without it, dynamically provisioned volumes (e.g. rancher.io/local-path)
+        # are created root:root 0755 and the non-root job gets "Permission denied".
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: downloader
+          image: docker.io/vllm/vllm-openai-cpu:v0.24.0
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              export HOME=/tmp HF_HOME=/tmp/.hf XDG_CACHE_HOME=/tmp/.cache PIP_CACHE_DIR=/tmp/.pip
+              if [ -f /models/qwen3-0-6b/.download_complete ]; then echo 'Weights already present, skipping download'; exit 0; fi
+              command -v hf >/dev/null 2>&1 || pip install -q huggingface_hub[hf_xet]
+              hf download 'Qwen/Qwen3-0.6B' --local-dir /models/qwen3-0-6b
+              touch /models/qwen3-0-6b/.download_complete
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          # Bound the job (CWE-400). Requests stay small so this transient job
+          # schedules easily; the memory limit tracks the model's serving
+          # envelope so OVMS `ovms --pull` conversion/quantization does not OOM.
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "8"
+              memory: "16Gi"
+          env:
+            - name: HOME
+              value: "/models"
+            - name: HF_HOME
+              value: "/models/.hf-cache"
+          volumeMounts:
+            - name: model-storage
+              mountPath: /models
+      volumes:
+        - name: model-storage
+          persistentVolumeClaim:
+            claimName: model-store
+$ kubectl apply --server-side --field-manager=model-manager --force-conflicts -f -
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: qwen3-0-6b
+  namespace: llm-inference
+  labels:
+    app.kubernetes.io/name: qwen3-0-6b
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  annotations:
+    cpu-policy.model-manager.io/type: best-effort
+  model:
+    uri: pvc://model-store/qwen3-0-6b
+  replicas: 1
+  router:
+    gateway:
+      refs:
+        - name: ai-gateway
+          namespace: llm-inference
+    route: {}
+    scheduler: {}
+  template:
+    containers:
+      - name: main
+        image: docker.io/vllm/vllm-openai-cpu:v0.24.0
+        args: 
+        - "--dtype"
+        - "bfloat16"
+        - "--max-num-seqs"
+        - "128"
+        - "--max-num-batched-tokens"
+        - "2048"
+        - "--enable-prefix-caching"
+        - "--enable-chunked-prefill"
+        - "--served-model-name"
+        - "qwen3-0-6b"
+        env: 
+        - name: KMP_BLOCKTIME
+          value: "1"
+        - name: USER
+          value: "vllm"
+        - name: VLLM_CPU_KVCACHE_SPACE
+          value: "8"
+        - name: VLLM_CPU_NUM_OF_RESERVED_CPU
+          value: "1"
+        - name: VLLM_CPU_SGL_KERNEL
+          value: "1"
+        - name: VLLM_NO_USAGE_STATS
+          value: "1"
+        resources:
+          requests:
+            cpu: "8"
+            memory: 16Gi
+          limits:
+            cpu: "8"
+            memory: 16Gi
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 120
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 12
+          periodSeconds: 10
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
+    securityContext:
+      seccompProfile:
+        type: RuntimeDefault
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: feature.node.kubernetes.io/cpu-cpuid.AMXBF16
+                  operator: In
+                  values:
+                    - "true"
+$ kubectl apply --server-side --field-manager=model-manager --force-conflicts -f -
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIGatewayRoute
+metadata:
+  name: aigw-qwen3-0-6b
+  namespace: llm-inference
+  labels:
+    app.kubernetes.io/name: qwen3-0-6b
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: ai-gateway
+      namespace: llm-inference
+      sectionName: http
+  rules:
+    - matches:
+        - headers:
+            - name: x-ai-eg-model
+              type: Exact
+              value: qwen3-0-6b
+      timeouts:
+        request: 600s
+      backendRefs:
+        - name: qwen3-0-6b-inference-pool
+          kind: InferencePool
+          group: inference.networking.k8s.io
+$ kubectl patch inferencepool qwen3-0-6b-inference-pool -n llm-inference --type=merge --subresource=status -p {"status":{"parents":[{"parentRef":{"group":"gateway.networking.k8s.io","kind":"Gateway","name":"ai-gateway","namespace":"ai-gateway"},"controllerName":"gateway.envoyproxy.io/gatewayclass-controller","conditions":[{"type":"Accepted","status":"True","reason":"Accepted","message":"Patched by model-manager","lastTransitionTime":"<TS>"}]}]}}
