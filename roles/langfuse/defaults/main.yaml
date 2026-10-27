@@ -28,6 +28,9 @@ langfuse_helm_chart: "langfuse/langfuse"
 
 # Hostname for the Langfuse UI (overridable in global_config.yaml)
 langfuse_hostname: "langfuse.{{ base_domain_name | default('inference-example.com') }}"
+# Path mode: <base><langfuse_path> redirects to the own host (the stock image
+# cannot run under a path).
+langfuse_path: "/langfuse"
 
 # Sign-in through Keycloak (platform realm). New users join the seeded org and
 # project as Viewer; Langfuse OSS has no group mapping, so the seeded admin

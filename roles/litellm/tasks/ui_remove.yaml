@@ -19,17 +19,6 @@
     name: litellm-ui
     namespace: "{{ litellm_namespace }}"
 
-- name: "litellm | UI | Remove the path-mode redirect"
-  ansible.builtin.include_role:
-    name: gateway
-    tasks_from: path_redirect.yaml
-  vars:
-    gateway_redirect_name: litellm-ui-redirect
-    gateway_redirect_namespace: "{{ litellm_namespace }}"
-    gateway_redirect_path: "{{ litellm_path }}/ui"
-    gateway_redirect_url: "{{ litellm_ui_url }}/ui/"
-    gateway_redirect_state: absent
-
 - name: "litellm | UI | Unpublish the host"
   ansible.builtin.include_role:
     name: gateway

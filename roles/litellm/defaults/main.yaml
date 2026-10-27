@@ -8,8 +8,8 @@
 # The API is published for programs on litellm.<domain> (<domain>/litellm in
 #   path mode). Only
 #   litellm_public_paths are routed; LiteLLM validates the virtual key. The
-#   admin UI (and the admin API it uses) is published only on litellm_ui_hostname,
-#   behind Keycloak sign-in (litellm_ui_sso).
+#   admin UI (and the admin API it uses) is published only on litellm_ui_hostname
+#   (path mode: the rest of <domain>/litellm), behind Keycloak sign-in (litellm_ui_sso).
 #   Client → Envoy Gateway (TLS, path allowlist) → LiteLLM (key check) → KServe
 #
 # When auth_type=litellm_vkey the API route bypasses the gateway JWT policy;
@@ -43,7 +43,8 @@ litellm_url: >-
   {{ 'https://' ~ (base_domain_name | default('inference-example.com')) ~ litellm_path
      if _litellm_path_mode | bool else 'https://' ~ litellm_hostname }}
 
-# Admin UI on its own host, behind gateway sign-in, then LiteLLM's own Keycloak
+# Admin UI on its own host (path mode: under litellm_path, on the base host's
+# origin), behind gateway sign-in, then LiteLLM's own Keycloak
 # sign-in (silent, same Keycloak session). keycloak_platform_admin_group maps to
 # proxy_admin, other admitted groups to proxy_admin_viewer (read-only).
 # Username/password UI login is off; the master key stays for API break-glass.
@@ -51,7 +52,7 @@ litellm_url: >-
 # gateway admits only litellm_ui_groups (default: the admin group).
 litellm_ui_sso: "{{ keycloak_enabled | default(true) | bool }}"
 litellm_ui_hostname: "litellm-ui.{{ base_domain_name | default('inference-example.com') }}"
-litellm_ui_url: "https://{{ litellm_ui_hostname }}"
+litellm_ui_url: "{{ litellm_url if _litellm_path_mode | bool else 'https://' ~ litellm_ui_hostname }}"
 litellm_ui_groups: []
 litellm_oidc_client_id: "litellm"
 

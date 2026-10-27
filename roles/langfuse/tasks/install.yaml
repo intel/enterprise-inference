@@ -637,6 +637,17 @@
              + [{'matches': [{'path': {'type': 'PathPrefix', 'value': '/'}}],
                  'backendRefs': [{'name': 'langfuse-web', 'port': 3000}]}] }}
 
+- name: "langfuse | Path-mode redirect"
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: path_redirect.yaml
+  vars:
+    gateway_redirect_name: langfuse-redirect
+    gateway_redirect_namespace: "{{ langfuse_namespace }}"
+    gateway_redirect_path: "{{ langfuse_path }}"
+    gateway_redirect_url: "https://{{ langfuse_hostname }}/"
+    gateway_redirect_state: "{{ 'present' if langfuse_gateway_publish | bool else 'absent' }}"
+
 - name: "langfuse | Exempt the route from gateway auth (Langfuse has its own login)"
   when: langfuse_gateway_publish | bool
   ansible.builtin.include_role:

@@ -20,6 +20,17 @@
     namespace: "{{ langfuse_namespace }}"
   failed_when: false
 
+- name: "langfuse | Remove the path-mode redirect"
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: path_redirect.yaml
+  vars:
+    gateway_redirect_name: langfuse-redirect
+    gateway_redirect_namespace: "{{ langfuse_namespace }}"
+    gateway_redirect_path: "{{ langfuse_path }}"
+    gateway_redirect_url: "https://{{ langfuse_hostname }}/"
+    gateway_redirect_state: absent
+
 - name: "langfuse | Unpublish the langfuse host"
   ansible.builtin.include_role:
     name: gateway
