@@ -740,7 +740,9 @@
               - matches: [{path: {type: PathPrefix, value: /}}]
                 filters:
                   - type: ResponseHeaderModifier
-                    responseHeaderModifier: {set: "{{ litellm_route_headers }}"}
+                    # Nothing frames the admin UI.
+                    responseHeaderModifier:
+                      set: "{{ litellm_route_headers + [{'name': 'X-Frame-Options', 'value': 'DENY'}] }}"
                 backendRefs: [{name: litellm, port: 4000}]
 
     - name: "litellm | Sign in at the gateway"
