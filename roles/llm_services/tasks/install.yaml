@@ -145,6 +145,7 @@
   vars:
     _mm_only_models: ["{{ guardrail_model | default('qwen3guard') }}"]
     _mm_strict: true
+    _mm_guard: true
   when: guardrails_enabled | default(false) | bool
 
 - name: "llm_services | Deploy default models"

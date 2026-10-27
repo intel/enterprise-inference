@@ -122,12 +122,13 @@ def litellm_enabled() -> bool:
 
 
 def _internal_url(m: Model) -> str:
-    """api_base LiteLLM calls: the AI Gateway for vLLM (EPP routing), the predictor for OVMS."""
-    if os.environ.get("MM_LITELLM_KSERVE_URL"):
-        return f"{os.environ['MM_LITELLM_KSERVE_URL'].rstrip('/')}/{m.namespace}/{m.name}/v1"
+    """api_base LiteLLM calls: the AI Gateway for vLLM (EPP routing), the predictor for OVMS.
+    MM_LITELLM_KSERVE_URL overrides the gateway only: OVMS has no route there with the AI Gateway off."""
     if m.kind == "InferenceService":
         port = k8s.out("get", "svc", f"{m.name}-predictor", "-n", m.namespace, "-o", "jsonpath={.spec.ports[0].port}")
         return f"http://{m.name}-predictor.{m.namespace}.svc.cluster.local:{port or 80}/v1"
+    if os.environ.get("MM_LITELLM_KSERVE_URL"):
+        return f"{os.environ['MM_LITELLM_KSERVE_URL'].rstrip('/')}/{m.namespace}/{m.name}/v1"
     gw, gw_ns = gateway_service()
     if k8s.out("get", "svc", gw, "-n", gw_ns, "-o", "jsonpath={.metadata.name}"):
         return f"http://{gw}.{gw_ns}.svc.cluster.local/{m.namespace}/{m.name}/v1"

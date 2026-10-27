@@ -205,3 +205,24 @@ def test_auth_mode_env_override(monkeypatch, tmp_path, flag, global_cfg, want):
     monkeypatch.setenv("MM_GLOBAL_CONFIG", str(tmp_path / "global.yaml"))
     monkeypatch.setenv("MM_LITELLM_ENABLED", flag)
     assert routing.auth_provider() == want
+
+
+@pytest.mark.parametrize("kind, want", [
+    ("InferenceService", "http://m-predictor.n.svc.cluster.local:80/v1"),
+    ("LLMInferenceService", "http://ai-gateway.envoy-gateway-system.svc.cluster.local/n/m/v1"),
+])
+def test_litellm_api_base(monkeypatch, kind, want):
+    for var in ("MM_LITELLM_KSERVE_URL", "MM_INFERENCE_GATEWAY", "MM_INFERENCE_GATEWAY_NS", "MM_INFERENCE_GATEWAY_SVC_NS"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(k8s, "out", lambda *a: "80" if "m-predictor" in a else "ai-gateway")
+    assert routing._internal_url(Model(name="m", namespace="n", kind=kind)) == want
+
+
+@pytest.mark.parametrize("kind, want", [
+    ("InferenceService", "http://m-predictor.n.svc.cluster.local:80/v1"),
+    ("LLMInferenceService", "http://gw.example.svc.cluster.local/n/m/v1"),
+])
+def test_litellm_api_base_override_is_gateway_only(monkeypatch, kind, want):
+    monkeypatch.setenv("MM_LITELLM_KSERVE_URL", "http://gw.example.svc.cluster.local/")
+    monkeypatch.setattr(k8s, "out", lambda *a: "80")
+    assert routing._internal_url(Model(name="m", namespace="n", kind=kind)) == want

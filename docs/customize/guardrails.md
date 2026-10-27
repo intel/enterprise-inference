@@ -62,6 +62,8 @@ LiteLLM UI.
   Response to User
 ```
 
+> **Scope:** the guardrail screens only the last user message of a request. System, assistant and tool messages are not checked.
+
 **Namespaces:**
 - `llm-inference` — the guard model (`qwen3guard`), next to the other models
 - `litellm` — LiteLLM proxy; holds the registered guardrail in its DB

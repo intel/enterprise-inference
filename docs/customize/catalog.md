@@ -280,8 +280,9 @@ infrastructure is already up, the failure is reported in a summary, and the mode
 deployed manually afterward. Set `model_deploy_strict: true` to make any auto-deploy
 failure fatal instead.
 
-To skip the deploy phase for a single run without editing config, use
-`./es_auto_installer.sh install inference --skip-models` (or `SKIP_MODEL_DEPLOYMENT=true`).
+To skip the deploy phase for a single run without editing config, run
+`SKIP_MODEL_DEPLOYMENT=true ./es_auto_installer.sh install inference` (or append `-- -e skip_models=true`).
+With the content-safety guardrail on, its guard model is still deployed: the guardrail blocks every request without it.
 
 Extra flags can be appended to every auto-deploy invocation via `model_deploy_flags`,
 e.g. `"--wait-timeout 1800"` for large models.

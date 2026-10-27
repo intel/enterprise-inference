@@ -90,11 +90,11 @@
          | selectattr('name', 'equalto', 'NO_PROXY') | map(attribute='value') | first | default('') }}
   ansible.builtin.set_fact:
     _litellm_needs_guard_settings: >-
-      {{ (_litellm_running_cfg is not skipped
+      {{ (guardrails_enabled | bool) and ((_litellm_running_cfg is not skipped
           and (_litellm_guard_hosts | difference(_litellm_running_allowed) | length > 0))
          or (_litellm_running_deploy is not skipped
           and ((_litellm_loopback_no_proxy + _litellm_guard_no_proxy)
-               | difference(_litellm_running_no_proxy.split(',')) | length > 0)) }}
+               | difference(_litellm_running_no_proxy.split(',')) | length > 0))) }}
 
 - name: "litellm | Already installed — skipping"
   ansible.builtin.debug:
@@ -117,6 +117,22 @@
   when:
     - _litellm_needs_guard_settings | bool
     - not litellm_reconcile | bool
+
+# baseline (not restricted): the prisma-engine-seed initContainer must run as root to read
+# the engines baked into /root at image build time. Every run: another role may relabel it.
+- name: "litellm | Label namespace — PSS"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ litellm_namespace }}"
+        labels:
+          pod-security.kubernetes.io/enforce: "baseline"
+          pod-security.kubernetes.io/audit: "restricted"
+          pod-security.kubernetes.io/warn: "restricted"
+  when: enforce_pss | default(false) | bool
 
 - name: "litellm | Install"
   when: >-
@@ -207,22 +223,6 @@
         kind: Namespace
         name: "{{ litellm_namespace }}"
         state: present
-
-    # baseline (not restricted): the prisma-engine-seed initContainer must run as
-    # root to read the engines baked into /root at image build time (see below).
-    - name: "litellm | Label namespace — PSS"
-      kubernetes.core.k8s:
-        state: present
-        definition:
-          apiVersion: v1
-          kind: Namespace
-          metadata:
-            name: "{{ litellm_namespace }}"
-            labels:
-              pod-security.kubernetes.io/enforce: "baseline"
-              pod-security.kubernetes.io/audit: "restricted"
-              pod-security.kubernetes.io/warn: "restricted"
-      when: enforce_pss | default(false) | bool
 
     # ReferenceGrant allows Envoy Gateway SecurityPolicy (in gateway namespace)
     # to reference the LiteLLM service (in litellm namespace) for extAuth.

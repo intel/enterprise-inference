@@ -13,13 +13,14 @@
 # A requested model the environment's catalog lacks is taken from the shipped
 # catalog.
 
+# The guard model is deployed even then: the fail-closed guardrail blocks every request without it
 - name: Check if model deployment should be skipped
   set_fact:
-    skip_model_deployment: "{{ lookup('env', 'SKIP_MODEL_DEPLOYMENT') | default(skip_models | default('false')) | bool }}"
+    skip_model_deployment: "{{ not (_mm_guard | default(false) | bool) and (lookup('env', 'SKIP_MODEL_DEPLOYMENT') | default(skip_models | default('false'), true) | bool) }}"
 
 - name: Show model deployment status
   debug:
-    msg: "Model deployment: {{ 'SKIPPED (--skip-models flag)' if skip_model_deployment else 'ENABLED' }}"
+    msg: "Model deployment: {{ 'SKIPPED (SKIP_MODEL_DEPLOYMENT / skip_models)' if skip_model_deployment else 'ENABLED' }}"
 
 - block:
     # Model catalog: prefer the environment's seeded copy (env/<env>/models.yaml,

@@ -74,6 +74,17 @@
     definition: "{{ lookup('template', 'gwapi-resources.yaml.j2') }}"
   failed_when: false
 
+- name: "vllm_sr | teardown | Remove routes by label, including models undeployed since install"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: aigateway.envoyproxy.io/v1beta1
+    kind: AIGatewayRoute
+    namespace: "{{ vllm_sr_gateway_namespace }}"
+    label_selectors:
+      - app.kubernetes.io/part-of=vllm-sr
+    delete_all: true
+  failed_when: false
+
 - name: "vllm_sr | teardown | Uninstall router Helm release"
   kubernetes.core.helm:
     name: "{{ vllm_sr_release_name }}"

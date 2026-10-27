@@ -86,7 +86,7 @@
       register: _val_guard
       retries: 3
       delay: 10
-      until: "'Blocked by the content-safety guardrail' not in (_val_guard.stdout | default(''))"
+      until: "(_val_guard.stdout | default('') | trim).split(' ') | first == '200'"
       changed_when: false
       failed_when: false
 
@@ -94,10 +94,10 @@
       ansible.builtin.assert:
         that:
           - _val_guard.rc | default(1) == 0
-          - "'Blocked by the content-safety guardrail' not in (_val_guard.stdout | default(''))"
+          - "(_val_guard.stdout | default('') | trim).split(' ') | first == '200'"
         fail_msg: >-
-          The content-safety guardrail blocked a benign request, so every request through LiteLLM is
-          blocked: {{ (_val_guard.stdout | default('') ~ ' ' ~ _val_guard.stderr | default('')) | trim | truncate(600) }}.
+          A benign request through LiteLLM did not get HTTP 200 (if it says "Blocked by the content-safety
+          guardrail", every request is blocked): {{ (_val_guard.stdout | default('') ~ ' ' ~ _val_guard.stderr | default('')) | trim | truncate(600) }}.
           Check that {{ guardrail_model }} is deployed and Ready in {{ guardrail_guard_namespace }}, and that
           litellm_settings.user_url_allowed_hosts in ConfigMap litellm-config lists the host of {{ guard_service_url }}
           (re-running the install upgrades a release that lacks it).
