@@ -25,7 +25,8 @@
 
 - name: "llm_services | ui deploy | Find model-manager files"
   ansible.builtin.find:
-    paths: ["{{ __llm_mm_dir }}/core", "{{ __llm_mm_dir }}/templates", "{{ __llm_mm_dir }}/runtimes"]
+    paths: ["{{ __llm_mm_dir }}/core", "{{ __llm_mm_dir }}/templates", "{{ __llm_mm_dir }}/runtimes",
+            "{{ __llm_mm_dir }}/chat-templates"]
     recurse: true
     excludes: ["*.pyc"]
   register: _llm_mm_files
