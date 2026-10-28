@@ -512,6 +512,40 @@
             secretAccessKey:
               value: "{{ _langfuse_s3_secret_key }}"
 
+    # ── Wait for ClickHouse (operator-managed) ───────────────────────────────
+    # The worker runs Langfuse's background migrations once at startup and does
+    # not retry; it starts before ClickHouse is up, so restart it once it is.
+    - name: "langfuse | Wait for ClickHouse and Keeper to be ready"
+      kubernetes.core.k8s_info:
+        api_version: clickhouse.com/v1alpha1
+        kind: "{{ item }}"
+        name: langfuse
+        namespace: "{{ langfuse_namespace }}"
+      register: _langfuse_ch_ready
+      until: >-
+        _langfuse_ch_ready.resources | default([]) | length > 0 and
+        (_langfuse_ch_ready.resources[0].status.conditions | default([]) |
+         selectattr('type', 'eq', 'Ready') | selectattr('status', 'eq', 'True') | list | length > 0)
+      retries: 60
+      delay: 5
+      loop:
+        - KeeperCluster
+        - ClickHouseCluster
+
+    - name: "langfuse | Restart worker to run background migrations against ClickHouse"
+      kubernetes.core.k8s:
+        state: patched
+        api_version: apps/v1
+        kind: Deployment
+        name: langfuse-worker
+        namespace: "{{ langfuse_namespace }}"
+        definition:
+          spec:
+            template:
+              metadata:
+                annotations:
+                  kubectl.kubernetes.io/restartedAt: "{{ now(utc=true).isoformat() }}"
+
     # ── Fix failed Prisma migrations (Langfuse bug: some migrations not idempotent on empty DB)
       register: _langfuse_helm
       until: _langfuse_helm is succeeded
