@@ -258,13 +258,49 @@
 
     # ── ClickHouse operator (chart v2 prerequisite; needs cert-manager) ──────
 
+    # The operator queries Keeper/ClickHouse pods in the meshed langfuse namespace;
+    # under mesh-wide STRICT mTLS it must be in the mesh too, or ztunnel drops it.
+    - name: "langfuse | Create ClickHouse operator namespace"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ langfuse_clickhouse_operator_namespace }}"
+            labels: "{{ ({'istio.io/dataplane-mode': 'ambient'} if istio_enabled | default(false) | bool else {})
+                        | combine({'pod-security.kubernetes.io/enforce': 'restricted',
+                                   'pod-security.kubernetes.io/audit': 'restricted',
+                                   'pod-security.kubernetes.io/warn': 'restricted'}
+                                  if enforce_pss | default(false) | bool else {}) }}"
+
+    # Host-network apiserver (no mesh identity) can't reach the operator's admission
+    # webhook under mesh-wide STRICT; open only its port, rest of the pod STRICT.
+    - name: "langfuse | Allow apiserver to reach ClickHouse operator webhook (port-level mTLS)"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: security.istio.io/v1
+          kind: PeerAuthentication
+          metadata:
+            name: allow-webhook
+            namespace: "{{ langfuse_clickhouse_operator_namespace }}"
+          spec:
+            selector:
+              matchLabels:
+                app.kubernetes.io/name: clickhouse-operator
+            mtls:
+              mode: STRICT
+            portLevelMtls: "{{ {'9443': {'mode': 'PERMISSIVE'}} }}"
+      when: istio_enabled | default(false) | bool
+
     - name: "langfuse | Install ClickHouse operator"
       kubernetes.core.helm:
         name: clickhouse-operator
         chart_ref: "{{ langfuse_clickhouse_operator_chart }}"
         chart_version: "{{ langfuse_clickhouse_operator_version }}"
         release_namespace: "{{ langfuse_clickhouse_operator_namespace }}"
-        create_namespace: true
+        create_namespace: false
         wait: true
         timeout: "5m0s"
         values: "{{ {'manager': {'affinity': _platform_affinity}} if _platform_affinity is defined else {} }}"
