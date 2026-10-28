@@ -23,11 +23,26 @@
   loop: "{{ llm_services_engines }}"
   register: _llm_sm_files
 
+# On OpenShift:
+#   - user-workload monitoring scrapes only the ServiceMonitor's own namespace
+#     (namespaceSelector is ignored): put it next to the models;
+#   - OpenShift AI serves the models over HTTPS with a self-signed certificate.
+#     Its own PodMonitor renames the metrics (kserve_vllm:…), so the dashboards
+#     need this one.
 - name: "llm_services | observability | Deploy ServiceMonitors"
+  vars:
+    _llm_sm_openshift: "{{ cluster_distribution | default('kubernetes') == 'openshift' }}"
+    _llm_sm: "{{ lookup('file', role_path + '/files/servicemonitors/' + item.item + '.yaml') | from_yaml }}"
+    _llm_sm_openshift_spec:
+      endpoints: >-
+        {{ _llm_sm.spec.endpoints | map('combine', {'scheme': 'https', 'tlsConfig': {'insecureSkipVerify': true}}) | list }}
   kubernetes.core.k8s:
     state: present
-    namespace: "{{ observability_namespace | default('monitoring') }}"
-    src: "{{ role_path }}/files/servicemonitors/{{ item.item }}.yaml"
+    namespace: "{{ llm_services_namespace if _llm_sm_openshift | bool else observability_namespace | default('monitoring') }}"
+    definition: >-
+      {{ _llm_sm | combine({'spec': _llm_sm.spec | dict2items | rejectattr('key', 'equalto', 'namespaceSelector') | items2dict
+                                    | combine(_llm_sm_openshift_spec)})
+         if _llm_sm_openshift | bool else _llm_sm }}
   loop: "{{ _llm_sm_files.results }}"
   loop_control:
     label: "ServiceMonitor/{{ item.item }}"
