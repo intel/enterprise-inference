@@ -16,7 +16,13 @@
 # Multi-node:   2 replicas for web+worker, HPA enabled
 # =============================================================================
 
-langfuse_version: "1.5.33"              # chart version (appVersion: 3.177.0)
+langfuse_version: "2.1.7"               # chart version (appVersion 4.70.1; image pinned below)
+langfuse_image_tag: "4.71.0"            # Langfuse web + worker image
+# ClickHouse operator — chart v2 renders ClickHouseCluster/KeeperCluster CRs
+# (clickhouse.com/v1alpha1) and needs this operator (alpha — keep pinned).
+langfuse_clickhouse_operator_chart: "oci://ghcr.io/clickhouse/clickhouse-operator-helm"
+langfuse_clickhouse_operator_version: "0.0.8"
+langfuse_clickhouse_operator_namespace: "clickhouse-operator-system"
 # Publish Langfuse on the platform gateway.
 # Foreign var (canonical owner: enterprise-ai-solutions gateway component flag;
 # envoy_gateway_enabled is its alias).
@@ -66,8 +72,9 @@ object_store_namespace: "monitoring"
 object_store_credentials_secret: "object-store-credentials"  # checkov:skip=CKV_SECRET_6: Secret name, not a value
 
 
-# ClickHouse — deployed by Helm subchart (bitnami/clickhouse)
+# ClickHouse — deployed by the chart via the ClickHouse operator
 langfuse_clickhouse_storage_size: "50Gi"
+langfuse_keeper_storage_size: "10Gi"
 
 # Single-node defaults (kubernetes_nodes | length <= 1)
 langfuse_single_node_replicas: 1

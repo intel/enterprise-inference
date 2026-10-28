@@ -256,6 +256,32 @@
             gateway_trust_namespace: "{{ langfuse_namespace }}"
             gateway_trust_configmap: langfuse-platform-ca
 
+    # ── ClickHouse operator (chart v2 prerequisite; needs cert-manager) ──────
+
+    - name: "langfuse | Install ClickHouse operator"
+      kubernetes.core.helm:
+        name: clickhouse-operator
+        chart_ref: "{{ langfuse_clickhouse_operator_chart }}"
+        chart_version: "{{ langfuse_clickhouse_operator_version }}"
+        release_namespace: "{{ langfuse_clickhouse_operator_namespace }}"
+        create_namespace: true
+        wait: true
+        timeout: "5m0s"
+        values: "{{ {'manager': {'affinity': _platform_affinity}} if _platform_affinity is defined else {} }}"
+
+    - name: "langfuse | Wait for ClickHouse operator CRDs"
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: "{{ item }}"
+      register: _langfuse_ch_crd
+      until: _langfuse_ch_crd.resources | default([]) | length > 0
+      retries: 30
+      delay: 5
+      loop:
+        - clickhouseclusters.clickhouse.com
+        - keeperclusters.clickhouse.com
+
     # ── Helm install ──────────────────────────────────────────────────────────
 
     - name: "langfuse | Add Helm repo"
@@ -273,7 +299,6 @@
         _lf_ca_volumes: [{name: platform-ca, configMap: {name: langfuse-platform-ca}}]
         _lf_env:
           # Single-node ClickHouse, no ZooKeeper.
-          - {name: CLICKHOUSE_CLUSTER_ENABLED, value: "false"}
           - {name: LANGFUSE_INIT_ORG_ID, valueFrom: {secretKeyRef: {name: langfuse-secrets, key: org_id}}}
           - {name: LANGFUSE_INIT_ORG_NAME, value: inference}
           - {name: LANGFUSE_INIT_PROJECT_ID, valueFrom: {secretKeyRef: {name: langfuse-secrets, key: project_id}}}
@@ -312,6 +337,8 @@
           langfuse:
             replicas: "{{ _langfuse_replicas | int }}"
             nodeEnv: production
+            image:
+              tag: "{{ langfuse_image_tag }}"
             features:
               telemetryEnabled: false
               signUpDisabled: false
@@ -320,7 +347,7 @@
             encryptionKey:
               value: "{{ _langfuse_encryption_key }}"
 
-            # NextAuth — nested under langfuse in chart v1.5.x
+            # NextAuth — nested under langfuse in chart v2.x
             nextauth:
               url: "https://{{ langfuse_hostname }}"
               secret:
@@ -328,7 +355,7 @@
                   name: langfuse-secrets
                   key: nextauth_secret
 
-            # PSS restricted — chart v1.5.x reads these shared web+worker keys,
+            # PSS restricted — chart v2.x reads these shared web+worker keys,
             # not the web/worker subkeys below. Image runs as uid 1001 (nextjs).
             podSecurityContext:
               runAsNonRoot: true
@@ -394,6 +421,7 @@
                 maxReplicas: "{{ (_langfuse_replicas | int) * 2 }}"
                 targetCPUUtilizationPercentage: 70
 
+            # CLICKHOUSE_CLUSTER_ENABLED is set by the chart (clickhouse.cluster.enabled)
             additionalEnv: >-
               {{ _lf_env + (_lf_env_sso if langfuse_sso | bool else [])
                  + ([{'name': 'NODE_EXTRA_CA_CERTS', 'value': '/etc/platform-ca/ca.crt'}] if _lf_ca | bool else []) }}
@@ -410,54 +438,31 @@
               password: "{{ _langfuse_db_pass }}"
               database: "{{ _langfuse_db_name }}"
 
-          # ── ClickHouse — deployed by Helm subchart (bitnami/clickhouse) ────
+          # ── ClickHouse — ClickHouseCluster + KeeperCluster CRs (operator) ──
+          # Host and migration URL are derived by the chart.
           clickhouse:
             deploy: true
-            clusterEnabled: false
-            shards: 1
-            replicaCount: 1
             auth:
               username: default
-              password: "{{ _langfuse_clickhouse_password }}"
-            migration:
-              url: "clickhouse://default:{{ _langfuse_clickhouse_password }}@langfuse-clickhouse:9000"
-            persistence:
-              size: "{{ langfuse_clickhouse_storage_size | default('50Gi') }}"
-            resourcesPreset: "small"
-            networkPolicy:
-              enabled: false
-            zookeeper:
-              enabled: false
-              networkPolicy:
-                enabled: false
-            podSecurityContext:
-              fsGroup: 1001
-              runAsUser: 1001
-              runAsNonRoot: true
-            containerSecurityContext:
-              allowPrivilegeEscalation: false
-              capabilities:
-                drop: ["ALL"]
+              existingSecret: langfuse-secrets
+              existingSecretKey: clickhouse_password
+            cluster:
+              replicas: 1
+              storage:
+                size: "{{ langfuse_clickhouse_storage_size | default('50Gi') }}"
+              affinity: "{{ _platform_affinity | default({}) }}"
+            keeper:
+              # Must be odd: 1 on single-node, 3 for quorum on multi-node
+              replicas: "{{ (3 if _langfuse_is_multinode | bool else 1) | int }}"
+              storage:
+                size: "{{ langfuse_keeper_storage_size | default('10Gi') }}"
+              affinity: "{{ _platform_affinity | default({}) }}"
 
-          # ── Redis/Valkey — deployed by Helm subchart (bitnami/valkey) ───────
+          # ── Redis/Valkey — deployed by Helm subchart (valkey-io/valkey) ─────
+          # Chart defaults: standalone, maxmemory-policy noeviction, chart-managed
+          # auth Secret, non-root pod security context.
           redis:
             deploy: true
-            architecture: standalone
-            auth:
-              enabled: false
-            networkPolicy:
-              enabled: false
-            primary:
-              extraFlags:
-                - "--maxmemory-policy noeviction"
-              podSecurityContext:
-                fsGroup: 1001
-                runAsUser: 1001
-                runAsNonRoot: true
-              containerSecurityContext:
-                allowPrivilegeEscalation: false
-                capabilities:
-                  drop: ["ALL"]
 
           # ── S3 — use the platform object store (SeaweedFS via object_store) ─
           s3:
