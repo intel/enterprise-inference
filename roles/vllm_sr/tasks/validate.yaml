@@ -50,13 +50,13 @@
               | selectattr('type', 'equalto', 'Accepted') | selectattr('status', 'equalto', 'True') | list) | length > 0)
       when: vllm_sr_gateway_publish | bool
 
-    # Without the exemption the gateway's JWT policy answers 401 before the
-    # dashboard's own login page loads.
-    - name: "vllm_sr | validate | Dashboard exempt from gateway auth"
+    # Without its own policy the gateway's JWT policy answers 401 before the
+    # dashboard loads: the Keycloak sign-in, or the exemption when that is off.
+    - name: "vllm_sr | validate | Dashboard gateway policy"
       kubernetes.core.k8s_info:
         api_version: gateway.envoyproxy.io/v1alpha1
         kind: SecurityPolicy
-        name: vllm-sr-dashboard-no-auth
+        name: "{{ 'vllm-sr-dashboard-sso' if vllm_sr_dashboard_sso | bool else 'vllm-sr-dashboard-no-auth' }}"
         namespace: "{{ vllm_sr_namespace }}"
       register: _vllm_sr_val_dash_exempt
       failed_when: _vllm_sr_val_dash_exempt.resources | default([]) | length == 0

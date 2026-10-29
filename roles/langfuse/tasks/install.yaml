@@ -22,6 +22,43 @@
     msg: "Langfuse already deployed in {{ langfuse_namespace }} — skipping install."
   when: _langfuse_release.status is defined and _langfuse_release.status is not none
 
+# ── Keycloak client (every run: Langfuse's sign-in and the gateway's) ────────
+
+- name: "langfuse | Keycloak client"
+  when: langfuse_sso | bool
+  block:
+    - name: "langfuse | Namespace for the client secret"
+      kubernetes.core.k8s:
+        kind: Namespace
+        name: "{{ langfuse_namespace }}"
+        state: present
+
+    - name: "langfuse | Keycloak client"
+      ansible.builtin.include_role:
+        name: keycloak
+        tasks_from: oidc_client.yaml
+      vars:
+        keycloak_client:
+          id: "{{ langfuse_oidc_client_id }}"
+          redirect_uris:
+            - "https://{{ langfuse_hostname }}/api/auth/callback/keycloak"
+            - "https://{{ langfuse_hostname }}/oauth2/callback"
+          post_logout_uris: ["https://{{ langfuse_hostname }}/"]
+
+    - name: "langfuse | Keycloak client secret"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: langfuse-sso
+            namespace: "{{ langfuse_namespace }}"
+          type: Opaque
+          stringData:
+            client-secret: "{{ keycloak_client_secret }}"
+      no_log: true
+
 - name: "langfuse | Install"
   when: _langfuse_release.status is not defined or _langfuse_release.status is none
   block:
@@ -210,30 +247,6 @@
     - name: "langfuse | Keycloak sign-in"
       when: langfuse_sso | bool
       block:
-        - name: "langfuse | Keycloak client"
-          ansible.builtin.include_role:
-            name: keycloak
-            tasks_from: oidc_client.yaml
-          vars:
-            keycloak_client:
-              id: "{{ langfuse_oidc_client_id }}"
-              redirect_uris: ["https://{{ langfuse_hostname }}/api/auth/callback/keycloak"]
-              post_logout_uris: ["https://{{ langfuse_hostname }}/"]
-
-        - name: "langfuse | Keycloak client secret"
-          kubernetes.core.k8s:
-            state: present
-            definition:
-              apiVersion: v1
-              kind: Secret
-              metadata:
-                name: langfuse-sso
-                namespace: "{{ langfuse_namespace }}"
-              type: Opaque
-              stringData:
-                client-secret: "{{ keycloak_client_secret }}"
-          no_log: true
-
         # Langfuse fetches Keycloak's discovery document at its public URL.
         - name: "langfuse | Reach Keycloak at its public URL"
           ansible.builtin.include_role:
@@ -637,6 +650,29 @@
              + [{'matches': [{'path': {'type': 'PathPrefix', 'value': '/'}}],
                  'backendRefs': [{'name': 'langfuse-web', 'port': 3000}]}] }}
 
+# SDKs and OpenTelemetry exporters send traces with Langfuse API keys, which
+# Langfuse checks itself; with Keycloak sign-in this path keeps its own route.
+- name: "langfuse | Public API HTTPRoute"
+  kubernetes.core.k8s:
+    state: "{{ 'present' if langfuse_gateway_publish | bool and langfuse_sso | bool else 'absent' }}"
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: HTTPRoute
+      metadata:
+        name: langfuse-api
+        namespace: "{{ langfuse_namespace }}"
+      spec:
+        parentRefs:
+          - "{{ gateway_publish.parent_ref | default({}) }}"
+        hostnames:
+          - "{{ langfuse_hostname }}"
+        rules:
+          - matches: [{path: {type: PathPrefix, value: /api/public}}]
+            backendRefs: [{name: langfuse-web, port: 3000}]
+  register: _langfuse_api_route
+  # Removing tolerates a cluster without the Gateway API.
+  failed_when: _langfuse_api_route is failed and langfuse_gateway_publish | bool and langfuse_sso | bool
+
 - name: "langfuse | Path-mode redirect"
   ansible.builtin.include_role:
     name: gateway
@@ -648,8 +684,39 @@
     gateway_redirect_url: "https://{{ langfuse_hostname }}/"
     gateway_redirect_state: "{{ 'present' if langfuse_gateway_publish | bool else 'absent' }}"
 
-- name: "langfuse | Exempt the route from gateway auth (Langfuse has its own login)"
+# With Keycloak sign-in nobody reaches the UI without a realm session; Langfuse's
+# own sign-in then runs on the same session. Without it Langfuse's login is the
+# only gate. One policy per route: the other is removed first.
+- name: "langfuse | Remove the other gateway policy"
   when: langfuse_gateway_publish | bool
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: "{{ 'route_auth_exempt.yaml' if langfuse_sso | bool else 'route_sso.yaml' }}"
+  vars:
+    gateway_route_name: langfuse
+    gateway_route_namespace: "{{ langfuse_namespace }}"
+    gateway_route_policy_name: "{{ 'langfuse-no-auth' if langfuse_sso | bool else 'langfuse-sso' }}"
+    gateway_route_state: absent
+
+- name: "langfuse | Sign in at the gateway"
+  when: langfuse_gateway_publish | bool and langfuse_sso | bool
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: route_sso.yaml
+  vars:
+    gateway_route_name: langfuse
+    gateway_route_namespace: "{{ langfuse_namespace }}"
+    gateway_route_policy_name: langfuse-sso
+    gateway_sso:
+      issuer: "{{ keycloak_client_issuer }}"
+      issuer_internal: "{{ keycloak_client_issuer_internal }}"
+      client_id: "{{ langfuse_oidc_client_id }}"
+      client_secret_name: langfuse-sso
+      redirect_url: "https://{{ langfuse_hostname }}/oauth2/callback"
+      allowed_groups: "{{ langfuse_allowed_groups }}"
+
+- name: "langfuse | Exempt the route from gateway auth (Keycloak sign-in off)"
+  when: langfuse_gateway_publish | bool and not (langfuse_sso | bool)
   ansible.builtin.include_role:
     name: gateway
     tasks_from: route_auth_exempt.yaml
@@ -657,6 +724,17 @@
     gateway_route_name: langfuse
     gateway_route_namespace: "{{ langfuse_namespace }}"
     gateway_route_policy_name: langfuse-no-auth
+
+- name: "langfuse | Public API gateway policy"
+  when: langfuse_gateway_publish | bool
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: route_auth_exempt.yaml
+  vars:
+    gateway_route_name: langfuse-api
+    gateway_route_namespace: "{{ langfuse_namespace }}"
+    gateway_route_policy_name: langfuse-api-no-auth
+    gateway_route_state: "{{ 'present' if langfuse_sso | bool else 'absent' }}"
 
 # ── Wire LiteLLM → Langfuse callback ─────────────────────────────────────────
 

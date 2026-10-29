@@ -11,13 +11,14 @@
     wait: true
   failed_when: false
 
-- name: "langfuse | teardown | Remove HTTPRoute"
+- name: "langfuse | teardown | Remove HTTPRoutes"
   kubernetes.core.k8s:
     state: absent
     api_version: gateway.networking.k8s.io/v1
     kind: HTTPRoute
-    name: langfuse
+    name: "{{ item }}"
     namespace: "{{ langfuse_namespace }}"
+  loop: [langfuse, langfuse-api]
   failed_when: false
 
 - name: "langfuse | Remove the path-mode redirect"
@@ -41,15 +42,21 @@
     gateway_publish_host: "{{ langfuse_hostname }}"
     gateway_publish_mode: subdomain
 
-- name: "langfuse | teardown | Drop the gateway auth exemption"
+- name: "langfuse | teardown | Drop the gateway policies"
   ansible.builtin.include_role:
     name: gateway
-    tasks_from: route_auth_exempt.yaml
+    tasks_from: "{{ item.hook }}"
   vars:
-    gateway_route_name: langfuse
+    gateway_route_name: "{{ item.route }}"
     gateway_route_namespace: "{{ langfuse_namespace }}"
-    gateway_route_policy_name: langfuse-no-auth
+    gateway_route_policy_name: "{{ item.policy }}"
     gateway_route_state: absent
+  loop:
+    - {hook: route_auth_exempt.yaml, route: langfuse, policy: langfuse-no-auth}
+    - {hook: route_sso.yaml, route: langfuse, policy: langfuse-sso}
+    - {hook: route_auth_exempt.yaml, route: langfuse-api, policy: langfuse-api-no-auth}
+  loop_control:
+    label: "{{ item.policy }}"
 
 # Unwire first, so LiteLLM neither traces to a removed Langfuse nor needs its keys.
 - name: "langfuse | teardown | Turn LiteLLM tracing off"
