@@ -640,11 +640,23 @@
           - "{{ langfuse_hostname }}"
         # With Keycloak sign-in, new accounts come only from Keycloak: the
         # email/password sign-up page and API redirect to the sign-in page.
+        # Signed in at the gateway already, the root without a Langfuse
+        # session starts Langfuse's Keycloak sign-in directly, so its sign-in
+        # page (and button) never shows.
         rules: >-
           {{ ([{'matches': [{'path': {'type': 'Exact', 'value': '/api/auth/signup'}},
                             {'path': {'type': 'Exact', 'value': '/auth/sign-up'}}],
                 'filters': [{'type': 'RequestRedirect',
                              'requestRedirect': {'path': {'type': 'ReplaceFullPath', 'replaceFullPath': '/auth/sign-in'},
+                                                 'statusCode': 302}}]},
+               {'matches': [{'path': {'type': 'Exact', 'value': '/'},
+                             'headers': [{'type': 'RegularExpression', 'name': 'Cookie',
+                                          'value': '(.*[;,] *)?__Secure-next-auth[.]session-token([.]0)?=.*'}]}],
+                'backendRefs': [{'name': 'langfuse-web', 'port': 3000}]},
+               {'matches': [{'path': {'type': 'Exact', 'value': '/'}}],
+                'filters': [{'type': 'RequestRedirect',
+                             'requestRedirect': {'path': {'type': 'ReplaceFullPath',
+                                                          'replaceFullPath': '/auth/sso-initiate?provider=keycloak'},
                                                  'statusCode': 302}}]}]
               if langfuse_sso | bool else [])
              + [{'matches': [{'path': {'type': 'PathPrefix', 'value': '/'}}],
