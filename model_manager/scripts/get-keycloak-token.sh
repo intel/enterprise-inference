@@ -109,39 +109,43 @@ fi
 # ── Keycloak reachability: prefer direct (external), fall back to port-forward ─
 # Sets _gt_kc_base (the URL prefix to prepend to /realms/... or /admin/...)
 # and _gt_kc_curl_extra (extra curl args like --resolve for the direct path).
-# When port-forwarding, we speak HTTPS to keycloak-service:https (8443).
+# When port-forwarding, we speak HTTP to keycloak-service:http (8080) through
+# the kubectl tunnel. "in-cluster" skips the gateway: it does not publish the
+# admin API.
 _gt_open_keycloak() {
   local resolve_ip="$GATEWAY_IP"
   # Attempt 1: direct connection through external LB.
-  # Require HTTP 200 AND a JSON body — some clusters proxy 5xx errors as HTML
-  # through the same route, which would otherwise pass a naive probe.
-  local probe_body probe_code
-  probe_body=$(curl -sk --noproxy '*' --connect-timeout 3 --max-time 5 \
-      --resolve "${KEYCLOAK_DOMAIN}:443:${resolve_ip}" \
-      -o /dev/stdout -w "\n__HTTP__%{http_code}" \
-      "https://${KEYCLOAK_DOMAIN}${KEYCLOAK_PATH}/realms/inference/.well-known/openid-configuration" 2>/dev/null)
-  probe_code="${probe_body##*__HTTP__}"
-  probe_body="${probe_body%__HTTP__*}"
-  if [[ "$probe_code" == "200" && "$probe_body" == *'"issuer"'* ]]; then
-    _gt_kc_base="https://${KEYCLOAK_DOMAIN}${KEYCLOAK_PATH}"
-    _gt_kc_curl_extra=(--resolve "${KEYCLOAK_DOMAIN}:443:${resolve_ip}")
-    _gt_kc_pf_pid=""
-    return 0
+  if [[ "${1:-}" != "in-cluster" ]]; then
+    # Require HTTP 200 AND a JSON body — some clusters proxy 5xx errors as HTML
+    # through the same route, which would otherwise pass a naive probe.
+    local probe_body probe_code
+    probe_body=$(curl -sk --noproxy '*' --connect-timeout 3 --max-time 5 \
+        --resolve "${KEYCLOAK_DOMAIN}:443:${resolve_ip}" \
+        -o /dev/stdout -w "\n__HTTP__%{http_code}" \
+        "https://${KEYCLOAK_DOMAIN}${KEYCLOAK_PATH}/realms/inference/.well-known/openid-configuration" 2>/dev/null)
+    probe_code="${probe_body##*__HTTP__}"
+    probe_body="${probe_body%__HTTP__*}"
+    if [[ "$probe_code" == "200" && "$probe_body" == *'"issuer"'* ]]; then
+      _gt_kc_base="https://${KEYCLOAK_DOMAIN}${KEYCLOAK_PATH}"
+      _gt_kc_curl_extra=(--resolve "${KEYCLOAK_DOMAIN}:443:${resolve_ip}")
+      _gt_kc_pf_pid=""
+      return 0
+    fi
   fi
 
-  # Attempt 2: port-forward keycloak-service on port `https` (8443).
+  # Attempt 2: port-forward keycloak-service on port `http` (8080).
   local kc_ns="${MM_KEYCLOAK_NS:-keycloak}"
   local kc_svc="${MM_KEYCLOAK_SVC:-keycloak-service}"
   local local_port
   local_port=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
-  kubectl port-forward -n "$kc_ns" "svc/${kc_svc}" "${local_port}:https" &>/dev/null &
+  kubectl port-forward -n "$kc_ns" "svc/${kc_svc}" "${local_port}:http" &>/dev/null &
   _gt_kc_pf_pid=$!
   sleep 2
   if ! kill -0 "$_gt_kc_pf_pid" 2>/dev/null; then
     _gt_kc_pf_pid=""
     _gt_err "Cannot reach Keycloak — port-forward to ${kc_ns}/${kc_svc} failed."
   fi
-  _gt_kc_base="https://127.0.0.1:${local_port}${KEYCLOAK_PATH}"
+  _gt_kc_base="http://127.0.0.1:${local_port}${KEYCLOAK_PATH}"
   _gt_kc_curl_extra=()
 }
 
@@ -154,7 +158,8 @@ _gt_close_keycloak() {
   unset _gt_kc_base _gt_kc_curl_extra
 }
 
-_gt_open_keycloak
+# The lifespan update needs the admin API, which only the cluster reaches.
+_gt_open_keycloak ${_gt_lifespan:+in-cluster}
 
 # ── Update token lifespan if requested ────────────────────────────────────────
 if [[ -n "$_gt_lifespan" ]]; then
