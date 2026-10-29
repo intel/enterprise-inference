@@ -350,6 +350,8 @@
         # Browser goes to Keycloak's public URL; LiteLLM's own calls stay in-cluster.
         _litellm_sso_env:
           PROXY_BASE_URL: "{{ litellm_ui_url }}"
+          # The UI's logout signs out at the gateway, which ends the Keycloak session too.
+          PROXY_LOGOUT_URL: "{{ litellm_ui_url }}/oauth2/logout"
           # The UI login page goes straight to Keycloak (no LiteLLM login form).
           AUTO_REDIRECT_UI_LOGIN_TO_SSO: "true"
           GENERIC_CLIENT_ID: "{{ litellm_oidc_client_id }}"
@@ -623,7 +625,7 @@
     - _litellm_live.resources | length > 0
     - (litellm_ui_sso | bool) != ('GENERIC_CLIENT_ID' in _env)
 
-- name: "litellm | Admin UI address is out of date"
+- name: "litellm | Admin UI settings are out of date"
   vars:
     _env: >-
       {{ (_litellm_live.resources | first).spec.template.spec.containers
@@ -631,12 +633,13 @@
          | items2dict(key_name='name', value_name='value') }}
   ansible.builtin.debug:
     msg: >-
-      LiteLLM serves its admin UI for {{ _env.PROXY_BASE_URL }}, not {{ litellm_ui_url }}
-      (routing_mode changed). Re-run with -e litellm_reconcile=true.
+      LiteLLM serves its admin UI for {{ _env.PROXY_BASE_URL }} (logout {{ _env.PROXY_LOGOUT_URL | default('none') }}),
+      not {{ litellm_ui_url }} (routing_mode changed, or an older install). Re-run with -e litellm_reconcile=true.
   when:
     - _litellm_live.resources | length > 0
     - litellm_ui_sso | bool
     - _env.PROXY_BASE_URL | default(litellm_ui_url) != litellm_ui_url
+      or _env.PROXY_LOGOUT_URL | default('') != litellm_ui_url ~ '/oauth2/logout'
 
 # ── Gateway integration (runs even on re-runs to stay idempotent) ─────────────
 
