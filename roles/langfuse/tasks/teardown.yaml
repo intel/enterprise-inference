@@ -102,7 +102,37 @@
     api_version: v1
     kind: Namespace
     name: "{{ langfuse_namespace }}"
+    wait: true
+    wait_timeout: 300
   failed_when: false
+
+# Operator goes last so its finalizers clean up the ClickHouse/Keeper CRs first;
+# kept if any other ClickHouseCluster still exists in the cluster.
+- name: "langfuse | teardown | Check for remaining ClickHouseClusters"
+  kubernetes.core.k8s_info:
+    api_version: clickhouse.com/v1alpha1
+    kind: ClickHouseCluster
+  register: _langfuse_ch_remaining
+  failed_when: false
+
+- name: "langfuse | teardown | Remove ClickHouse operator"
+  when: _langfuse_ch_remaining.resources | default([]) | length == 0
+  block:
+    - name: "langfuse | teardown | Remove ClickHouse operator Helm release"
+      kubernetes.core.helm:
+        name: clickhouse-operator
+        release_namespace: "{{ langfuse_clickhouse_operator_namespace }}"
+        state: absent
+        wait: true
+      failed_when: false
+
+    - name: "langfuse | teardown | Remove ClickHouse operator namespace"
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Namespace
+        name: "{{ langfuse_clickhouse_operator_namespace }}"
+      failed_when: false
 
 - name: "langfuse | teardown | Remove Helm repo"
   kubernetes.core.helm_repository:
