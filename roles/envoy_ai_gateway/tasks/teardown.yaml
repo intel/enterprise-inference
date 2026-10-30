@@ -173,6 +173,16 @@
         - inference-unified-internal
       failed_when: false
 
+    - name: "envoy_ai_gateway | Delete AI Gateway request buffer policy"
+      kubernetes.core.k8s:
+        api_version: gateway.envoyproxy.io/v1alpha1
+        kind: ClientTrafficPolicy
+        name: "{{ ai_gateway_name }}"
+        namespace: "{{ ai_gateway_namespace }}"
+        state: absent
+      failed_when: false
+      when: ai_gateway_create | bool
+
     - name: "envoy_ai_gateway | Delete AI Gateway resource"
       kubernetes.core.k8s:
         api_version: gateway.networking.k8s.io/v1
