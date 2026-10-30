@@ -126,6 +126,42 @@
     - _litellm_needs_guard_settings | bool
     - not litellm_reconcile | bool
 
+# ── Admin UI sign-in (Keycloak) ───────────────────────────────────────────────
+# One client for both sign-ins: the gateway's (/oauth2/callback) and LiteLLM's.
+
+- name: "litellm | Admin UI sign-in client"
+  when: litellm_ui_sso | bool
+  block:
+    - name: "litellm | Namespace for the client secret"
+      kubernetes.core.k8s:
+        kind: Namespace
+        name: "{{ litellm_namespace }}"
+        state: present
+
+    - name: "litellm | Keycloak client"
+      ansible.builtin.include_role:
+        name: keycloak
+        tasks_from: oidc_client.yaml
+      vars:
+        keycloak_client:
+          id: "{{ litellm_oidc_client_id }}"
+          redirect_uris: ["{{ litellm_ui_url }}/sso/callback", "{{ litellm_ui_url }}/oauth2/callback"]
+          post_logout_uris: ["{{ litellm_ui_url }}/ui/"]
+
+    - name: "litellm | Keycloak client secret"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: litellm-sso
+            namespace: "{{ litellm_namespace }}"
+          type: Opaque
+          stringData:
+            client-secret: "{{ keycloak_client_secret }}"
+      no_log: true
+
 - name: "litellm | Install"
   when: >-
     _litellm_release.status is not defined or _litellm_release.status is none
@@ -309,6 +345,30 @@
 
     - name: "litellm | Install via Helm"
       vars:
+        _oidc: "{{ keycloak_client_issuer | default('') }}/protocol/openid-connect"
+        _oidc_internal: "{{ keycloak_client_issuer_internal | default('') }}/protocol/openid-connect"
+        # Browser goes to Keycloak's public URL; LiteLLM's own calls stay in-cluster.
+        _litellm_sso_env:
+          PROXY_BASE_URL: "{{ litellm_ui_url }}"
+          # The UI's logout signs out at the gateway, which ends the Keycloak session too.
+          PROXY_LOGOUT_URL: "{{ litellm_ui_url }}/oauth2/logout"
+          # The UI login page goes straight to Keycloak (no LiteLLM login form).
+          AUTO_REDIRECT_UI_LOGIN_TO_SSO: "true"
+          GENERIC_CLIENT_ID: "{{ litellm_oidc_client_id }}"
+          GENERIC_CLIENT_USE_PKCE: "true"
+          GENERIC_AUTHORIZATION_ENDPOINT: "{{ _oidc }}/auth"
+          GENERIC_TOKEN_ENDPOINT: "{{ _oidc_internal }}/token"
+          GENERIC_USERINFO_ENDPOINT: "{{ _oidc_internal }}/userinfo"
+          GENERIC_ROLE_MAPPINGS_GROUP_CLAIM: groups
+          GENERIC_ROLE_MAPPINGS_ROLES: "{{ {'proxy_admin': [keycloak_client_admin_group | default('')]} | string }}"
+          GENERIC_ROLE_MAPPINGS_DEFAULT_ROLE: proxy_admin_viewer
+        # Path mode: served under litellm_path; LiteLLM rewrites a writable copy
+        # of its UI for that prefix (the root file system is read-only).
+        _litellm_ui_path_env:
+          SERVER_ROOT_PATH: "{{ litellm_path }}"
+          LITELLM_UI_PATH: /tmp/litellm-ui
+        _litellm_sso_secret_env:
+          - {name: GENERIC_CLIENT_SECRET, valueFrom: {secretKeyRef: {name: litellm-sso, key: client-secret}}}
         _litellm_extra_env:
           - name: LITELLM_SALT_KEY
             valueFrom:
@@ -354,8 +414,10 @@
           # to config.yaml is importable regardless of how litellm resolves it.
           envVars: >-
             {{ {'UI_USERNAME': 'admin'} | combine(_litellm_proxy_env)
-               | combine({'PYTHONPATH': hybrid_router_mount_dir} if hybrid_router_enabled | bool else {}) }}
-          extraEnvVars: "{{ _litellm_extra_env }}"
+               | combine({'PYTHONPATH': hybrid_router_mount_dir} if hybrid_router_enabled | bool else {})
+               | combine(_litellm_sso_env if litellm_ui_sso | bool else {})
+               | combine(_litellm_ui_path_env if litellm_ui_sso | bool and _litellm_path_mode | bool else {}) }}
+          extraEnvVars: "{{ _litellm_extra_env + (_litellm_sso_secret_env if litellm_ui_sso | bool else []) }}"
           # Router-code ConfigMap mounts that rebuild the package tree next to
           # config.yaml (hybrid router only).
           volumes: "{{ _litellm_hybrid_volumes }}"
@@ -391,6 +453,8 @@
               master_key: "os.environ/PROXY_MASTER_KEY"
               store_model_in_db: true
               ui_access_mode: "admin_only"
+              # Keycloak is the only way into the UI.
+              disable_password_login_when_sso_enabled: "{{ litellm_ui_sso | bool }}"
             litellm_settings:
               drop_params: true
               set_verbose: false
@@ -539,6 +603,44 @@
         namespace: "{{ litellm_namespace }}"
       when: not hybrid_router_enabled | bool
 
+# Values apply on a fresh install only: an existing release keeps its sign-in.
+- name: "litellm | Read the deployment"
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: litellm
+    namespace: "{{ litellm_namespace }}"
+  register: _litellm_live
+
+- name: "litellm | Sign-in settings are out of date"
+  vars:
+    _env: >-
+      {{ (_litellm_live.resources | first).spec.template.spec.containers
+         | map(attribute='env', default=[]) | flatten | map(attribute='name') | list }}
+  ansible.builtin.debug:
+    msg: >-
+      LiteLLM runs with Keycloak UI sign-in {{ 'off' if litellm_ui_sso | bool else 'on' }}, but
+      litellm_ui_sso is {{ litellm_ui_sso | bool }}. Reinstall it: teardown litellm, then install litellm.
+  when:
+    - _litellm_live.resources | length > 0
+    - (litellm_ui_sso | bool) != ('GENERIC_CLIENT_ID' in _env)
+
+- name: "litellm | Admin UI settings are out of date"
+  vars:
+    _env: >-
+      {{ (_litellm_live.resources | first).spec.template.spec.containers
+         | map(attribute='env', default=[]) | flatten | selectattr('value', 'defined')
+         | items2dict(key_name='name', value_name='value') }}
+  ansible.builtin.debug:
+    msg: >-
+      LiteLLM serves its admin UI for {{ _env.PROXY_BASE_URL }} (logout {{ _env.PROXY_LOGOUT_URL | default('none') }}),
+      not {{ litellm_ui_url }} (routing_mode changed, or an older install). Re-run with -e litellm_reconcile=true.
+  when:
+    - _litellm_live.resources | length > 0
+    - litellm_ui_sso | bool
+    - _env.PROXY_BASE_URL | default(litellm_ui_url) != litellm_ui_url
+      or _env.PROXY_LOGOUT_URL | default('') != litellm_ui_url ~ '/oauth2/logout'
+
 # ── Gateway integration (runs even on re-runs to stay idempotent) ─────────────
 
 # The gateway no longer delegates auth to LiteLLM (extAuth), so the grant
@@ -630,6 +732,65 @@
     gateway_rate_limit_unit: "{{ litellm_rate_limit_unit | default('Minute') }}"
     gateway_rate_limit_client_header: "{{ litellm_rate_limit_client_header | default('x-forwarded-for') }}"
 
+# ── Admin UI (signed in at the gateway, then by LiteLLM) ──────────────────────
+# Its own host, or in path mode everything under litellm_path that the API
+# route's exact paths do not take (the UI and the calls it makes).
+
+- name: "litellm | Admin UI"
+  when: litellm_gateway_publish | bool and litellm_ui_sso | bool
+  block:
+    - name: "litellm | Publish the admin UI host"
+      ansible.builtin.include_role:
+        name: gateway
+        tasks_from: publish.yaml
+      vars:
+        gateway_publish_name: litellm-ui
+        gateway_publish_namespace: "{{ litellm_namespace }}"
+        gateway_publish_host: "{{ litellm_ui_hostname }}"
+        gateway_publish_path: "{{ litellm_path }}"
+        gateway_publish_portal: {title: "LiteLLM", description: "Models, virtual keys and spend", path: /ui/}
+
+    - name: "litellm | Admin UI HTTPRoute"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: gateway.networking.k8s.io/v1
+          kind: HTTPRoute
+          metadata:
+            name: litellm-ui
+            namespace: "{{ litellm_namespace }}"
+          spec:
+            parentRefs: ["{{ gateway_publish.parent_ref }}"]
+            hostnames: ["{{ gateway_publish.host }}"]
+            rules:
+              - matches: [{path: {type: PathPrefix, value: "{{ gateway_publish.relative_path }}"}}]
+                filters:
+                  - type: ResponseHeaderModifier
+                    # Nothing frames the admin UI.
+                    responseHeaderModifier:
+                      set: "{{ litellm_route_headers + [{'name': 'X-Frame-Options', 'value': 'DENY'}] }}"
+                backendRefs: [{name: litellm, port: 4000}]
+
+    - name: "litellm | Sign in at the gateway"
+      ansible.builtin.include_role:
+        name: gateway
+        tasks_from: route_sso.yaml
+      vars:
+        gateway_route_name: litellm-ui
+        gateway_route_namespace: "{{ litellm_namespace }}"
+        gateway_route_policy_name: litellm-ui-sso
+        gateway_sso:
+          issuer: "{{ keycloak_client_issuer }}"
+          issuer_internal: "{{ keycloak_client_issuer_internal }}"
+          client_id: "{{ litellm_oidc_client_id }}"
+          client_secret_name: litellm-sso
+          redirect_url: "{{ litellm_ui_url }}/oauth2/callback"
+          allowed_groups: "{{ litellm_ui_groups or [keycloak_client_admin_group] }}"
+
+- name: "litellm | Admin UI off: remove its host"
+  when: not (litellm_gateway_publish | bool and litellm_ui_sso | bool)
+  ansible.builtin.include_tasks: ui_remove.yaml
+
 # ── In-cluster lockdown (Istio ambient, L4) ───────────────────────────────────
 # Mesh mTLS gives every caller an identity; only the allowed namespaces (and the
 # source ranges in litellm_allowed_source_cidrs) may reach LiteLLM, and only
@@ -704,9 +865,10 @@
       data:
         hostname: "{{ litellm_hostname }}"
         api_url: "{{ litellm_url }}/v1"
+        ui_url: "{{ (litellm_ui_url ~ '/ui/') if litellm_ui_sso | bool else '' }}"
         note: >-
-          The admin UI and admin API are not published. Master key (break-glass) is in secret
-          litellm-master-key (key: master_key).
+          {{ 'Admin UI: Keycloak sign-in only.' if litellm_ui_sso | bool else 'The admin UI is not published.' }}
+          Master key (break-glass, API only) is in secret litellm-master-key (key: master_key).
 
 - name: "litellm | Install complete"
   ansible.builtin.debug:
@@ -714,8 +876,11 @@
       - "LiteLLM deployed in namespace '{{ litellm_namespace }}'"
       - "API: {{ litellm_url }}/v1 (Bearer <virtual key>; paths: {{ litellm_public_paths | join(', ') }})"
       - >-
-        Admin API: not published; break-glass with the master key over
-        kubectl -n {{ litellm_namespace }} port-forward svc/litellm 4000 (Secret litellm-master-key)
+        {{ ('Admin UI: ' ~ litellm_ui_url ~ '/ui/ (Keycloak sign-in; groups '
+            ~ (litellm_ui_groups or [keycloak_client_admin_group | default('')]) | join(', ')
+            ~ '; LiteLLM free tier: at most 5 SSO users).') if litellm_ui_sso | bool else 'Admin UI: not published.' }}
+        Break-glass: the master key over kubectl -n {{ litellm_namespace }} port-forward svc/litellm 4000
+        (Secret litellm-master-key).
 
 - name: "litellm | Register the content-safety guardrail"
   ansible.builtin.include_tasks: register_guardrail.yaml

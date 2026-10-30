@@ -1,0 +1,29 @@
+---
+# Removes the admin UI host (install with the UI off, and teardown).
+
+- name: "litellm | UI | Remove the gateway sign-in"
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: route_sso.yaml
+  vars:
+    gateway_route_name: litellm-ui
+    gateway_route_namespace: "{{ litellm_namespace }}"
+    gateway_route_policy_name: litellm-ui-sso
+    gateway_route_state: absent
+
+- name: "litellm | UI | Remove the HTTPRoute"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: gateway.networking.k8s.io/v1
+    kind: HTTPRoute
+    name: litellm-ui
+    namespace: "{{ litellm_namespace }}"
+
+- name: "litellm | UI | Unpublish the host"
+  ansible.builtin.include_role:
+    name: gateway
+    tasks_from: unpublish.yaml
+  vars:
+    gateway_publish_name: litellm-ui
+    gateway_publish_namespace: "{{ litellm_namespace }}"
+    gateway_publish_host: "{{ litellm_ui_hostname }}"

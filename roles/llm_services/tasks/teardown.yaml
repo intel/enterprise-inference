@@ -3,6 +3,30 @@
 # LLM Services — teardown all inference workloads + namespace
 # =============================================================================
 
+# Cluster-scoped, so not removed with the namespaces.
+- name: "llm_services | Remove the Headlamp deploy policy and cluster RBAC"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: "{{ item.api }}"
+    kind: "{{ item.kind }}"
+    name: "{{ item.name }}"
+  loop:
+    - {api: admissionregistration.k8s.io/v1, kind: ValidatingAdmissionPolicyBinding, name: model-manager-pods}
+    - {api: admissionregistration.k8s.io/v1, kind: ValidatingAdmissionPolicy, name: model-manager-pods}
+    - {api: rbac.authorization.k8s.io/v1, kind: ClusterRoleBinding, name: model-manager}
+    - {api: rbac.authorization.k8s.io/v1, kind: ClusterRole, name: model-manager}
+  loop_control:
+    label: "{{ item.kind }}/{{ item.name }}"
+
+- name: "llm_services | Delete the model-manager namespace"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: v1
+    kind: Namespace
+    name: "{{ llm_services_mm_namespace }}"
+    wait: true
+    wait_timeout: 300
+
 - name: "llm_services | Delete all LLMInferenceServices"
   kubernetes.core.k8s:
     api_version: serving.kserve.io/v1alpha2

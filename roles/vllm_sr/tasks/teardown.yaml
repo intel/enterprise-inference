@@ -53,15 +53,20 @@
     gateway_publish_host: "{{ vllm_sr_dashboard_hostname }}"
     gateway_publish_mode: subdomain
 
-- name: "vllm_sr | teardown | Drop the dashboard auth exemption"
+- name: "vllm_sr | teardown | Drop the dashboard gateway policies"
   ansible.builtin.include_role:
     name: gateway
-    tasks_from: route_auth_exempt.yaml
+    tasks_from: "{{ item.hook }}"
   vars:
     gateway_route_name: "{{ vllm_sr_release_name }}-dashboard"
     gateway_route_namespace: "{{ vllm_sr_namespace }}"
-    gateway_route_policy_name: vllm-sr-dashboard-no-auth
+    gateway_route_policy_name: "{{ item.policy }}"
     gateway_route_state: absent
+  loop:
+    - {hook: route_auth_exempt.yaml, policy: vllm-sr-dashboard-no-auth}
+    - {hook: route_sso.yaml, policy: vllm-sr-dashboard-sso}
+  loop_control:
+    label: "{{ item.policy }}"
 
 - name: "vllm_sr | teardown | Resolve the routed models"
   ansible.builtin.include_tasks: models.yaml

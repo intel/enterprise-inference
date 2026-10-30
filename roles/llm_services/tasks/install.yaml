@@ -134,6 +134,29 @@
   set_fact:
     inference_extension_dir: "{{ playbook_dir }}/../ext/enterprise.ai-inference"
 
+# Read by the Headlamp Models page. Allow-listed fields only, as JSON.
+- name: "llm_services | Publish the model catalogue"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: model-catalog
+        namespace: "{{ llm_services_namespace }}"
+      data:
+        models.json: >-
+          {%- set out = [] -%}
+          {%- for m in (lookup('ansible.builtin.file', _llm_catalog_file) | from_yaml).models | default([]) -%}
+          {%- set _ = out.append(m | dict2items | selectattr('key', 'in', _llm_catalog_fields) | items2dict) -%}
+          {%- endfor -%}
+          {{ out | to_json }}
+  vars:
+    _llm_catalog_file: >-
+      {{ (env_dir ~ '/models.yaml') if (env_dir is defined and (env_dir ~ '/models.yaml') is exists)
+         else (inference_extension_dir ~ '/model_manager/models.yaml') }}
+    _llm_catalog_fields: [name, model_id, category, servers, default_server, runtime, cpu, memory]
+
 # The content-safety guardrail (litellm role) is registered default-on and
 # fail-closed, so its guard model must be served whenever the guardrail is on —
 # otherwise every LiteLLM request is blocked. A failed guard deploy is fatal for
@@ -146,6 +169,10 @@
     _mm_only_models: ["{{ guardrail_model | default('qwen3guard') }}"]
     _mm_strict: true
   when: guardrails_enabled | default((auth_type | default('jwt')) == 'litellm_vkey') | bool
+
+- name: "llm_services | Deploy from Headlamp (model-manager Jobs)"
+  ansible.builtin.include_tasks: ui_deploy.yaml
+  when: llm_services_ui_deploy | bool
 
 - name: "llm_services | Deploy default models"
   include_tasks: deploy_models.yaml

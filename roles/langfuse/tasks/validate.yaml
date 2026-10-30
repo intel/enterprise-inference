@@ -31,6 +31,15 @@
     _val_worker.resources[0].status.conditions | default([]) |
     selectattr('type','eq','Available') | selectattr('status','eq','True') | list | length == 0
 
+# Without a session the gateway sends people to the realm before Langfuse.
+- name: "langfuse | validate | Signs people in through Keycloak"
+  ansible.builtin.include_role:
+    name: keycloak
+    tasks_from: check_sign_in.yaml
+  vars:
+    keycloak_sign_in: {name: Langfuse, url: "https://{{ langfuse_hostname }}/"}
+  when: langfuse_sso | bool and langfuse_gateway_publish | bool
+
 - name: "langfuse | validate | Summary"
   ansible.builtin.debug:
     msg:

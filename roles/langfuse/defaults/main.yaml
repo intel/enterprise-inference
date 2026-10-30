@@ -28,6 +28,24 @@ langfuse_helm_chart: "langfuse/langfuse"
 
 # Hostname for the Langfuse UI (overridable in global_config.yaml)
 langfuse_hostname: "langfuse.{{ base_domain_name | default('inference-example.com') }}"
+# Path mode: <base><langfuse_path> redirects to the own host (the stock image
+# cannot run under a path).
+langfuse_path: "/langfuse"
+
+# Sign-in through Keycloak (platform realm), first at the gateway, then by
+# Langfuse on the same session. New users join the seeded org and project as
+# Viewer; Langfuse OSS has no group mapping, so the seeded admin promotes others
+# in Langfuse. The seeded admin keeps its password login (break-glass, behind
+# the gateway sign-in); email/password sign-up is refused at the gateway.
+# /api/public (SDK traces, Langfuse API keys) stays outside the gateway sign-in.
+langfuse_sso: "{{ keycloak_enabled | default(true) | bool }}"
+langfuse_oidc_client_id: "langfuse"
+# Groups the gateway admits; empty admits every signed-in realm user.
+langfuse_allowed_groups: []
+langfuse_session_max_age: 480       # minutes (8 h); Langfuse default is 30 days
+# Map the Keycloak host to the gateway address in the pod. Set false where DNS
+# resolves the platform hostnames.
+langfuse_pin_issuer_host: true
 
 # Default admin account — seeded on first startup via LANGFUSE_INIT_* env vars
 # Email defaults to admin@<base_domain_name>

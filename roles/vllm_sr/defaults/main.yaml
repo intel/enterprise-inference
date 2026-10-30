@@ -83,9 +83,14 @@ vllm_sr_config_override: null
 # Off here; the agent toolkit turns it on. Admin login = DASHBOARD_ADMIN_* env from
 # the Secret below (password generated once); JWT signing key in the same Secret so
 # sessions survive restarts. Published at https://<hostname>/ on the platform
-# gateway with its own login (exempt from gateway auth); it serves root paths, so
-# it keeps its own host in path mode too.
+# gateway, behind the gateway's Keycloak sign-in, then its own login; it serves
+# root paths, so it keeps its own host in path mode too.
 vllm_sr_dashboard_enabled: false
+# Sign in at the gateway through Keycloak (platform realm) before the dashboard.
+vllm_sr_dashboard_sso: "{{ keycloak_enabled | default(true) | bool }}"
+vllm_sr_dashboard_oidc_client_id: "vllm-sr"
+# Groups the gateway admits; empty means the platform admin group.
+vllm_sr_dashboard_allowed_groups: []
 # Publish the dashboard on the platform gateway.
 # Foreign var (canonical owner: enterprise-ai-solutions gateway component flag;
 # envoy_gateway_enabled is its alias).

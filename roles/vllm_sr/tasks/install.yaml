@@ -243,17 +243,75 @@
               - name: "{{ vllm_sr_release_name }}-dashboard"
                 port: "{{ vllm_sr_dashboard_port | int }}"
 
-- name: "vllm_sr | Exempt the dashboard from gateway auth (it has its own login)"
+# With Keycloak sign-in only the allowed groups reach the dashboard's own login.
+# One policy per route: the other is removed first.
+- name: "vllm_sr | Dashboard gateway sign-in"
   when:
     - vllm_sr_dashboard_enabled | bool
     - vllm_sr_gateway_publish | bool
-  ansible.builtin.include_role:
-    name: gateway
-    tasks_from: route_auth_exempt.yaml
-  vars:
-    gateway_route_name: "{{ vllm_sr_release_name }}-dashboard"
-    gateway_route_namespace: "{{ vllm_sr_namespace }}"
-    gateway_route_policy_name: vllm-sr-dashboard-no-auth
+  block:
+    - name: "vllm_sr | Remove the other dashboard gateway policy"
+      ansible.builtin.include_role:
+        name: gateway
+        tasks_from: "{{ 'route_auth_exempt.yaml' if vllm_sr_dashboard_sso | bool else 'route_sso.yaml' }}"
+      vars:
+        gateway_route_name: "{{ vllm_sr_release_name }}-dashboard"
+        gateway_route_namespace: "{{ vllm_sr_namespace }}"
+        gateway_route_policy_name: "{{ 'vllm-sr-dashboard-no-auth' if vllm_sr_dashboard_sso | bool else 'vllm-sr-dashboard-sso' }}"
+        gateway_route_state: absent
+
+    - name: "vllm_sr | Dashboard Keycloak client"
+      ansible.builtin.include_role:
+        name: keycloak
+        tasks_from: oidc_client.yaml
+      vars:
+        keycloak_client:
+          id: "{{ vllm_sr_dashboard_oidc_client_id }}"
+          redirect_uris: ["https://{{ vllm_sr_dashboard_hostname }}/oauth2/callback"]
+          post_logout_uris: ["https://{{ vllm_sr_dashboard_hostname }}/"]
+      when: vllm_sr_dashboard_sso | bool
+
+    - name: "vllm_sr | Dashboard Keycloak client secret"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: vllm-sr-dashboard-sso
+            namespace: "{{ vllm_sr_namespace }}"
+          type: Opaque
+          stringData:
+            client-secret: "{{ keycloak_client_secret }}"
+      no_log: true
+      when: vllm_sr_dashboard_sso | bool
+
+    - name: "vllm_sr | Sign in to the dashboard at the gateway"
+      ansible.builtin.include_role:
+        name: gateway
+        tasks_from: route_sso.yaml
+      vars:
+        gateway_route_name: "{{ vllm_sr_release_name }}-dashboard"
+        gateway_route_namespace: "{{ vllm_sr_namespace }}"
+        gateway_route_policy_name: vllm-sr-dashboard-sso
+        gateway_sso:
+          issuer: "{{ keycloak_client_issuer }}"
+          issuer_internal: "{{ keycloak_client_issuer_internal }}"
+          client_id: "{{ vllm_sr_dashboard_oidc_client_id }}"
+          client_secret_name: vllm-sr-dashboard-sso
+          redirect_url: "https://{{ vllm_sr_dashboard_hostname }}/oauth2/callback"
+          allowed_groups: "{{ vllm_sr_dashboard_allowed_groups or [keycloak_client_admin_group] }}"
+      when: vllm_sr_dashboard_sso | bool
+
+    - name: "vllm_sr | Exempt the dashboard from gateway auth (Keycloak sign-in off)"
+      ansible.builtin.include_role:
+        name: gateway
+        tasks_from: route_auth_exempt.yaml
+      vars:
+        gateway_route_name: "{{ vllm_sr_release_name }}-dashboard"
+        gateway_route_namespace: "{{ vllm_sr_namespace }}"
+        gateway_route_policy_name: vllm-sr-dashboard-no-auth
+      when: not (vllm_sr_dashboard_sso | bool)
 
 # Dashboard turned off (or not published): drop what an earlier run published.
 - name: "vllm_sr | Remove the dashboard route and its auth exemption when not published"
@@ -269,15 +327,20 @@
       # Absent on any install that never published the dashboard — not an error.
       failed_when: false
 
-    - name: "vllm_sr | Drop the dashboard auth exemption"
+    - name: "vllm_sr | Drop the dashboard gateway policies"
       ansible.builtin.include_role:
         name: gateway
-        tasks_from: route_auth_exempt.yaml
+        tasks_from: "{{ item.hook }}"
       vars:
         gateway_route_name: "{{ vllm_sr_release_name }}-dashboard"
         gateway_route_namespace: "{{ vllm_sr_namespace }}"
-        gateway_route_policy_name: vllm-sr-dashboard-no-auth
+        gateway_route_policy_name: "{{ item.policy }}"
         gateway_route_state: absent
+      loop:
+        - {hook: route_auth_exempt.yaml, policy: vllm-sr-dashboard-no-auth}
+        - {hook: route_sso.yaml, policy: vllm-sr-dashboard-sso}
+      loop_control:
+        label: "{{ item.policy }}"
 
     - name: "vllm_sr | Unpublish the dashboard host"
       ansible.builtin.include_role:

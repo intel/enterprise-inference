@@ -8,7 +8,8 @@
 # The API is published for programs on litellm.<domain> (<domain>/litellm in
 #   path mode). Only
 #   litellm_public_paths are routed; LiteLLM validates the virtual key. The
-#   admin UI and admin API are not published.
+#   admin UI (and the admin API it uses) is published only on litellm_ui_hostname
+#   (path mode: the rest of <domain>/litellm), behind Keycloak sign-in (litellm_ui_sso).
 #   Client → Envoy Gateway (TLS, path allowlist) → LiteLLM (key check) → KServe
 #
 # When auth_type=litellm_vkey the API route bypasses the gateway JWT policy;
@@ -42,6 +43,19 @@ litellm_url: >-
   {{ 'https://' ~ (base_domain_name | default('inference-example.com')) ~ litellm_path
      if _litellm_path_mode | bool else 'https://' ~ litellm_hostname }}
 
+# Admin UI on its own host (path mode: under litellm_path, on the base host's
+# origin), behind gateway sign-in, then LiteLLM's own Keycloak
+# sign-in (silent, same Keycloak session). keycloak_platform_admin_group maps to
+# proxy_admin, other admitted groups to proxy_admin_viewer (read-only).
+# Username/password UI login is off; the master key stays for API break-glass.
+# LiteLLM's free tier stops all SSO logins once more than 5 users exist, so the
+# gateway admits only litellm_ui_groups (default: the admin group).
+litellm_ui_sso: "{{ keycloak_enabled | default(true) | bool }}"
+litellm_ui_hostname: "litellm-ui.{{ base_domain_name | default('inference-example.com') }}"
+litellm_ui_url: "{{ litellm_url if _litellm_path_mode | bool else 'https://' ~ litellm_ui_hostname }}"
+litellm_ui_groups: []
+litellm_oidc_client_id: "litellm"
+
 # Exact paths published on the API route (under litellm_path in path mode);
 # anything else never reaches LiteLLM.
 litellm_public_paths:
@@ -52,10 +66,12 @@ litellm_public_paths:
   - /health/liveliness
 
 # Namespaces allowed to open connections to LiteLLM (Istio L4 policy): the
-# gateway, and litellm itself (model-manager registers models from a pod there).
+# gateway, litellm itself (model-manager registers models from a pod there),
+# and the namespace of the Headlamp-started model-manager Jobs.
 litellm_allowed_namespaces:
   - "{{ gateway_namespace | default('envoy-gateway-system') }}"
   - "{{ litellm_namespace }}"
+  - "{{ llm_services_mm_namespace | default('model-manager') }}"
 # Let callers outside the mesh (for example agent sandboxes) reach LiteLLM's API port
 # from the cluster pod network: their plaintext traffic carries no namespace identity
 # to match. A solution layer turns this on; callers still need a LiteLLM key.
