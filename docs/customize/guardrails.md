@@ -135,11 +135,11 @@ the new guard host reaches its allowlist (next section).
 ### Outbound URL allowlist
 
 Newer LiteLLM releases check every URL a guardrail calls and refuse private,
-cluster-internal and loopback addresses unless the host is allowlisted; LiteLLM v1.83.14,
-which this release deploys, does not check guardrail calls. While the guardrail is on, the
-install adds exactly the host of `guard_service_url` (and `host:port` when the URL names a
-port) to `litellm_settings.user_url_allowed_hosts` in the LiteLLM config, so the guard
-endpoint stays allowed if LiteLLM is upgraded; the check stays on for every other host. Do
+cluster-internal and loopback addresses unless the host is allowlisted. While the guardrail
+is on, the install adds exactly the host of `guard_service_url` (and `host:port` when the
+URL names a port) to `litellm_settings.user_url_allowed_hosts` in the LiteLLM config, so
+the guard endpoint stays allowed whichever LiteLLM version is deployed; the check stays on
+for every other host. Do
 not set `user_url_validation: false`, which turns the check off for every URL.
 
 LiteLLM sends the allowlisted call to the address the guard host resolves to. Behind an

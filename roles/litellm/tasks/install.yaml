@@ -197,7 +197,7 @@
       ansible.builtin.set_fact:
         _litellm_prisma_seed_containers:
           - name: prisma-engine-seed
-            image: "ghcr.io/berriai/litellm-database:main-{{ litellm_version }}"
+            image: "ghcr.io/berriai/litellm-database:{{ litellm_version }}"
             imagePullPolicy: IfNotPresent
             # Root, so it can read the baked engines under /root — but with no
             # capabilities, so the script cannot chown, only chmod.
@@ -335,7 +335,7 @@
           replicaCount: "{{ _litellm_replicas }}"
           image:
             repository: ghcr.io/berriai/litellm-database
-            tag: "main-{{ litellm_version }}"
+            tag: "{{ litellm_version }}"
           # DB — use our existing PostgreSQL via db-secret pattern
           db:
             useExisting: true
