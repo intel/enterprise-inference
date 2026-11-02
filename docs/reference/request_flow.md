@@ -1,6 +1,6 @@
 # Inference Request Flow
 
-End-to-end path for an inference request through the platform, from external client to model response.
+End-to-end path for an inference request, from external client to model response.
 
 ## Architecture
 
@@ -154,7 +154,7 @@ curl https://litellm.inference-example.com/v1/chat/completions \
 **What LiteLLM does:**
 1. Authenticates the virtual key
 2. Screens the last user message with the content-safety guardrail (`guardrails_enabled`,
-   when on; the Agent Toolkit turns it on): a pre-call request through `ai-gateway` to the guard model
+   when on; Intel® Agent Toolkit turns it on): a pre-call request through `ai-gateway` to the guard model
    (`qwen3guard`). Unsafe content returns HTTP 500 "Blocked by the content-safety
    guardrail: …" and the request stops here. The guardrail is fail-closed: while the guard
    model cannot be reached, every request is blocked. See

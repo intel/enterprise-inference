@@ -5,7 +5,7 @@ Both auth modes expose the **same OpenAI-compatible API** on a single endpoint: 
 is the hostname and the credential.
 
 `auth_provider` selects the mode — `keycloak` (default) or `litellm`. It is set in the
-platform's `global_config.yaml`, not in this repo.
+Toolkit Manager's `global_config.yaml`, not in this repo.
 
 | | **Keycloak** (`auth_provider: keycloak`) | **LiteLLM** (`auth_provider: litellm`) |
 |---|---|---|
@@ -78,7 +78,7 @@ gateway, before it reaches a model.
 
 LiteLLM is the auth boundary. The edge gateway terminates TLS and forwards to LiteLLM,
 which validates the bearer key, enforces that key's model allow-list, budget, and rate
-limit, then routes on to the AI gateway. The content-safety guardrail (when on; the Agent Toolkit
+limit, then routes on to the AI gateway. The content-safety guardrail (when on; Intel® Agent Toolkit
 turns it on) screens each request with a guard model first: a blocked request returns
 HTTP 500 "Blocked by the content-safety guardrail: …", and while the guard model is not
 Ready every request is blocked — see [Guardrails](../customize/guardrails.md).
@@ -195,7 +195,7 @@ curl -sk --noproxy '*' -N \
 
 ## Other endpoints
 
-Embedding and reranking models deployed through this layer serve on the same host:
+Embedding and reranking models deployed with this toolkit serve on the same host:
 
 | Workload | Endpoint |
 |---|---|

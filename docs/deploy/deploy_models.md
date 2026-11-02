@@ -6,9 +6,9 @@ OpenAI-compatible endpoint. It exposes two lifecycle commands — **`deploy`** a
 serving objects are standard Kubernetes CRDs.
 
 > [!IMPORTANT]
-> Run it from the **solutions repo root** as `./model-manager` (a thin wrapper pointing at
+> Run it from the **Toolkit Manager repo root** as `./model-manager` (a thin wrapper pointing at
 > `ext/enterprise.ai-inference/model_manager/`). It operates against a **running cluster**
-> provisioned by the core platform install — see [Quick Start](../../README.md#quick-start).
+> Toolkit Manager installed — see [Quick Start](../../README.md#quick-start).
 
 It needs `kubectl`, `curl`, and **Python 3.9 or newer with PyYAML**. The installer's `.venv`
 is picked up automatically (as is any active virtualenv); otherwise install the dependencies
@@ -119,8 +119,8 @@ catalog's per-model `args:` — there is no dedicated option:
 ./model-manager deploy --id <org/model> --arg "--trust-remote-code" --wait
 ```
 
-When the flag is present from any layer (category, version, per-model `args:`, or
-`--arg`), model-manager arranges offline-safe serving automatically:
+When the flag is present from the category, the version, per-model `args:`, or
+`--arg`, model-manager arranges offline-safe serving automatically:
 
 - the **download Job** prefetches the `*.py` from every repo referenced in the model's
   `config.json` `auto_map`, then rewrites `auto_map` to point at the local copies, and

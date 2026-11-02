@@ -190,7 +190,7 @@ Set these in `env/<env>/config.inference.yaml`. They become the virtual model's
 | `hybrid_router_quality_weight` | `quality_weight` | `0.0` | Quality-vs-efficiency blend in `[0, 1]`; `0` = pure efficiency |
 | `hybrid_router_tier_candidates` | `tier_candidates` | `hybrid_router_default_model` for every tier | Map of tier → list of deployed model names |
 | `hybrid_router_tier_boundaries` | `complexity_router_config.tier_boundaries` | `0.15`, `0.35`, `0.60` | `simple_medium`, `medium_complex`, `complex_reasoning` |
-| `hybrid_router_default_model` | `hybrid_router_default_model` | the solution's default model, else `qwen3-4b` | Fallback model |
+| `hybrid_router_default_model` | `hybrid_router_default_model` | the installed toolkit's default model, else `qwen3-4b` | Fallback model |
 | `hybrid_router_model_name` | — | `hybrid-router` | Client-facing virtual model name |
 
 Every model listed in `tier_candidates` / `hybrid_router_default_model` must already be
