@@ -121,7 +121,7 @@ supported mode.
 Deployed only when `auth_provider: litellm`.
 
 ```yaml
-# litellm_version: "v1.83.14-stable.patch.2"
+# litellm_version: "v1.84.0"
 # litellm_namespace: "litellm"
 # litellm_cache_enabled: true
 # litellm_cache_ttl: 600

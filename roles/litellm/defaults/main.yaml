@@ -15,7 +15,7 @@
 #   Client → Envoy Gateway (TLS+routing) → LiteLLM proxy (auth) → KServe
 # =============================================================================
 
-litellm_version: "v1.83.14-stable.patch.2"     # Docker image tag to deploy
+litellm_version: "v1.84.0"                     # Full image tag of ghcr.io/berriai/litellm-database
 litellm_namespace: "litellm"
 litellm_valkey_tag: "8.0-alpine"                # valkey/valkey (official upstream image, Alpine for smaller footprint)
 
