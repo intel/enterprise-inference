@@ -25,7 +25,7 @@
 
 Serving a model on Kubernetes normally means hand-writing manifests, sizing CPU and memory, pinning cores to the right NUMA node, downloading weights into shared storage, and wiring a route through a gateway — for every model.
 
-This repository replaces that with a catalog and a CLI. You describe a model once in `models.yaml`, or point `--id` at a Hugging Face repo, and `model-manager` resolves the configuration, checks the requested CPU fits the node, downloads the weights, creates the serving pod, and registers the model with the gateway.
+This repository replaces that with a catalog and a CLI. You describe a model once in `models.yaml`, or point `--hfid` at a Hugging Face repo, and `model-manager` resolves the configuration, checks the requested CPU fits the node, downloads the weights, creates the serving pod, and registers the model with the gateway.
 
 The Ansible roles here deploy the serving infrastructure itself: KServe for the model CRDs, an in-cluster AI gateway for model-aware routing, the Keycloak realm and client used for sign-in, and — with `auth_type: litellm_vkey` or `litellm_enabled: true` — LiteLLM for virtual API keys and Langfuse for request tracing.
 
@@ -89,7 +89,7 @@ Settings for this layer live in `config.yaml` at this repo's root, loaded by the
 Or skip the catalog and deploy any Hugging Face model directly:
 
 ```bash
-./model-manager deploy --id Qwen/Qwen3-0.6B --cpu 8 --memory 16Gi --wait
+./model-manager deploy --hfid Qwen/Qwen3-0.6B --cpu 8 --memory 16Gi --wait
 ```
 
 > [!IMPORTANT]

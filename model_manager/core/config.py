@@ -1,4 +1,4 @@
-"""Model catalog (models.yaml) and resolution of a catalog entry or --id into a Model."""
+"""Model catalog (models.yaml) and resolution of a catalog entry or --hfid into a Model."""
 from __future__ import annotations
 
 import json
@@ -181,7 +181,7 @@ class Model:
 
 
 def resolve(catalog: Catalog, target: str, o: Any) -> Model:
-    """Resolve a catalog model (or --id) plus CLI overrides into the Model to deploy."""
+    """Resolve a catalog model (or --hfid) plus CLI overrides into the Model to deploy."""
     if o.id:
         name = o.name or re.sub(r"[^a-zA-Z0-9]", "-", o.id.rsplit("/", 1)[-1]).lower()
         m = Model(name=name, namespace=catalog.namespace, model_id=o.id, runtime=o.server or catalog.runtime,
@@ -189,7 +189,7 @@ def resolve(catalog: Catalog, target: str, o: Any) -> Model:
     elif target:
         m = _from_catalog(catalog, target, o)
     else:
-        abort("No model specified. Use: model-manager <command> <model-name> or --id <hf/repo>")
+        abort("No model specified. Use: model-manager <command> <model-name> or --hfid <hf/repo>")
 
     m.rt = catalog.runtime_config(m.runtime)
     m.kind = m.kind or text(pick(m.rt, "kind", "LLMInferenceService"))

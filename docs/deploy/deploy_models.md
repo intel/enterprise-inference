@@ -25,11 +25,15 @@ the gateway so it can take requests. **Undeploy** removes the pod but leaves the
 downloaded weights on disk, so re-deploying later is fast.
 
 ```bash
-./model-manager deploy <name>            # deploy a model from the catalog
-./model-manager deploy --id <hf/repo>    # deploy any Hugging Face model (no catalog entry)
-./model-manager undeploy <name>          # stop serving a model (weights stay on disk)
-./model-manager undeploy all             # stop serving every model
+./model-manager deploy <name>              # deploy a model from the catalog
+./model-manager deploy --hfid <hf/repo>    # deploy any Hugging Face model (no catalog entry)
+./model-manager undeploy <name>            # stop serving a model (weights stay on disk)
+./model-manager undeploy all               # stop serving every model
+./model-manager list                       # catalog models and their status, plus models deployed outside it
 ```
+
+`list --catalog` shows only `models.yaml` (no cluster needed); `list --deployed` only
+what is running.
 
 Deploy is safe to re-run. Running it again on a model that is already up **updates it
 in place** — change `--cpu` or `--replicas` and re-deploy. It won't error, and it
@@ -43,8 +47,8 @@ apply. Set `MM_FORCE_REDEPLOY=1` to force a full re-apply regardless.
 
 | Flag | What it does |
 |------|--------------|
-| `--id <hf/repo>` | Deploy any Hugging Face model directly, without a catalog entry |
-| `--name <name>` | Set the name to serve under (use with `--id`) |
+| `--hfid <hf/repo>` | Deploy any Hugging Face model directly, without a catalog entry (`--id` still works but is deprecated) |
+| `--name <name>` | Set the name to serve under (use with `--hfid`) |
 | `--as <name>` | Deploy a catalog model under a different name — run several variants at once |
 | `--server <name>` | Which engine serves the model: `vllm` (default) or `openvino` (alias: `--runtime`) |
 | `--server-version <v>` | Which version of that engine to use — see [below](#pick-an-engine-and-version) |
@@ -86,14 +90,14 @@ isn't listed fails with a clear message rather than deploying something untested
 
 ## Ad-hoc deploy from Hugging Face
 
-You don't need a catalog entry to try a model. Point `--id` at any Hugging Face repo
+You don't need a catalog entry to try a model. Point `--hfid` at any Hugging Face repo
 and model-manager infers the workload type (chat model, embedding, or reranker) from
 the model's metadata:
 
 ```bash
-./model-manager deploy --id Qwen/Qwen3-0.6B --cpu 8 --memory 16Gi --wait
-./model-manager deploy --id meta-llama/Llama-3.2-3B-Instruct --cpu 16 --memory 32Gi --wait
-./model-manager deploy --id BAAI/bge-base-en-v1.5 --cpu 4 --memory 8Gi --wait
+./model-manager deploy --hfid Qwen/Qwen3-0.6B --cpu 8 --memory 16Gi --wait
+./model-manager deploy --hfid meta-llama/Llama-3.2-3B-Instruct --cpu 16 --memory 32Gi --wait
+./model-manager deploy --hfid BAAI/bge-base-en-v1.5 --cpu 4 --memory 8Gi --wait
 ```
 
 ## Gated models (Hugging Face token)
@@ -102,7 +106,7 @@ Gated models (Llama, Mistral, Gemma) require a [Hugging Face token](https://hugg
 
 ```bash
 export HF_TOKEN="hf_your_token_here"
-./model-manager deploy --id meta-llama/Llama-3.2-3B-Instruct --cpu 16 --memory 32Gi --wait
+./model-manager deploy --hfid meta-llama/Llama-3.2-3B-Instruct --cpu 16 --memory 32Gi --wait
 ```
 
 The download Job receives the token automatically. Public models work without it. A
@@ -116,7 +120,7 @@ Some Hugging Face models ship custom modeling code that vLLM only loads with
 catalog's per-model `args:` — there is no dedicated option:
 
 ```bash
-./model-manager deploy --id <org/model> --arg "--trust-remote-code" --wait
+./model-manager deploy --hfid <org/model> --arg "--trust-remote-code" --wait
 ```
 
 When the flag is present from any layer (category, version, per-model `args:`, or

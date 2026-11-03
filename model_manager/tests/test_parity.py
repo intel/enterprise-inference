@@ -52,6 +52,25 @@ OVMS_IMAGE = (r"openvino/model_server:2026\.(1-py|3)\b", "openvino/model_server:
 HELP_SVC_NS = (r"^(  MM_INFERENCE_HOSTNAME .*\n)",
                r"\1  MM_INFERENCE_GATEWAY_SVC_NS\n                        Namespace of the AI Gateway Service LiteLLM calls\n"
                r"                        (default: MM_INFERENCE_GATEWAY_NS, else envoy-gateway-system)\n")
+# --help documents the list command, which is new.
+HELP_LIST = [
+    (r"^(  undeploy <model>\|<name>\|all .*\n)",
+     r"\1  list                            Catalog models (models.yaml) with their status, and deployed models not in it\n"),
+    (r"^(Deploy Options:\n)",
+     r"List Options:\n  --catalog             Only the catalog (models.yaml); no cluster access needed\n"
+     r"  --deployed            Only models deployed in the cluster\n\n\1"),
+    (r"^(  \./model-manager undeploy llama3-8b-awq --wait .*\n)",
+     r"\1  ./model-manager list                                 # catalog + deployed models and their status\n"),
+]
+# --id became --hfid (--id kept as a deprecated alias).
+HFID = (r"or --id <hf/repo>", "or --hfid <hf/repo>")
+HELP_HFID = [
+    (r"^  deploy <model>\|--id <hf/repo>   ", "  deploy <model>|--hfid <hf/repo> "),
+    (r"^  --id <hf/repo>       Ad-hoc deploy any HuggingFace model$",
+     "  --hfid <hf/repo>     Ad-hoc deploy any HuggingFace model (--id still works, deprecated)"),
+    (r"\(with --id\)$", "(with --hfid)"),
+    (r"deploy --id meta-llama", "deploy --hfid meta-llama"),
+]
 
 
 def nri_node(in_use: int) -> list:
@@ -88,12 +107,12 @@ CASES = [
     case("embed-direct", "deploy", "bge-base-en", "--dry-run", "--cpu-policy", "BEST-EFFORT"),
     case("agent-default-model", "deploy", "qwen2-5-coder-14b", "--dry-run", env=BE),
     case("rerank-explicit-routing", "deploy", "bge-reranker", "--dry-run", "--routing", "epp", env=BE),
-    case("id-embed-detected", "deploy", "--id", "BAAI/bge-small-en-v1.5", "--dry-run",
+    case("id-embed-detected", "deploy", "--hfid", "BAAI/bge-small-en-v1.5", "--dry-run",
          env={**BE, "FAKE_HF_JSON": '{"pipeline_tag": "feature-extraction"}'}),
-    case("id-named", "deploy", "--id", "meta-llama/Llama-3.2-1B-Instruct", "--name", "l1", "--cpu", "4",
+    case("id-named", "deploy", "--hfid", "meta-llama/Llama-3.2-1B-Instruct", "--name", "l1", "--cpu", "4",
          "--memory", "8Gi", "--server-version", "0.19.1", "--dry-run",
          env={**BE, "FAKE_HF_JSON": '{"pipeline_tag": "text-generation"}'}),
-    case("id-hf-unreachable", "deploy", "--id", "Org/Some_Model.v2", "--dry-run", env=BE),
+    case("id-hf-unreachable", "deploy", "--hfid", "Org/Some_Model.v2", "--dry-run", env=BE),
     case("alias", "deploy", "qwen3-0-6b", "--as", "qwen-alt", "--server-version", "0.19.1", "--dry-run", env=BE),
     case("options-before-command", "--dry-run", "--cpu", "4", "deploy", "qwen3-0-6b", env=BE),
     # Legacy reached the fallback by crashing nri_policy.py on int("4.5"); the box and manifest are kept.
@@ -129,14 +148,14 @@ CASES = [
     case("fx-bad-env", "deploy", "badenv", "--dry-run", env=BE, catalog=FIXTURE),
     case("fx-bad-template", "deploy", "badtpl", "--dry-run", env=BE, catalog=FIXTURE),
     # CLI surface and validation errors.
-    case("no-args", deviations=[HELP_SVC_NS]),
-    case("help", "--help", deviations=[HELP_SVC_NS]),
-    case("help-command", "help", deviations=[HELP_SVC_NS]),
+    case("no-args", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID]),
+    case("help", "--help", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID]),
+    case("help-command", "help", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID]),
     case("version", "version"),
     case("version-flag", "-v"),
     case("unknown-option", "deploy", "qwen3-0-6b", "--bogus"),
     case("unknown-command", "frobnicate"),
-    case("deploy-no-model", "deploy"),
+    case("deploy-no-model", "deploy", deviations=[HFID]),
     case("undeploy-no-model", "undeploy"),
     case("bad-tp", "deploy", "qwen3-0-6b", "--tp", "x"),
     case("bad-label-key", "deploy", "qwen3-0-6b", "--label", "Bad Key=v"),
