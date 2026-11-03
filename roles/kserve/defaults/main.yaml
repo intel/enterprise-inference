@@ -24,7 +24,8 @@ kserve_openshift_hostname: "{{ inference_hostname | default('inference.' ~ base_
 # Namespaces whose HTTPRoutes may attach (OpenShift AI creates them next to the model):
 # the models' namespace (llm_services_namespace), which defaults to kserve_llmisvc_namespace.
 kserve_openshift_route_namespaces: "{{ [llm_services_namespace | default(kserve_llmisvc_namespace | default('llm-inference'))] }}"
-# Certificate the Gateway serves, copied from the platform gateway.
+# gateway_tls_mode custom: the operator certificate the Gateway serves, copied from
+# the platform gateway (selfsigned issues a leaf for kserve_openshift_hostname).
 kserve_openshift_tls_source_secret: "{{ gateway_tls_secret_name | default('gateway-tls') }}"
 kserve_openshift_tls_source_namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
 kserve_openshift_auth_enabled: "{{ (auth_type | default('jwt')) == 'jwt' }}"

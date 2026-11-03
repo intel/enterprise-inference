@@ -58,38 +58,79 @@
           kserve_openshift_gatewayclass.
         quiet: true
 
-    - name: "kserve | OpenShift: read the platform gateway certificate"
-      kubernetes.core.k8s_info:
-        kind: Secret
-        name: "{{ kserve_openshift_tls_source_secret }}"
-        namespace: "{{ kserve_openshift_tls_source_namespace }}"
-      register: _kserve_ocp_tls_src
-      no_log: true
-
-    - name: "kserve | OpenShift: require the platform gateway certificate"
-      ansible.builtin.assert:
-        that: _kserve_ocp_tls_src.resources | length > 0
-        fail_msg: >-
-          Secret {{ kserve_openshift_tls_source_namespace }}/{{ kserve_openshift_tls_source_secret }} not found.
-          Install the platform layer (envoy_gateway) first.
-        quiet: true
-
-    - name: "kserve | OpenShift: copy the certificate next to the Gateway"
+    # selfsigned: a leaf for the inference host only, from the platform CA, as the
+    # gateway role issues one per listener: a certificate naming other hosts would
+    # let a browser reuse this Gateway's HTTP/2 connection for them (the router
+    # shares one IP). custom: the operator's certificate, copied.
+    - name: "kserve | OpenShift: issue the Gateway certificate"
       kubernetes.core.k8s:
         state: present
         definition:
-          apiVersion: v1
-          kind: Secret
-          type: kubernetes.io/tls
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
           metadata:
             name: "{{ kserve_openshift_gateway_name }}-tls"
             namespace: "{{ kserve_openshift_gateway_namespace }}"
             labels:
               app.kubernetes.io/managed-by: ai-solutions
-          data:
-            tls.crt: "{{ _kserve_ocp_tls_src.resources[0].data['tls.crt'] }}"
-            tls.key: "{{ _kserve_ocp_tls_src.resources[0].data['tls.key'] }}"
-      no_log: true
+          spec:
+            secretName: "{{ kserve_openshift_gateway_name }}-tls"
+            issuerRef:
+              name: gateway-issuer
+              kind: ClusterIssuer
+            dnsNames: ["{{ kserve_openshift_hostname }}"]
+      when: gateway_tls_mode | default('selfsigned') == 'selfsigned'
+
+    - name: "kserve | OpenShift: wait for the Gateway certificate"
+      kubernetes.core.k8s_info:
+        api_version: cert-manager.io/v1
+        kind: Certificate
+        name: "{{ kserve_openshift_gateway_name }}-tls"
+        namespace: "{{ kserve_openshift_gateway_namespace }}"
+      register: _kserve_ocp_cert
+      until:
+        - _kserve_ocp_cert.resources | default([]) | length > 0
+        - _kserve_ocp_cert.resources[0].status.conditions | default([])
+          | selectattr('type', 'eq', 'Ready') | selectattr('status', 'eq', 'True') | list | length > 0
+      retries: 30
+      delay: 5
+      when: gateway_tls_mode | default('selfsigned') == 'selfsigned'
+
+    - name: "kserve | OpenShift: copy the operator certificate"
+      when: gateway_tls_mode | default('selfsigned') != 'selfsigned'
+      block:
+        - name: "kserve | OpenShift: read the platform gateway certificate"
+          kubernetes.core.k8s_info:
+            kind: Secret
+            name: "{{ kserve_openshift_tls_source_secret }}"
+            namespace: "{{ kserve_openshift_tls_source_namespace }}"
+          register: _kserve_ocp_tls_src
+          no_log: true
+
+        - name: "kserve | OpenShift: require the platform gateway certificate"
+          ansible.builtin.assert:
+            that: _kserve_ocp_tls_src.resources | length > 0
+            fail_msg: >-
+              Secret {{ kserve_openshift_tls_source_namespace }}/{{ kserve_openshift_tls_source_secret }} not found.
+              Install the platform layer (envoy_gateway) first.
+            quiet: true
+
+        - name: "kserve | OpenShift: copy the certificate next to the Gateway"
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: v1
+              kind: Secret
+              type: kubernetes.io/tls
+              metadata:
+                name: "{{ kserve_openshift_gateway_name }}-tls"
+                namespace: "{{ kserve_openshift_gateway_namespace }}"
+                labels:
+                  app.kubernetes.io/managed-by: ai-solutions
+              data:
+                tls.crt: "{{ _kserve_ocp_tls_src.resources[0].data['tls.crt'] }}"
+                tls.key: "{{ _kserve_ocp_tls_src.resources[0].data['tls.key'] }}"
+          no_log: true
 
     # The gateway controller would otherwise ask for a LoadBalancer Service; the
     # OpenShift router reaches it instead (Route below).
