@@ -81,12 +81,13 @@ only when the `*.apps` hostnames don't resolve from your machine.
 
 ```bash
 # The token script reads the client secret from the cluster and finds the router
-# itself (MM_GATEWAY_IP overrides it). It exports TOKEN and GATEWAY_IP.
+# itself (MM_GATEWAY_IP overrides it). It exports TOKEN and GATEWAY_IP, which is
+# empty when the *.apps DNS is all there is: then --resolve is left out.
 source model_manager/scripts/get-keycloak-token.sh
 
 H=inference.<domain>
 curl -s --noproxy '*' --cacert env/ocp/logs/ai-solutions-ca.crt \
-  --resolve "$H:443:$GATEWAY_IP" \
+  ${GATEWAY_IP:+--resolve "$H:443:$GATEWAY_IP"} \
   https://$H/llm-inference/qwen3-0-6b/v1/chat/completions \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-0-6b","messages":[{"role":"user","content":"Hello /no_think"}],"max_tokens":64}'
