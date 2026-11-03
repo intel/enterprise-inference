@@ -3,7 +3,13 @@
 # and the deploy Jobs started from Headlamp (ui_deploy.yaml). Secrets
 # (HF_TOKEN, MM_LITELLM_MASTER_KEY) are added by each caller.
 __llm_mm_litellm: "{{ auth_type | default('jwt') == 'litellm_vkey' }}"
-__llm_mm_env:
+__llm_mm_env: "{{ __llm_mm_env_common | combine(__llm_mm_env_openshift if __llm_mm_openshift | bool else {}) }}"
+# OpenShift AI's inference Gateway. Kubernetes leaves these unset, so model-manager
+# keeps its own defaults, or the values already in the environment.
+__llm_mm_env_openshift:
+  MM_INFERENCE_GATEWAY: "{{ kserve_openshift_gateway_name | default('openshift-ai-inference') }}"
+  MM_INFERENCE_GATEWAY_NS: "{{ kserve_openshift_gateway_namespace | default('openshift-ingress') }}"
+__llm_mm_env_common:
   # Proxy — so weight downloads work behind a corporate proxy.
   MM_HTTP_PROXY: "{{ http_proxy | default(lookup('env', 'http_proxy')) | default('') }}"
   MM_HTTPS_PROXY: "{{ https_proxy | default(lookup('env', 'https_proxy')) | default('') }}"
@@ -25,8 +31,6 @@ __llm_mm_env:
   # (kserve role), at /<namespace>/<model>/v1/...
   MM_AIGATEWAY_ENABLED: "{{ 'true' if auth_type | default('jwt') == 'jwt' and not (cluster_distribution | default('kubernetes') == 'openshift') else 'false' }}"
   MM_PLATFORM: "{{ cluster_distribution | default('kubernetes') }}"
-  MM_INFERENCE_GATEWAY: "{{ kserve_openshift_gateway_name | default('openshift-ai-inference') if cluster_distribution | default('kubernetes') == 'openshift' else '' }}"
-  MM_INFERENCE_GATEWAY_NS: "{{ kserve_openshift_gateway_namespace | default('openshift-ingress') if cluster_distribution | default('kubernetes') == 'openshift' else '' }}"
   MM_EG_GATEWAY_NAME: "{{ gateway_name | default('eg-gateway') }}"
   MM_EG_GATEWAY_NS: "{{ gateway_namespace | default('envoy-gateway-system') }}"
   # API host and path in the endpoint hints model-manager prints; path mode

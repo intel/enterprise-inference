@@ -72,8 +72,13 @@ fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Discover gateway IP from cluster (filter for LoadBalancer type to skip ClusterIP services)
-GATEWAY_IP=$(kubectl get svc -n envoy-gateway-system \
+_gt_ocp=""
+kubectl api-resources --api-group=route.openshift.io -o name 2>/dev/null | grep -q '^routes' && _gt_ocp=1
+
+# Discover gateway IP from cluster (filter for LoadBalancer type to skip ClusterIP services).
+# Not on OpenShift: an Envoy Gateway LoadBalancer there does not serve the inference Route.
+GATEWAY_IP=""
+[[ -n "$_gt_ocp" ]] || GATEWAY_IP=$(kubectl get svc -n envoy-gateway-system \
   -l gateway.envoyproxy.io/owning-gateway-name \
   --field-selector spec.type=LoadBalancer \
   -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null)
@@ -81,8 +86,6 @@ GATEWAY_IP=$(kubectl get svc -n envoy-gateway-system \
 # On OpenShift the gateways are published through the router (passthrough
 # Routes), not a LoadBalancer: its ingress VIP, else its LoadBalancer, else (HostNetwork,
 # as on single-node clusters) the router pod's node. MM_GATEWAY_IP overrides it.
-_gt_ocp=""
-kubectl api-resources --api-group=route.openshift.io -o name 2>/dev/null | grep -q '^routes' && _gt_ocp=1
 GATEWAY_IP="${MM_GATEWAY_IP:-$GATEWAY_IP}"
 if [[ -z "$GATEWAY_IP" && -n "$_gt_ocp" ]]; then
   _gt_router=1
