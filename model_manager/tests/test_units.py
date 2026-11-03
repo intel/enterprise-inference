@@ -305,13 +305,15 @@ def _llmisvc(name, ns, ready, reason=""):
 
 @pytest.fixture
 def cluster(monkeypatch):
-    """Fake kubectl for list: answers `get <kind> ... -A` from `items`; `denied` kinds fail -A but not -n."""
-    state = {"items": {"LLMInferenceService": [], "InferenceService": []}, "denied": set(), "down": False, "calls": []}
+    """Fake kubectl for list: answers `get <kind> ... -A` from `items`; `denied` kinds fail -A but not -n,
+    `failing` kinds fail both."""
+    state = {"items": {"LLMInferenceService": [], "InferenceService": []}, "denied": set(), "failing": set(),
+             "down": False, "calls": []}
 
     def run(*args, stdin=None):
         state["calls"].append(args)
         kind = args[1]
-        if state["down"] or ("-A" in args and kind in state["denied"]):
+        if state["down"] or kind in state["failing"] or ("-A" in args and kind in state["denied"]):
             return subprocess.CompletedProcess(args, 1, "", "error")
         items = state["items"][kind]
         if "-n" in args:
@@ -358,6 +360,28 @@ def test_list_without_cluster_shows_unknown_status(cluster, capsys):
     out, err = capsys.readouterr()
     assert "Cannot list deployed models" in err
     assert re.search(r"^tmpl-inline .* \?$", out, re.M) and "Deployed" not in out
+
+
+def test_list_marks_unlisted_kind_unknown(cluster, capsys):
+    cluster["failing"] = {"LLMInferenceService"}
+    cli.list_models(cli.Options(), "")
+    out, err = capsys.readouterr()
+    assert "Cannot list LLMInferenceService" in err and "may be incomplete" in err
+    assert re.search(r"^tmpl-inline .* \?$", out, re.M)                   # vllm: its kind was not listed
+    assert re.search(r"^multi \(org/multi\) +llm +openvino +not deployed$", out, re.M)  # InferenceService was
+
+
+def test_list_server_is_the_version_deploy_picks(cluster, tmp_path, monkeypatch, capsys):
+    catalog = tmp_path / "models.yaml"
+    catalog.write_text(
+        "defaults: { namespace: ns1 }\n"
+        "models:\n  - { name: eng-model, model_id: org/eng, runtime: eng }\n"
+        "runtimes:\n  eng:\n    versions:\n"
+        "      '0.9.1': { image: img/eng:0.9.1 }\n      '0.10.0': { image: img/eng:0.10.0 }\n")
+    monkeypatch.setenv("MM_CONFIG", str(catalog))
+    m = config.resolve(config.Catalog.load(), "eng-model", cli.Options())
+    cli.list_models(cli.Options(catalog_only=True), "")
+    assert re.search(rf"^eng-model \(org/eng\) +auto +eng {re.escape(m.version)}$", capsys.readouterr().out, re.M)
 
 
 def test_list_catalog_needs_no_cluster(cluster, capsys):
