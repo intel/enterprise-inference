@@ -37,9 +37,12 @@ def detect() -> None:
         old = "serving.kserve.io/v1alpha1" in served and LLMISVC_V1ALPHA2 not in served
         os.environ["MM_LLMISVC_API_VERSION"] = "v1alpha1" if old else "v1alpha2"
     if is_openshift():
-        os.environ.setdefault("MM_INFERENCE_GATEWAY", "openshift-ai-inference")
-        os.environ.setdefault("MM_INFERENCE_GATEWAY_NS", "openshift-ingress")
-        os.environ.setdefault("MM_AIGATEWAY_ENABLED", "false")
+        # Empty counts as unset, like env(): an empty value would fall through to the Kubernetes defaults.
+        for key, value in (("MM_INFERENCE_GATEWAY", "openshift-ai-inference"),
+                           ("MM_INFERENCE_GATEWAY_NS", "openshift-ingress"),
+                           ("MM_AIGATEWAY_ENABLED", "false")):
+            if not os.environ.get(key):
+                os.environ[key] = value
 
 
 def _discover(*args: str) -> str:

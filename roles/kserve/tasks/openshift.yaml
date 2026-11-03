@@ -20,6 +20,20 @@
 - name: "kserve | OpenShift: check OpenShift AI"
   when: component_action != 'teardown'
   block:
+    # An empty value in the env still overrides the role defaults, and the
+    # Gateway would be named '' further down. Stop here instead.
+    - name: "kserve | OpenShift: check the inference Gateway settings"
+      ansible.builtin.assert:
+        that:
+          - kserve_openshift_gateway_name | length > 0
+          - kserve_openshift_gateway_namespace | length > 0
+          - kserve_openshift_hostname | length > 0
+        fail_msg: >-
+          kserve_openshift_gateway_name, kserve_openshift_gateway_namespace and
+          kserve_openshift_hostname must not be empty. Remove them from the env to use
+          the defaults (openshift-ai-inference, openshift-ingress, inference.<domain>).
+        quiet: true
+
     - name: "kserve | OpenShift: look up the DataScienceCluster"
       kubernetes.core.k8s_info:
         api_version: datasciencecluster.opendatahub.io/v2

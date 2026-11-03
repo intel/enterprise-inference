@@ -466,6 +466,21 @@ def test_platform_detect(monkeypatch, value, expected):
     assert (os.environ.get("MM_INFERENCE_GATEWAY") == "openshift-ai-inference") == bool(value)
 
 
+@pytest.mark.parametrize("value, expected", [
+    ("", (("openshift-ai-inference", "openshift-ingress"), False)),
+    ("x", (("x", "x"), True)),
+])
+def test_openshift_gateway_overrides(monkeypatch, value, expected):
+    # An empty override falls back to the OpenShift Gateway and keeps the AI gateway off; a set one is kept.
+    from core import platform
+    monkeypatch.setenv("MM_PLATFORM", "openshift")
+    monkeypatch.setenv("MM_LLMISVC_API_VERSION", "v1alpha1")
+    for key in ("MM_INFERENCE_GATEWAY", "MM_INFERENCE_GATEWAY_NS", "MM_AIGATEWAY_ENABLED"):
+        monkeypatch.setenv(key, value)
+    platform.detect()
+    assert (config.gateway_ref(), routing.gateway_enabled()) == expected
+
+
 @pytest.mark.parametrize("stdout, aborts", [("", True), ("clusterversions.config.openshift.io\n", False)])
 def test_platform_detect_failure(monkeypatch, stdout, aborts):
     # Forbidden prints nothing: abort rather than assume Kubernetes. A stale aggregated API
