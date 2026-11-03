@@ -21,16 +21,20 @@ kserve_openshift_gateway_namespace: "openshift-ingress"
 # (openshift-default, or OpenShift AI's data-science-gateway-class).
 kserve_openshift_gatewayclass: ""
 kserve_openshift_hostname: "{{ inference_hostname | default('inference.' ~ base_domain_name) }}"
-# Namespaces whose HTTPRoutes may attach (OpenShift AI creates them next to the model).
-kserve_openshift_route_namespaces: ["{{ kserve_llmisvc_namespace | default('llm-inference') }}"]
+# Namespaces whose HTTPRoutes may attach (OpenShift AI creates them next to the model):
+# the models' namespace (llm_services_namespace), which defaults to kserve_llmisvc_namespace.
+kserve_openshift_route_namespaces: "{{ [llm_services_namespace | default(kserve_llmisvc_namespace | default('llm-inference'))] }}"
 # Certificate the Gateway serves, copied from the platform gateway.
 kserve_openshift_tls_source_secret: "{{ gateway_tls_secret_name | default('gateway-tls') }}"
 kserve_openshift_tls_source_namespace: "{{ gateway_namespace | default('envoy-gateway-system') }}"
 kserve_openshift_auth_enabled: "{{ (auth_type | default('jwt')) == 'jwt' }}"
+# Path mode (routing_mode: path): Keycloak serves under <base>/keycloak_path, on the
+# gateway and on its own Service, and issues tokens for that URL.
+_kserve_keycloak_path: "{{ keycloak_path | default('/keycloak') if (routing_mode | default('subdomain')) == 'path' else '' }}"
 kserve_openshift_keycloak_issuer: >-
-  https://{{ keycloak_hostname | default('keycloak.' ~ base_domain_name) }}/realms/{{ keycloak_realm | default('inference') }}
+  https://{{ base_domain_name if _kserve_keycloak_path else keycloak_hostname | default('keycloak.' ~ base_domain_name) }}{{ _kserve_keycloak_path }}/realms/{{ keycloak_realm | default('inference') }}
 kserve_openshift_keycloak_jwks_url: >-
-  http://keycloak-service.{{ keycloak_namespace | default('keycloak') }}.svc.cluster.local:8080/realms/{{ keycloak_realm | default('inference') }}/protocol/openid-connect/certs
+  http://keycloak-service.{{ keycloak_namespace | default('keycloak') }}.svc.cluster.local:8080{{ _kserve_keycloak_path }}/realms/{{ keycloak_realm | default('inference') }}/protocol/openid-connect/certs
 kserve_openshift_keycloak_audience: "{{ keycloak_client_id | default('inference-client') }}"
 kserve_helm_repo: "oci://ghcr.io/kserve/charts"
 kserve_wait_timeout: "300s"

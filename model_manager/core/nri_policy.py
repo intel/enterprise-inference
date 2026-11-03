@@ -34,6 +34,7 @@ _NRI_MAX_TP_LABEL = "nri.intel.com/max-tp"
 _NRI_ANNOTATION_PREFIX = "balloon.balloons.resource-policy.nri.io/"
 _DEFAULT_BALLOON = "vllm-balloon"
 _BALLOONSPOLICY_CRD = "balloonspolicies.config.nri"
+_POD_LABEL_PREFIX = "pod/labels/"
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 
@@ -331,19 +332,52 @@ def _reserved_cpus_count(node: str) -> int:
         return 0
 
 
+def label_balloon_types(policies: Any) -> list[tuple[str, list[dict]]]:
+    """Balloon types that select pods by label (matchExpressions on pod/labels/...), from a
+    BalloonsPolicy list. OpenShift AI's v1alpha1 LLMInferenceService cannot annotate its pods, so
+    they land in their balloon this way. Node-specific policies repeat the default's types."""
+    types, seen = [], set()
+    for policy in (policies or {}).get("items", []):
+        for bt in (policy.get("spec") or {}).get("balloonTypes") or []:
+            exprs = bt.get("matchExpressions") or []
+            if bt["name"] in seen or not exprs or not all(e.get("key", "").startswith(_POD_LABEL_PREFIX)
+                                                          for e in exprs):
+                continue
+            seen.add(bt["name"])
+            types.append((bt["name"], exprs))
+    return types
+
+
+def label_matches(labels: dict, exprs: list[dict]) -> bool:
+    """Whether pod labels satisfy a balloon type's pod/labels/ matchExpressions."""
+    for e in exprs:
+        value = labels.get(e["key"][len(_POD_LABEL_PREFIX):])
+        op, values = e.get("operator"), e.get("values") or []
+        ok = {"In": value in values, "NotIn": value not in values, "Equals": value == (values or [None])[0],
+              "NotEqual": value != (values or [None])[0], "Exists": value is not None,
+              "NotExist": value is None}.get(op, False)
+        if not ok:
+            return False
+    return True
+
+
 def _balloon_pods_cpu_on_node(node: str) -> int:
-    """Sum CPU requests of NRI-balloon-annotated pods on a node."""
+    """Sum CPU requests of the pods on a node that a balloon takes: annotated for one, or
+    matching a balloon type's pod labels (OpenShift AI's v1alpha1 models)."""
     pods = _kubectl_json("get", "pods", "-A",
                          "--field-selector", f"spec.nodeName={node}")
     if not pods or "items" not in pods:
         return 0
+    label_types = label_balloon_types(_kubectl_json("get", _BALLOONSPOLICY_CRD, "-A"))
     total_millis = 0
     for pod in pods["items"]:
         phase = pod.get("status", {}).get("phase", "")
         if phase not in ("Running", "Pending"):
             continue
         anns = pod.get("metadata", {}).get("annotations") or {}
-        if not any(k.startswith(_NRI_ANNOTATION_PREFIX) for k in anns):
+        labels = pod.get("metadata", {}).get("labels") or {}
+        if not any(k.startswith(_NRI_ANNOTATION_PREFIX) for k in anns) and not any(
+                label_matches(labels, exprs) for _, exprs in label_types):
             continue
         for c in pod.get("spec", {}).get("containers") or []:
             req_cpu = ((c.get("resources") or {}).get("requests") or {}).get("cpu", "0")

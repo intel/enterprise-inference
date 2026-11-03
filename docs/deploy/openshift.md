@@ -110,6 +110,7 @@ Response codes: no token or an invalid one gives `401`, and a valid one `200`.
 |-----|-------|
 | OpenVINO models (`InferenceService`) | Not validated. They need a `ClusterServingRuntime` that OpenShift AI does not ship. |
 | TP2+ balloons | On v1alpha1 every model pod matches by label into `vllm-balloon-tp1`, so models with more than one NUMA node per replica don't get their own balloon type. |
+| LiteLLM, vLLM Semantic Router | Not supported: both reach the models through the Envoy AI Gateway, which OpenShift does not get. The install stops with `auth_type: litellm_vkey`, `litellm_enabled` or `vllm_sr_enabled`. |
 | Unified `/v1` endpoint | Not available, because there is no AI gateway. Clients (e.g. eRAG) need the per-model URL. |
 | Token script fallback | When the router can't be reached, the port-forward fallback fails: RHBK serves plain HTTP on `8080`. |
 | NRI plugin sync | The installer restarts the plugin once it applies the node policy. After a balloon policy change of your own, restart it by hand, or new pods may run unpinned: `oc delete pod -n kube-system -l app.kubernetes.io/name=nri-resource-policy-balloons`. |

@@ -438,10 +438,26 @@ def test_platform_detect(monkeypatch, value, expected):
         monkeypatch.delenv(key, raising=False)
     answers = {"api-resources": "clusterversions.config.openshift.io\n" if value else "",
                "api-versions": "serving.kserve.io/v1alpha1\n"}
-    monkeypatch.setattr(k8s, "out", lambda *a: answers.get(a[0], ""))
+    monkeypatch.setattr(k8s, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 0, answers.get(a[0], ""), ""))
     platform.detect()
     assert os.environ["MM_PLATFORM"] == expected and os.environ["MM_LLMISVC_API_VERSION"] == "v1alpha1"
     assert (os.environ.get("MM_INFERENCE_GATEWAY") == "openshift-ai-inference") == bool(value)
+
+
+@pytest.mark.parametrize("stdout, aborts", [("", True), ("clusterversions.config.openshift.io\n", False)])
+def test_platform_detect_failure(monkeypatch, stdout, aborts):
+    # Forbidden prints nothing: abort rather than assume Kubernetes. A stale aggregated API
+    # fails discovery but still prints the list.
+    from core import platform
+    for key in ("MM_PLATFORM", "MM_LLMISVC_API_VERSION", "MM_INFERENCE_GATEWAY", "MM_AIGATEWAY_ENABLED"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(k8s, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 1, stdout, "Forbidden"))
+    if aborts:
+        with pytest.raises(SystemExit):
+            platform.detect()
+    else:
+        platform.detect()
+        assert os.environ["MM_PLATFORM"] == "openshift"
 
 
 def test_openshift_llmisvc(monkeypatch):
@@ -472,3 +488,26 @@ def test_openshift_skips_pool_status(monkeypatch, kubectl):
     monkeypatch.setenv("MM_PLATFORM", "openshift")
     routing.patch_pool_status(Model(name="m", namespace="ns"))
     assert kubectl == []
+
+
+def test_balloon_cpu_counts_label_selected_pods(monkeypatch):
+    # OpenShift AI's v1alpha1 models land in their balloon by label, without the annotation:
+    # the capacity check must count them like annotated pods, and nothing else.
+    from core import nri_policy
+
+    def pod(name, cpu, labels=None, annotations=None, phase="Running"):
+        return {"metadata": {"name": name, "labels": labels or {}, "annotations": annotations or {}},
+                "status": {"phase": phase},
+                "spec": {"containers": [{"resources": {"requests": {"cpu": cpu}}}]}}
+    policies = {"items": [{"spec": {"balloonTypes": [
+        {"name": "vllm-balloon-tp1", "matchExpressions": [
+            {"key": "pod/labels/kserve.io/component", "operator": "In", "values": ["workload"]}]},
+        {"name": "default"}]}}]}
+    pods = {"items": [
+        pod("annotated", "4", annotations={"balloon.balloons.resource-policy.nri.io/container.main": "vllm-balloon"}),
+        pod("by-label", "8", labels={"kserve.io/component": "workload"}),
+        pod("by-label-done", "16", labels={"kserve.io/component": "workload"}, phase="Succeeded"),
+        pod("other", "2000m", labels={"app": "x"})]}
+    monkeypatch.setattr(nri_policy, "_kubectl_json",
+                        lambda *a: policies if a[1] == nri_policy._BALLOONSPOLICY_CRD else pods)
+    assert nri_policy._balloon_pods_cpu_on_node("n1") == 12

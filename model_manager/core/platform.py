@@ -20,6 +20,7 @@ import shlex
 import yaml
 
 from . import k8s
+from .ui import abort
 
 LLMISVC_V1ALPHA2 = "serving.kserve.io/v1alpha2"
 _PINNED_ID = re.compile(r"^[ \t]*(runAsUser|runAsGroup|fsGroup):[ \t]*[0-9]+[ \t]*\n", re.MULTILINE)
@@ -28,17 +29,28 @@ _PINNED_ID = re.compile(r"^[ \t]*(runAsUser|runAsGroup|fsGroup):[ \t]*[0-9]+[ \t
 def detect() -> None:
     """Resolve MM_PLATFORM and MM_LLMISVC_API_VERSION into the environment (inherited by the reconciler)."""
     if not os.environ.get("MM_PLATFORM"):
-        resources = k8s.out("api-resources", "--api-group=config.openshift.io", "-o", "name").split()
+        resources = _discover("api-resources", "--api-group=config.openshift.io", "-o", "name").split()
         os.environ["MM_PLATFORM"] = ("openshift" if any(r.startswith("clusterversions") for r in resources)
                                      else "kubernetes")
     if not os.environ.get("MM_LLMISVC_API_VERSION"):
-        served = k8s.out("api-versions").split()
+        served = _discover("api-versions").split()
         old = "serving.kserve.io/v1alpha1" in served and LLMISVC_V1ALPHA2 not in served
         os.environ["MM_LLMISVC_API_VERSION"] = "v1alpha1" if old else "v1alpha2"
     if is_openshift():
         os.environ.setdefault("MM_INFERENCE_GATEWAY", "openshift-ai-inference")
         os.environ.setdefault("MM_INFERENCE_GATEWAY_NS", "openshift-ingress")
         os.environ.setdefault("MM_AIGATEWAY_ENABLED", "false")
+
+
+def _discover(*args: str) -> str:
+    """kubectl discovery output. A failure that prints nothing (Forbidden, unreachable) aborts:
+    taking it for "not served" would render for the wrong platform. One that still prints the
+    list (a stale aggregated API) is fine."""
+    r = k8s.run(*args)
+    if r.returncode != 0 and not r.stdout.strip():
+        abort(f"Cannot tell the cluster's platform: kubectl {' '.join(args)} failed: {r.stderr.strip()}\n"
+              "  Set MM_PLATFORM=openshift|kubernetes and MM_LLMISVC_API_VERSION=v1alpha1|v1alpha2 to skip detection.")
+    return r.stdout.strip()
 
 
 def is_openshift() -> bool:
