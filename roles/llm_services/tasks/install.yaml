@@ -134,7 +134,9 @@
   set_fact:
     inference_extension_dir: "{{ playbook_dir }}/../ext/enterprise.ai-inference"
 
-# Read by the Headlamp Models page. Allow-listed fields only, as JSON.
+# Read by the Headlamp Models page. Allow-listed fields only, as JSON. access.json
+# is the public API every model is served on (picked by "model" in the body) and
+# its credential type, from the same values model-manager prints after a deploy.
 - name: "llm_services | Publish the model catalogue"
   kubernetes.core.k8s:
     state: present
@@ -151,6 +153,10 @@
           {%- set _ = out.append(m | dict2items | selectattr('key', 'in', _llm_catalog_fields) | items2dict) -%}
           {%- endfor -%}
           {{ out | to_json }}
+        access.json: >-
+          {{ {'base_url': 'https://' ~ (__llm_mm_env.MM_INFERENCE_HOSTNAME | trim)
+                          ~ (__llm_mm_env.MM_INFERENCE_PATH | trim) ~ '/v1',
+              'auth_type': 'litellm_vkey' if __llm_mm_litellm | bool else 'jwt'} | to_json }}
   vars:
     _llm_catalog_file: >-
       {{ (env_dir ~ '/models.yaml') if (env_dir is defined and (env_dir ~ '/models.yaml') is exists)
