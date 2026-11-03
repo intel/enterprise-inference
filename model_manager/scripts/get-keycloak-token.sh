@@ -81,8 +81,10 @@ GATEWAY_IP=$(kubectl get svc -n envoy-gateway-system \
 # On OpenShift the gateways are published through the router (passthrough
 # Routes), not a LoadBalancer: its ingress VIP, else its LoadBalancer, else (HostNetwork,
 # as on single-node clusters) the router pod's node. MM_GATEWAY_IP overrides it.
+_gt_ocp=""
+kubectl api-resources --api-group=route.openshift.io -o name 2>/dev/null | grep -q '^routes' && _gt_ocp=1
 GATEWAY_IP="${MM_GATEWAY_IP:-$GATEWAY_IP}"
-if [[ -z "$GATEWAY_IP" ]] && kubectl api-resources --api-group=route.openshift.io -o name 2>/dev/null | grep -q '^routes'; then
+if [[ -z "$GATEWAY_IP" && -n "$_gt_ocp" ]]; then
   _gt_router=1
   GATEWAY_IP=$(kubectl get infrastructure cluster \
     -o jsonpath='{.status.platformStatus.*.ingressIPs[0]}' 2>/dev/null)
@@ -263,8 +265,9 @@ if [[ -z "$TOKEN" ]]; then
 fi
 
 # Derive the inference endpoint from Keycloak's: <base>/inference in path mode,
-# else inference.<base>. GATEWAY_URL is the base for /v1/... requests.
-if [[ -n "$KEYCLOAK_PATH" ]]; then
+# else inference.<base>. GATEWAY_URL is the base for /v1/... requests. On OpenShift
+# the models are on the inference Route, inference.<base>, in both modes.
+if [[ -n "$KEYCLOAK_PATH" && -z "$_gt_ocp" ]]; then
   GATEWAY_DOMAIN="$KEYCLOAK_DOMAIN"
   GATEWAY_URL="https://${GATEWAY_DOMAIN}/inference"
 else
@@ -282,7 +285,7 @@ iat = json.loads(base64.urlsafe_b64decode(t)).get('iat', exp)
 print(f'{exp - iat}')
 " 2>/dev/null)
 
-unset _gt_router
+unset _gt_router _gt_ocp
 export TOKEN GATEWAY_IP GATEWAY_DOMAIN GATEWAY_URL KEYCLOAK_DOMAIN
 echo "Token acquired. Exported: TOKEN, GATEWAY_IP, GATEWAY_DOMAIN, GATEWAY_URL"
 echo "  Gateway:  ${GATEWAY_URL} → ${GATEWAY_IP:-(DNS, OpenShift router)}"

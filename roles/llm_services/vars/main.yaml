@@ -32,14 +32,18 @@ __llm_mm_env:
   # API host and path in the endpoint hints model-manager prints; path mode
   # serves every API on the base host under its own path.
   MM_INFERENCE_HOSTNAME: >-
-    {{ base_domain_name if __llm_mm_path_mode | bool
+    {{ (inference_hostname | default('inference.' ~ base_domain_name)) if __llm_mm_openshift | bool
+       else base_domain_name if __llm_mm_path_mode | bool
        else (litellm_hostname | default('litellm.' ~ base_domain_name)) if __llm_mm_litellm | bool
        else (inference_hostname | default('inference.' ~ base_domain_name)) }}
   MM_INFERENCE_PATH: >-
-    {{ '' if not __llm_mm_path_mode | bool
+    {{ '' if __llm_mm_openshift | bool or not __llm_mm_path_mode | bool
        else litellm_path | default('/litellm') if __llm_mm_litellm | bool
        else inference_path | default('/inference') }}
 __llm_mm_path_mode: "{{ (routing_mode | default('subdomain')) == 'path' }}"
+# OpenShift publishes models on the inference Route (kserve role), inference.<base> in
+# both routing modes, so path mode does not apply to the endpoint hints there.
+__llm_mm_openshift: "{{ cluster_distribution | default('kubernetes') == 'openshift' }}"
 # Catalogue: the environment's copy (env/<env>/models.yaml) first, as deploy_models.yaml.
 __llm_mm_dir: "{{ inference_extension_dir | default(playbook_dir ~ '/../ext/enterprise.ai-inference') }}/model_manager"
 __llm_mm_catalog: >-
@@ -48,3 +52,5 @@ __llm_mm_catalog: >-
 # Where the deploy Jobs mount model-manager (read-only, from ConfigMap model-manager-code).
 __llm_mm_mount: /opt/model-manager
 __llm_mm_sa: model-manager
+# Pinned UID/GID for the deploy Jobs' pods; restricted-v2 assigns them on OpenShift.
+__llm_mm_job_ids: "{{ {} if __llm_mm_openshift | bool else {'runAsUser': 1000, 'runAsGroup': 1000} }}"

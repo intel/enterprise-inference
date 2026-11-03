@@ -182,11 +182,7 @@
           spec:
             serviceAccountName: "{{ __llm_mm_sa }}"
             restartPolicy: Never
-            securityContext:
-              runAsNonRoot: true
-              runAsUser: 1000
-              runAsGroup: 1000
-              seccompProfile: {type: RuntimeDefault}
+            securityContext: "{{ {'runAsNonRoot': true, 'seccompProfile': {'type': 'RuntimeDefault'}} | combine(__llm_mm_job_ids) }}"
             containers:
               - name: model-manager
                 image: "{{ llm_services_mm_image }}"

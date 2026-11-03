@@ -253,8 +253,9 @@ def litellm_deregister(name: str) -> None:
 # ── Endpoint hints ────────────────────────────────────────────────────────────
 
 def path_mode() -> bool:
-    """routing_mode: path publishes every API on the base host, under its own path."""
-    return config_value(global_config(), "routing_mode") == "path"
+    """routing_mode: path publishes every API on the base host, under its own path. Not on OpenShift:
+    models are published on the inference Route (inference.<domain>) in both modes."""
+    return not platform.is_openshift() and config_value(global_config(), "routing_mode") == "path"
 
 
 def inference_path() -> str:
@@ -307,8 +308,9 @@ def _resolves(host: str) -> bool:
 def print_endpoints(m: Model) -> None:
     host, litellm = inference_hostname(), litellm_enabled()
     if platform.is_openshift():
-        # Published through the router. No --resolve when the hostname resolves here, as with *.apps DNS.
-        gw_ip = "" if _resolves(host) else platform.router_ip()
+        # Published through the router. No --resolve when the hostname resolves here, as with *.apps DNS,
+        # unless MM_GATEWAY_IP picks the address.
+        gw_ip = os.environ.get("MM_GATEWAY_IP") or ("" if _resolves(host) else platform.router_ip())
     else:
         gw_ip = k8s.out("get", "svc", "-n", env("MM_EG_GATEWAY_NS", "envoy-gateway-system"), "-l",
                         f"gateway.envoyproxy.io/owning-gateway-name={env('MM_EG_GATEWAY_NAME', 'eg-gateway')}",

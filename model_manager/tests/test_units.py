@@ -236,6 +236,28 @@ def test_litellm_endpoint_is_unified(monkeypatch, tmp_path, capsys, routing_mode
     monkeypatch.setattr(k8s, "out", lambda *a: "")
     routing.print_endpoints(Model(name="m", namespace="n", kind="LLMInferenceService"))
     assert f"Endpoint: {want}" in capsys.readouterr().out
+
+
+def test_openshift_endpoint_ignores_path_mode(monkeypatch, tmp_path):
+    for var in ("MM_LITELLM_ENABLED", "MM_INFERENCE_HOSTNAME", "MM_INFERENCE_PATH"):
+        monkeypatch.delenv(var, raising=False)
+    (tmp_path / "global.yaml").write_text("base_domain_name: ex.test\nrouting_mode: path\n")
+    monkeypatch.setenv("MM_GLOBAL_CONFIG", str(tmp_path / "global.yaml"))
+    monkeypatch.setenv("MM_PLATFORM", "openshift")
+    assert (routing.inference_hostname(), routing.inference_path()) == ("inference.ex.test", "")
+
+
+@pytest.mark.parametrize("gateway_ip, want", [("", ""), ("10.0.0.9", "10.0.0.9")])
+def test_openshift_gateway_ip_override(monkeypatch, capsys, gateway_ip, want):
+    monkeypatch.setenv("MM_PLATFORM", "openshift")
+    monkeypatch.setenv("MM_INFERENCE_HOSTNAME", "inference.ex.test")
+    monkeypatch.setenv("MM_AIGATEWAY_ENABLED", "false")
+    monkeypatch.setenv("MM_LITELLM_ENABLED", "false")
+    monkeypatch.setenv("MM_GATEWAY_IP", gateway_ip)
+    monkeypatch.setattr(routing, "_resolves", lambda host: True)
+    routing.print_endpoints(Model(name="m", namespace="n", kind="LLMInferenceService"))
+    out = capsys.readouterr().out
+    assert (f"resolve inference.ex.test → {want}" in out) == bool(want)
 @pytest.mark.parametrize("current, applied", [("", True), ("img:new", False), ("img:old", True)])
 def test_runtime_installed_or_updated_on_image_change(monkeypatch, current, applied):
     calls = []
