@@ -155,7 +155,7 @@
           {{ out | to_json }}
         access.json: >-
           {{ {'base_url': 'https://' ~ (__llm_mm_env.MM_INFERENCE_HOSTNAME | trim)
-                          ~ (__llm_mm_env.MM_INFERENCE_PATH | trim) ~ '/v1',
+                          ~ (__llm_mm_env.MM_INFERENCE_PATH | trim | regex_replace('/+$', '')) ~ '/v1',
               'auth_type': 'litellm_vkey' if __llm_mm_litellm | bool else 'jwt'} | to_json }}
   vars:
     _llm_catalog_file: >-
