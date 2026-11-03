@@ -9,6 +9,7 @@
   when:
     - cluster_distribution | default('kubernetes') == 'openshift'
     - component_action | default('install') == 'install'
+    - vllm_sr_enabled | default(false) | bool
 
 - name: "vllm_sr | Dispatch action: {{ component_action }}"
   ansible.builtin.include_tasks: "{{ component_action }}.yaml"
