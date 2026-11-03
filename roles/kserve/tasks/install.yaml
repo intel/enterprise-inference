@@ -251,6 +251,7 @@
     - name: "kserve | Install KServe CRDs via Helm template + server-side apply"
       ansible.builtin.shell:
         cmd: >
+          set -o pipefail &&
           helm template kserve-crd
           {{ kserve_helm_repo }}/kserve-crd
           --version v{{ kserve_version }}
@@ -356,6 +357,7 @@
       ansible.builtin.shell:
         cmd: kubectl rollout restart deployment kserve-controller-manager -n {{ kserve_namespace }}
         executable: /bin/bash
+      changed_when: true
       when: kserve_enable_gateway_api | bool
 
 # ── 4. LLMIsvc add-on (optional) ────────────────────────────────────────────
