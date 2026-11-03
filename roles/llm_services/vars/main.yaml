@@ -32,7 +32,7 @@ __llm_mm_env:
   # API host and path in the endpoint hints model-manager prints; path mode
   # serves every API on the base host under its own path.
   MM_INFERENCE_HOSTNAME: >-
-    {{ (inference_hostname | default('inference.' ~ base_domain_name)) if __llm_mm_openshift | bool
+    {{ (kserve_openshift_hostname | default(inference_hostname | default('inference.' ~ base_domain_name))) if __llm_mm_openshift | bool
        else base_domain_name if __llm_mm_path_mode | bool
        else (litellm_hostname | default('litellm.' ~ base_domain_name)) if __llm_mm_litellm | bool
        else (inference_hostname | default('inference.' ~ base_domain_name)) }}

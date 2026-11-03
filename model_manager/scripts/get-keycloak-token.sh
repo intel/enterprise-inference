@@ -90,7 +90,9 @@ if [[ -z "$GATEWAY_IP" && -n "$_gt_ocp" ]]; then
     -o jsonpath='{.status.platformStatus.*.ingressIPs[0]}' 2>/dev/null)
   [[ -n "$GATEWAY_IP" ]] || GATEWAY_IP=$(kubectl get svc -n openshift-ingress router-default \
     -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
-  [[ -n "$GATEWAY_IP" ]] || GATEWAY_IP=$(kubectl get pods -n openshift-ingress \
+  # The node's IP only serves the router with HostNetwork; otherwise use the *.apps DNS.
+  [[ -n "$GATEWAY_IP" ]] || [[ "$(kubectl get deploy -n openshift-ingress router-default \
+    -o jsonpath='{.spec.template.spec.hostNetwork}' 2>/dev/null)" != "true" ]] || GATEWAY_IP=$(kubectl get pods -n openshift-ingress \
     -l ingresscontroller.operator.openshift.io/deployment-ingresscontroller=default \
     --field-selector=status.phase=Running -o jsonpath='{.items[0].status.hostIP}' 2>/dev/null)
 fi

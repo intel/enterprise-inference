@@ -99,6 +99,27 @@
     - name: "kserve | OpenShift: copy the operator certificate"
       when: gateway_tls_mode | default('selfsigned') != 'selfsigned'
       block:
+        # After a switch from selfsigned, cert-manager would overwrite the copy on renewal.
+        # Deleting the Certificate leaves its Secret, which the copy below replaces.
+        - name: "kserve | OpenShift: find a selfsigned Gateway certificate"
+          kubernetes.core.k8s_info:
+            api_version: cert-manager.io/v1
+            kind: Certificate
+            name: "{{ kserve_openshift_gateway_name }}-tls"
+            namespace: "{{ kserve_openshift_gateway_namespace }}"
+            label_selectors: ["app.kubernetes.io/managed-by=ai-solutions"]
+          register: _kserve_ocp_old_cert
+
+        - name: "kserve | OpenShift: retire the selfsigned Gateway certificate"
+          kubernetes.core.k8s:
+            state: absent
+            api_version: cert-manager.io/v1
+            kind: Certificate
+            name: "{{ kserve_openshift_gateway_name }}-tls"
+            namespace: "{{ kserve_openshift_gateway_namespace }}"
+            wait: true
+          when: _kserve_ocp_old_cert.resources | default([]) | length > 0
+
         - name: "kserve | OpenShift: read the platform gateway certificate"
           kubernetes.core.k8s_info:
             kind: Secret

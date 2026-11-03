@@ -533,3 +533,20 @@ def test_balloon_cpu_counts_label_selected_pods(monkeypatch):
     monkeypatch.setattr(nri_policy, "_kubectl_json",
                         lambda *a: policies if a[1] == nri_policy._BALLOONSPOLICY_CRD else pods)
     assert nri_policy._balloon_pods_cpu_on_node("n1") == 12
+
+
+@pytest.mark.parametrize("platform_name, want", [("kubernetes", "True"), ("openshift", "False")])
+def test_workload_ready_waits_for_routes_on_openshift(monkeypatch, platform_name, want):
+    monkeypatch.setenv("MM_PLATFORM", platform_name)
+    conditions = [{"type": "MainWorkloadReady", "status": "True"}, {"type": "Ready", "status": "False"}]
+    monkeypatch.setattr(k8s, "get_json", lambda *a: {"status": {"conditions": conditions}})
+    assert cli.workload_ready(Model(name="m", namespace="n", kind="LLMInferenceService")) == want
+
+
+@pytest.mark.parametrize("host_network, want", [("true", "10.0.0.5"), ("false", "")])
+def test_router_ip_node_fallback_needs_host_network(monkeypatch, host_network, want):
+    from core import platform
+    monkeypatch.delenv("MM_GATEWAY_IP", raising=False)
+    answers = {"deploy": host_network, "pods": "10.0.0.5"}
+    monkeypatch.setattr(k8s, "out", lambda *a: answers.get(a[1], ""))
+    assert platform.router_ip() == want

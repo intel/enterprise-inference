@@ -203,11 +203,14 @@ def _engine_cli_args(o: Options) -> tuple[list[str], int]:
 
 def workload_ready(m: Model) -> str:
     """True once the serving pods pass probes. MainWorkloadReady, not Ready: for an LLMInferenceService
-    Ready also needs the InferencePool Accepted, which model-manager itself patches once this is True."""
+    Ready also needs the InferencePool Accepted, which model-manager itself patches once this is True.
+    On OpenShift the Gateway controller reports the pool, so Ready covers the routes as well."""
     obj = k8s.get_json(m.kind, m.name, "-n", m.namespace)
     if obj is None:
         return "NotFound"
     status = {c.get("type"): c.get("status") for c in (obj.get("status") or {}).get("conditions") or []}
+    if platform.is_openshift():
+        return status.get("Ready") or "Pending"
     return status.get("MainWorkloadReady") or status.get("Ready") or "Pending"
 
 
