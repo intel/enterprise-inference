@@ -70,7 +70,11 @@
         _missing_ctrl: >-
           {{ _kserve_ocp_controllers.results
              | rejectattr('resources.0.status.readyReplicas', 'defined')
-             | map(attribute='item') | list }}
+             | map(attribute='item') | list
+             + (_kserve_ocp_controllers.results
+                | selectattr('resources.0.status.readyReplicas', 'defined')
+                | selectattr('resources.0.status.readyReplicas', 'lt', 1)
+                | map(attribute='item') | list) }}
       ansible.builtin.assert:
         that:
           - _dsc | length > 0

@@ -298,6 +298,8 @@ def inference_hostname() -> str:
 
 
 def _resolves(host: str) -> bool:
+    if not host.strip():
+        return False
     try:
         socket.getaddrinfo(host, 443)
         return True

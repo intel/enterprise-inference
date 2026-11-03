@@ -258,6 +258,12 @@ def test_openshift_gateway_ip_override(monkeypatch, capsys, gateway_ip, want):
     routing.print_endpoints(Model(name="m", namespace="n", kind="LLMInferenceService"))
     out = capsys.readouterr().out
     assert (f"resolve inference.ex.test → {want}" in out) == bool(want)
+
+
+def test_empty_host_does_not_resolve():
+    assert not routing._resolves("") and not routing._resolves("  ")
+
+
 @pytest.mark.parametrize("current, applied", [("", True), ("img:new", False), ("img:old", True)])
 def test_runtime_installed_or_updated_on_image_change(monkeypatch, current, applied):
     calls = []
