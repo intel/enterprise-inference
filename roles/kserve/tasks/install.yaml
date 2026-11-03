@@ -381,7 +381,9 @@
             name: "{{ kserve_lws_namespace }}"
             labels:
               istio.io/dataplane-mode: "ambient"
-      when: _lws_check.status is not defined or _lws_check.status is none
+      when:
+        - istio_enabled | default(false) | bool
+        - _lws_check.status is not defined or _lws_check.status is none
 
     - name: "kserve | LLMIsvc — label LWS namespace — PSS"
       kubernetes.core.k8s:
