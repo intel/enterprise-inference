@@ -588,5 +588,6 @@ def main() -> None:
         abort("curl not found. Install it with your OS package manager.")
     if command not in COMMANDS:
         abort(f"Unknown command: {command} (run ./model-manager --help)")
-    platform.detect()
+    if command != "list":  # list renders nothing, and must work without a cluster
+        platform.detect()
     COMMANDS[command](o, target)

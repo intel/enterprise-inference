@@ -419,6 +419,17 @@ def test_list_catalog_needs_no_cluster(cluster, capsys):
     assert re.search(r"^nocat \(org/nocat\) +auto +vllm 0\.24\.0$", out, re.M)
 
 
+@pytest.mark.parametrize("args, kubectl_on_path", [(["list", "--catalog"], False), (["list"], True)])
+def test_list_works_offline_through_main(cluster, monkeypatch, capsys, args, kubectl_on_path):
+    cluster["down"] = True
+    for key in ("MM_PLATFORM", "MM_LLMISVC_API_VERSION"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(cli.shutil, "which", lambda name: kubectl_on_path and f"/usr/bin/{name}")
+    monkeypatch.setattr(sys, "argv", ["model-manager", *args])
+    cli.main()
+    assert re.search(r"^nocat \(org/nocat\) +auto +vllm 0\.24\.0", capsys.readouterr().out, re.M)
+
+
 def test_list_flags_are_exclusive(cluster):
     with pytest.raises(SystemExit):
         cli.list_models(cli.Options(catalog_only=True, deployed_only=True), "")
