@@ -187,21 +187,33 @@ def parse_args(argv: list[str]) -> Options:
     return o
 
 
-def _engine_cli_args(o: Options, gpus: int = 1) -> tuple[list[str], int]:
-    """--arg list (with --tp injected unless it already sets the flag) and the tensor-parallel size.
-    A multi-GPU pod defaults to tensor parallelism across all its GPUs."""
-    args = list(o.arg)
-    if o.tp:
-        if "--tensor-parallel-size" not in args:
-            args += ["--tensor-parallel-size", o.tp]
-        return args, int(o.tp)
+def _tp_in(args: list[str]) -> int | None:
+    """The --tensor-parallel-size set in args (either form), or None."""
     for n, a in enumerate(args):
         if a == "--tensor-parallel-size" or a.startswith("--tensor-parallel-size="):
             tp = a.split("=", 1)[1] if "=" in a else (args[n + 1] if n + 1 < len(args) else "1")
             if not (is_uint(tp) and int(tp) > 0):
                 abort(f"--tensor-parallel-size requires a positive integer, got: {tp}")
-            return args, int(tp)
+            return int(tp)
+    return None
+
+
+def _engine_cli_args(o: Options, gpus: int = 1, catalog_args: tuple[str, ...] = ()) -> tuple[list[str], int]:
+    """--arg list (with --tp injected unless it already sets the flag) and the tensor-parallel size.
+    A multi-GPU pod defaults to tensor parallelism across all its GPUs, unless the catalog's args
+    (category, version, model) already set it: the CLI args render last and would override them."""
+    args = list(o.arg)
+    if o.tp:
+        if "--tensor-parallel-size" not in args:
+            args += ["--tensor-parallel-size", o.tp]
+        return args, int(o.tp)
+    tp = _tp_in(args)
+    if tp is not None:
+        return args, tp
     if gpus > 1:
+        tp = _tp_in(list(catalog_args))
+        if tp is not None:
+            return args, tp
         return args + ["--tensor-parallel-size", str(gpus)], gpus
     return args, 1
 
@@ -323,7 +335,14 @@ def _gpu_gate(m: Model, dry_run: bool) -> None:
     if not re.fullmatch(r"[1-9][0-9]*", m.gpus):
         abort(f"Runtime '{m.runtime}' is a GPU runtime but the GPU count is invalid: '{m.gpus}'. Set gpus: N on "
               "the model, defaults.gpus on its category, or pass --gpus N.")
-    if os.environ.get("MM_ACCEL_RESOURCE"):
+    have = os.environ.get("MM_ACCEL_RESOURCE", "")
+    want = text(pick(m.rt, "accelerator_resource"))
+    if have and want and renderer.gpu_vendor(have) != renderer.gpu_vendor(want):
+        msg = (f"Runtime '{m.runtime}' is built for {renderer.gpu_vendor(want) or want} GPUs ({want}), but the cluster's "
+               f"accelerator is {have} (MM_ACCEL_RESOURCE). Use a runtime for that accelerator, or unset "
+               "MM_ACCEL_RESOURCE on a cluster without it.")
+        return warn(f"{msg} Previewing anyway (--dry-run).") if dry_run else abort(msg)
+    if have:
         return
     if dry_run:
         return warn(f"MM_ACCEL_RESOURCE is not set — previewing anyway (--dry-run) with "
@@ -350,7 +369,7 @@ def deploy(o: Options, target: str) -> None:
         info(f"  Node: {m.node}")
     policy = GpuRuntime() if m.gpu else resolve_policy(o.cpu_policy, m.node)
     info(f"  CPU policy: {policy.name}")
-    cli_args, tp = _engine_cli_args(o, int(m.gpus) if m.gpu else 1)
+    cli_args, tp = _engine_cli_args(o, int(m.gpus) if m.gpu else 1, tuple(renderer.engine_args(m)) if m.gpu else ())
     resolve_auto_cpu(policy, m, tp)
     policy.prepare(m)
     annotations, cpu = policy.annotations(m, tp)

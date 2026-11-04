@@ -17,26 +17,31 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from core import cli, config  # noqa: E402
+from core import cli, config, renderer  # noqa: E402
 from core.config import Catalog, Model  # noqa: E402
 from core.renderer import gpu_vendor  # noqa: E402
 from test_parity import BE, DOWNLOAD, GOLDEN, MM, NO_LITELLM_URL, NRI, POOL, _ready, case, run  # noqa: E402
 
 GPU = {"MM_ACCEL_RESOURCE": "nvidia.com/gpu"}
+# GPU pods are Burstable since the B300 run: no CPU limit, so kubelet's static CPU manager never pins them.
+BURSTABLE_GPU = (r'^(          limits:)\n            cpu: "[^"]+"\n(            memory: \S+\n            nvidia\.com/gpu:)',
+                 r"\1\n\2")
 LLAMA_GPU_READY = [[r"get LLMInferenceService llama-3-1-70b-instruct-cuda -n llm-inference -o json$", 0,
                     _ready("MainWorkloadReady")]]
 
 GPU_CASES = [
     # gpu-llama-70b is the manifest that served on B300.
-    case("gpu-llama-70b", "deploy", "llama-3-1-70b-instruct-cuda", "--dry-run", env=GPU),
-    case("gpu-dry-run-ungated", "deploy", "qwen3-0-6b-cuda", "--dry-run"),
-    case("gpu-count-node", "deploy", "qwen3-0-6b-cuda", "--gpus", "2", "--node", "w1", "--dry-run", env={**GPU, **NRI}),
-    case("gpu-explicit-tp", "deploy", "llama-3-1-70b-instruct-cuda", "--tp", "4", "--dry-run", env=GPU),
+    case("gpu-llama-70b", "deploy", "llama-3-1-70b-instruct-cuda", "--dry-run", env=GPU, deviations=[BURSTABLE_GPU]),
+    case("gpu-dry-run-ungated", "deploy", "qwen3-0-6b-cuda", "--dry-run", deviations=[BURSTABLE_GPU]),
+    case("gpu-count-node", "deploy", "qwen3-0-6b-cuda", "--gpus", "2", "--node", "w1", "--dry-run", env={**GPU, **NRI},
+         deviations=[BURSTABLE_GPU]),
+    case("gpu-explicit-tp", "deploy", "llama-3-1-70b-instruct-cuda", "--tp", "4", "--dry-run", env=GPU,
+         deviations=[BURSTABLE_GPU]),
     case("gpu-flag-ignored-on-cpu", "deploy", "qwen3-0-6b", "--gpus", "2", "--dry-run", env=BE),
     case("gpu-gate-refuses", "deploy", "qwen3-0-6b-cuda"),
     case("gpu-bad-count", "deploy", "qwen3-0-6b-cuda", "--gpus", "x", env=GPU),
     case("gpu-deploy-wait", "deploy", "llama-3-1-70b-instruct-cuda", "--wait", env=GPU,
-         k8s=DOWNLOAD + POOL + LLAMA_GPU_READY, deviations=[NO_LITELLM_URL]),
+         k8s=DOWNLOAD + POOL + LLAMA_GPU_READY, deviations=[NO_LITELLM_URL, BURSTABLE_GPU]),
 ]
 
 
@@ -58,6 +63,42 @@ def test_gpu_tp_defaults_to_gpu_count():
     assert cli._engine_cli_args(cli.Options(), 8) == (["--tensor-parallel-size", "8"], 8)
     assert cli._engine_cli_args(cli.Options(), 1) == ([], 1)
     assert cli._engine_cli_args(cli.Options(tp="4"), 8) == (["--tensor-parallel-size", "4"], 4)
+
+
+def test_catalog_tp_is_not_overridden():
+    # A tensor-parallel size in the catalog (category, version or model args) stands; the GPU-count
+    # default would render after it and win, since dedupe_args keeps the last occurrence.
+    assert cli._engine_cli_args(cli.Options(), 8, ("--tensor-parallel-size", "4")) == ([], 4)
+    assert cli._engine_cli_args(cli.Options(), 8, ("--max-model-len", "8192", "--tensor-parallel-size=2")) == ([], 2)
+    assert cli._engine_cli_args(cli.Options(), 8, ("--max-model-len", "8192")) == (["--tensor-parallel-size", "8"], 8)
+    # --tp on the command line still overrides the catalog.
+    assert cli._engine_cli_args(cli.Options(tp="8"), 8, ("--tensor-parallel-size", "4")) == (
+        ["--tensor-parallel-size", "8"], 8)
+    args, _ = cli._engine_cli_args(cli.Options(), 8, ("--tensor-parallel-size", "4"))
+    assert renderer.dedupe_args(["--tensor-parallel-size", "4", *args]) == ["--tensor-parallel-size", "4"]
+    with pytest.raises(SystemExit):
+        cli._engine_cli_args(cli.Options(), 8, ("--tensor-parallel-size", "x"))
+
+
+@pytest.mark.parametrize("cluster", ["gpu.intel.com/xe", "amd.com/gpu", "habana.ai/gaudi"])
+def test_gate_refuses_another_vendor(monkeypatch, cluster):
+    # vllm-cuda runs the CUDA image: on an Intel or AMD rack it must not request those devices.
+    monkeypatch.setenv("MM_ACCEL_RESOURCE", cluster)
+    m = Model(name="m", namespace="n", runtime="vllm-cuda", gpus="1",
+              rt={"device": "gpu", "accelerator_resource": "nvidia.com/gpu"})
+    with pytest.raises(SystemExit):
+        cli._gpu_gate(m, dry_run=False)
+    cli._gpu_gate(m, dry_run=True)  # a preview warns and renders
+
+
+def test_gate_accepts_the_runtimes_vendor(monkeypatch):
+    monkeypatch.setenv("MM_ACCEL_RESOURCE", "nvidia.com/gpu")
+    cli._gpu_gate(Model(name="m", namespace="n", runtime="vllm-cuda", gpus="1",
+                        rt={"device": "gpu", "accelerator_resource": "nvidia.com/gpu"}), dry_run=False)
+    # Another vendor's GPU runtime is gated on its own resource.
+    monkeypatch.setenv("MM_ACCEL_RESOURCE", "gpu.intel.com/xe")
+    cli._gpu_gate(Model(name="m", namespace="n", runtime="vllm-xpu", gpus="1",
+                        rt={"device": "gpu", "accelerator_resource": "gpu.intel.com/xe"}), dry_run=False)
 
 
 @pytest.mark.parametrize("resource, vendor", [("nvidia.com/gpu", "nvidia"), ("gpu.intel.com/xe", "intel"),

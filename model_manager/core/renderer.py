@@ -171,10 +171,13 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
         mounts, volumes = _volumes(m)
         gpu_limit, tolerations = _gpu(m, common["AFFINITY"])
         gateway, gateway_ns = gateway_ref()
+        # GPU pods get no CPU limit, which makes them Burstable: kubelet's static CPU manager then never
+        # gives them exclusive cores (full-pcpus-only would refuse an odd count with SMTAlignmentError).
+        cpu_limit = "" if m.gpu else f'\n            cpu: "{cpu}"'
         return render(
             template("llm-inference-service.yaml"), **common, IMAGE=m.image,
             GATEWAY_NAME=gateway, GATEWAY_NAMESPACE=gateway_ns, CHAT_TEMPLATE_MOUNT=mounts,
-            CHAT_TEMPLATE_VOLUME=volumes, GPU_RESOURCE=gpu_limit, TOLERATIONS=tolerations)
+            CHAT_TEMPLATE_VOLUME=volumes, GPU_RESOURCE=gpu_limit, TOLERATIONS=tolerations, CPU_LIMIT=cpu_limit)
     if m.kind == "InferenceService":
         name = "inference-service-ovms.yaml" if m.runtime == "openvino" else "inference-service.yaml"
         return render(template(name), **common, MODEL_ID=m.model_id, PVC_NAME=catalog.pvc,
