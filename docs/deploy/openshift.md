@@ -1,8 +1,8 @@
 # Deploy on OpenShift
 
-> [!WARNING]
-> **Initial release, work in progress.** Validated on one single-node OpenShift
-> 4.22 cluster with OpenShift AI 3.3. Expect gaps (see [Known gaps](#known-gaps)).
+> [!NOTE]
+> Validated on single-node OpenShift 4.22 with OpenShift AI 3.3. See
+> [Known gaps](#known-gaps) for what is not supported yet.
 
 On OpenShift the inference layer does not install KServe, the AI gateways or NFD.
 OpenShift AI and the marketplace operators provide them. `install inference` checks
