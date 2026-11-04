@@ -419,6 +419,18 @@ def test_list_catalog_needs_no_cluster(cluster, capsys):
     assert re.search(r"^nocat \(org/nocat\) +auto +vllm 0\.24\.0$", out, re.M)
 
 
+@pytest.mark.parametrize("op, values, labels, want", [
+    ("In", ["workload"], {"c": "workload"}, True), ("In", ["*"], {"c": "x"}, True), ("In", ["*"], {}, False),
+    ("NotIn", ["workload"], {}, True), ("Equals", ["*"], {"c": "x"}, True), ("NotEqual", ["x"], {}, True),
+    ("Matches", ["work*"], {"c": "workload"}, True), ("MatchesNot", ["work*"], {}, True),
+    ("MatchesAny", ["a*", "w*"], {"c": "workload"}, True), ("MatchesNone", ["w*"], {"c": "workload"}, False),
+    ("Exists", [], {"c": ""}, True), ("NotExist", [], {"c": "x"}, False), ("AlwaysTrue", [], {}, True),
+    ("Bogus", ["x"], {"c": "x"}, False),
+])
+def test_label_matches_follows_nri_semantics(op, values, labels, want):
+    assert nri_policy.label_matches(labels, [{"key": "pod/labels/c", "operator": op, "values": values}]) is want
+
+
 @pytest.mark.parametrize("args, kubectl_on_path", [(["list", "--catalog"], False), (["list"], True)])
 def test_list_works_offline_through_main(cluster, monkeypatch, capsys, args, kubectl_on_path):
     cluster["down"] = True

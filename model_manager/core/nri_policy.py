@@ -15,6 +15,7 @@ uses kubectl subprocess calls for all K8s access; diagnostics go to stderr.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import math
 import os
@@ -349,13 +350,23 @@ def label_balloon_types(policies: Any) -> list[tuple[str, list[dict]]]:
 
 
 def label_matches(labels: dict, exprs: list[dict]) -> bool:
-    """Whether pod labels satisfy a balloon type's pod/labels/ matchExpressions."""
+    """Whether pod labels satisfy a balloon type's pod/labels/ matchExpressions, with the NRI
+    plugins' semantics (resmgr Expression.Evaluate): "*" in Equals/In matches any value, and the
+    Matches* operators take glob patterns."""
     for e in exprs:
+        op, values = e.get("operator"), e.get("values") or [""]
+        if op == "AlwaysTrue":
+            continue
         value = labels.get(e["key"][len(_POD_LABEL_PREFIX):])
-        op, values = e.get("operator"), e.get("values") or []
-        ok = {"In": value in values, "NotIn": value not in values, "Equals": value == (values or [None])[0],
-              "NotEqual": value != (values or [None])[0], "Exists": value is not None,
-              "NotExist": value is None}.get(op, False)
+        has = value is not None
+        globbed = has and any(fnmatch.fnmatchcase(value, v) for v in values)
+        ok = {"Equals": has and values[0] in (value, "*"), "NotEqual": not has or value != values[0],
+              "In": has and any(v in (value, "*") for v in values),
+              "NotIn": not (has and any(v in (value, "*") for v in values)),
+              "Matches": has and fnmatch.fnmatchcase(value, values[0]),
+              "MatchesNot": not (has and fnmatch.fnmatchcase(value, values[0])),
+              "MatchesAny": globbed, "MatchesNone": not globbed,
+              "Exists": has, "NotExist": not has}.get(op, False)
         if not ok:
             return False
     return True
