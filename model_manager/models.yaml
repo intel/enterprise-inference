@@ -4,9 +4,10 @@
 #   models:    what to deploy (one entry per model)
 #   runtimes:  per-engine deploy config (images, versions, env, categories)
 #
-#   ./model-manager deploy <name> --wait           # deploy a catalog model
-#   ./model-manager deploy --id <hf/repo> --cpu 8  # deploy any HuggingFace model by id (no edit needed)
+#   ./model-manager deploy <name> --wait             # deploy a catalog model
+#   ./model-manager deploy --hfid <hf/repo> --cpu 8  # deploy any HuggingFace model by id (no edit needed)
 #   ./model-manager undeploy <name>
+#   ./model-manager list                             # catalog models and their status, plus others deployed
 # =============================================================================
 
 

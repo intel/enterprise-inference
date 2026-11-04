@@ -1,7 +1,9 @@
 """Unit tests for behaviour the parity suite cannot observe, mostly fixes over the legacy CLI."""
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess  # nosec B404
 import sys
 from pathlib import Path
@@ -289,3 +291,113 @@ def test_litellm_called_directly_in_a_pod(monkeypatch):
     monkeypatch.setattr(k8s, "run", lambda *a, **kw: pytest.fail("no curl pod in a pod"))
     assert routing._litellm("POST", "http://litellm.litellm.svc:4000/model/new", {"a": 1}) == '{"ok": true}'
     assert seen == {"url": "http://litellm.litellm.svc:4000/model/new", "auth": "Bearer k", "method": "POST"}
+
+
+FIXTURE_CATALOG = Path(__file__).resolve().parent / "fixtures" / "models.yaml"
+
+
+def _llmisvc(name, ns, ready, reason=""):
+    cond = {"type": "MainWorkloadReady", "status": ready, **({"reason": reason} if reason else {})}
+    return {"metadata": {"name": name, "namespace": ns},
+            "spec": {"replicas": 1, "template": {"containers": [{"image": "docker.io/vllm/vllm-openai-cpu:v0.24.0"}]}},
+            "status": {"conditions": [cond]}}
+
+
+@pytest.fixture
+def cluster(monkeypatch):
+    """Fake kubectl for list: answers `get <kind> ... -A` from `items`; `denied` kinds fail -A but not -n,
+    `failing` kinds fail both."""
+    state = {"items": {"LLMInferenceService": [], "InferenceService": []}, "denied": set(), "failing": set(),
+             "down": False, "calls": []}
+
+    def run(*args, stdin=None):
+        state["calls"].append(args)
+        kind = args[1]
+        if state["down"] or kind in state["failing"] or ("-A" in args and kind in state["denied"]):
+            return subprocess.CompletedProcess(args, 1, "", "error")
+        items = state["items"][kind]
+        if "-n" in args:
+            items = [i for i in items if i["metadata"]["namespace"] == args[args.index("-n") + 1]]
+        return subprocess.CompletedProcess(args, 0, json.dumps({"items": items}), "")
+    monkeypatch.setenv("MM_CONFIG", str(FIXTURE_CATALOG))
+    monkeypatch.setattr(k8s, "run", run)
+    return state
+
+
+def test_list_marks_catalog_status_and_shows_other_deployments(cluster, capsys):
+    cluster["items"]["LLMInferenceService"] = [
+        _llmisvc("tmpl-inline", "ns1", "True"),
+        _llmisvc("specdec", "ns1", "False", "MinimumReplicasUnavailable"),
+        _llmisvc("my-alias", "ns1", "True"),             # --as / --hfid: not a catalog name
+        _llmisvc("tmpl-path", "other", "True"),          # a catalog name, but not the catalog's namespace
+    ]
+    cli.list_models(cli.Options(), "")
+    out = capsys.readouterr().out
+    catalog, deployed = out.split("Deployed, not in the catalog")
+    assert re.search(r"^tmpl-inline .* Ready$", catalog, re.M)
+    assert re.search(r"^specdec .* Not ready \(MinimumReplicasUnavailable\)$", catalog, re.M)
+    assert re.search(r"^tmpl-path .* not deployed$", catalog, re.M)
+    assert re.search(r"^multi \(org/multi\) +llm +openvino +not deployed$", catalog, re.M)  # deploy's default server
+    assert re.search(r"^my-alias +ns1 +LLMInferenceService +vllm-openai-cpu:v0\.24\.0 +1 +Ready$", deployed, re.M)
+    assert re.search(r"^tmpl-path +other ", deployed, re.M)
+    assert "tmpl-inline" not in deployed
+
+
+def test_list_falls_back_to_the_catalog_namespace(cluster, capsys):
+    cluster["denied"] = {"LLMInferenceService", "InferenceService"}
+    cluster["items"]["LLMInferenceService"] = [_llmisvc("tmpl-inline", "ns1", "True"),
+                                               _llmisvc("elsewhere", "other", "True")]
+    cli.list_models(cli.Options(deployed_only=True), "")
+    out = capsys.readouterr().out
+    assert "tmpl-inline" in out and "elsewhere" not in out
+    assert ("get", "LLMInferenceService", "-l", "app.kubernetes.io/managed-by=model-manager", "-o", "json",
+            "-n", "ns1") in cluster["calls"]
+
+
+def test_list_without_cluster_shows_unknown_status(cluster, capsys):
+    cluster["down"] = True
+    cli.list_models(cli.Options(), "")
+    out, err = capsys.readouterr()
+    assert "Cannot list deployed models" in err
+    assert re.search(r"^tmpl-inline .* \?$", out, re.M) and "Deployed" not in out
+
+
+def test_list_marks_unlisted_kind_unknown(cluster, capsys):
+    cluster["failing"] = {"LLMInferenceService"}
+    cli.list_models(cli.Options(), "")
+    out, err = capsys.readouterr()
+    assert "Cannot list LLMInferenceService" in err and "may be incomplete" in err
+    assert re.search(r"^tmpl-inline .* \?$", out, re.M)                   # vllm: its kind was not listed
+    assert re.search(r"^multi \(org/multi\) +llm +openvino +not deployed$", out, re.M)  # InferenceService was
+
+
+def test_list_server_is_the_version_deploy_picks(cluster, tmp_path, monkeypatch, capsys):
+    catalog = tmp_path / "models.yaml"
+    catalog.write_text(
+        "defaults: { namespace: ns1 }\n"
+        "models:\n  - { name: eng-model, model_id: org/eng, runtime: eng }\n"
+        "runtimes:\n  eng:\n    versions:\n"
+        "      '0.9.1': { image: img/eng:0.9.1 }\n      '0.10.0': { image: img/eng:0.10.0 }\n")
+    monkeypatch.setenv("MM_CONFIG", str(catalog))
+    m = config.resolve(config.Catalog.load(), "eng-model", cli.Options())
+    cli.list_models(cli.Options(catalog_only=True), "")
+    assert re.search(rf"^eng-model \(org/eng\) +auto +eng {re.escape(m.version)}$", capsys.readouterr().out, re.M)
+
+
+def test_list_catalog_needs_no_cluster(cluster, capsys):
+    cli.list_models(cli.Options(catalog_only=True), "")
+    out = capsys.readouterr().out
+    assert cluster["calls"] == [] and "STATUS" not in out
+    assert re.search(r"^nocat \(org/nocat\) +auto +vllm 0\.24\.0$", out, re.M)
+
+
+def test_list_flags_are_exclusive(cluster):
+    with pytest.raises(SystemExit):
+        cli.list_models(cli.Options(catalog_only=True, deployed_only=True), "")
+
+
+@pytest.mark.parametrize("flag, warned", [("--hfid", False), ("--id", True)])
+def test_hfid_and_deprecated_id_alias(capsys, flag, warned):
+    o = cli.parse_args(["deploy", flag, "Qwen/Qwen3-0.6B"])
+    assert o.id == "Qwen/Qwen3-0.6B" and o.positional == ["deploy"]
+    assert ("--id is deprecated; use --hfid" in capsys.readouterr().err) is warned

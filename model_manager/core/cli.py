@@ -1,4 +1,4 @@
-"""model-manager CLI: deploy, undeploy and cpu-collisions-check."""
+"""model-manager CLI: deploy, undeploy, list and cpu-collisions-check."""
 from __future__ import annotations
 
 import fcntl
@@ -22,13 +22,18 @@ from .ui import BOLD, CYAN, DIM, GREEN, RESET, YELLOW, abort, fmt_duration, info
 USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubernetes
 
 {BOLD}{CYAN}Commands:{RESET}
-  {GREEN}deploy{RESET} <model>|--id <hf/repo>   Download weights + deploy serving pod
+  {GREEN}deploy{RESET} <model>|--hfid <hf/repo> Download weights + deploy serving pod
   {GREEN}cpu-collisions-check{RESET}            Report CPU pinning, NUMA layout & detect core collisions
   {GREEN}undeploy{RESET} <model>|<name>|all     Remove pod (keeps weights on PVC); accepts a catalog model, an --as alias, or any deployed name
+  {GREEN}list{RESET}                            Catalog models (models.yaml) with their status, and deployed models not in it
+
+{BOLD}{CYAN}List Options:{RESET}
+  {GREEN}--catalog{RESET}             Only the catalog (models.yaml); no cluster access needed
+  {GREEN}--deployed{RESET}            Only models deployed in the cluster
 
 {BOLD}{CYAN}Deploy Options:{RESET}
-  {GREEN}--id{RESET} <hf/repo>       Ad-hoc deploy any HuggingFace model
-  {GREEN}--name{RESET} <name>        Override generated name (with --id)
+  {GREEN}--hfid{RESET} <hf/repo>     Ad-hoc deploy any HuggingFace model (--id still works, deprecated)
+  {GREEN}--name{RESET} <name>        Override generated name (with --hfid)
   {GREEN}--server{RESET} <name>      Model server/engine: vllm (default) | openvino  (alias: --runtime)
   {GREEN}--server-version{RESET} V   Server version (must be declared for the model if it uses servers:)
   {GREEN}--as{RESET} <name>          Deploy under a distinct name (run multiple server/version variants at once)
@@ -53,9 +58,10 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
 {BOLD}{CYAN}Examples:{RESET}
   ./model-manager deploy llama3-8b-awq --wait
   ./model-manager deploy llama3-8b-awq --server-version 0.19.1 --wait
-  ./model-manager deploy --id meta-llama/Llama-3.2-1B-Instruct --cpu 8 --memory 16Gi
+  ./model-manager deploy --hfid meta-llama/Llama-3.2-1B-Instruct --cpu 8 --memory 16Gi
   ./model-manager undeploy llama3-8b-awq
   ./model-manager undeploy llama3-8b-awq --wait        # block until pods terminate + CPUs are freed
+  ./model-manager list                                 # catalog + deployed models and their status
 
 {BOLD}{CYAN}For status / scale / logs, use kubectl:{RESET}
   kubectl get llminferenceservices,inferenceservices -n llm-inference
@@ -95,6 +101,8 @@ class Options:
     """Every option is accepted by every command and may appear anywhere, as with the bash CLI."""
     dry_run: bool = False
     wait: bool = False
+    catalog_only: bool = False
+    deployed_only: bool = False
     wait_timeout: str = ""
     id: str = ""
     name: str = ""
@@ -115,8 +123,8 @@ class Options:
     positional: list = field(default_factory=list)
 
 
-FLAGS = {"--dry-run": "dry_run", "--wait": "wait"}
-VALUES = {"--wait-timeout": "wait_timeout", "--id": "id", "--name": "name", "--server": "server",
+FLAGS = {"--dry-run": "dry_run", "--wait": "wait", "--catalog": "catalog_only", "--deployed": "deployed_only"}
+VALUES = {"--wait-timeout": "wait_timeout", "--hfid": "id", "--id": "id", "--name": "name", "--server": "server",
           "--runtime": "server", "--server-version": "server_version", "--as": "alias", "--cpu": "cpu",
           "--memory": "memory", "--replicas": "replicas", "--tp": "tp", "--cpu-policy": "cpu_policy",
           "--category": "category", "--routing": "routing", "--node": "node"}
@@ -160,6 +168,8 @@ def parse_args(argv: list[str]) -> Options:
                 abort(f"{a} requires a positive integer, got: {value}")
             if a == "--label":
                 _check_label(value)
+            if a == "--id":
+                warn("--id is deprecated; use --hfid")
             if a in LISTS:
                 getattr(o, LISTS[a]).append(value)
             else:
@@ -435,6 +445,110 @@ def undeploy(o: Options, target: str) -> None:
     warn(f"  Check: kubectl get pods -n {m.namespace} -l app.kubernetes.io/name={m.name}")
 
 
+def _catalog_server(catalog: Catalog, e: dict) -> tuple[str, str]:
+    """The server and version `deploy <name>` picks with no flags, read the way _from_catalog and
+    _select_image read them, and the kind it creates."""
+    servers = pick(e, "servers", {}) if isinstance(pick(e, "servers", {}), dict) else {}
+    if servers:
+        server = text(pick(e, "default_server")) or min(servers, default="")
+        entry = pick(servers, server, {})
+        declared = [text(v) for v in pick(entry, "versions", [])] if isinstance(entry, dict) else []
+        version = text(pick(entry, "default", declared[0] if declared else ""))
+    else:
+        server, version = text(pick(e, "runtime")) or catalog.runtime, text(pick(e, "server_version"))
+    rt = catalog.runtime_config(server, required=False) if server else {}
+    versions = rt.get("versions")
+    if not version and isinstance(versions, dict):  # the runtime's default, else its lowest version
+        version = text(pick(rt, "default_version")) or min((text(k) for k in versions), default="")
+    kind = text(pick(e, "kind")) or text(pick(rt, "kind", "LLMInferenceService"))
+    return f"{server} {version}".strip(), kind
+
+
+def _status(obj: dict) -> str:
+    conditions = {c.get("type"): c for c in (obj.get("status") or {}).get("conditions") or []}
+    c = conditions.get("MainWorkloadReady") or conditions.get("Ready")  # as workload_ready()
+    if c is None:
+        return "Pending"
+    return "Ready" if c.get("status") == "True" else f"Not ready ({c.get('reason')})" if c.get("reason") else "Not ready"
+
+
+def _deployed(namespace: str) -> tuple[list[dict] | None, set[str]]:
+    """Serving resources model-manager created, in every namespace (just the catalog's when -A is denied),
+    and the kinds that could not be listed. None when neither kind can be: no cluster, no access, or
+    KServe not installed."""
+    found, listed, failed = [], False, set()
+    for kind in ("LLMInferenceService", "InferenceService"):
+        args = ("get", kind, "-l", "app.kubernetes.io/managed-by=model-manager", "-o", "json")
+        r = k8s.run(*args, "-A")
+        if r.returncode:
+            r = k8s.run(*args, "-n", namespace)
+        try:
+            items = None if r.returncode else json.loads(r.stdout or "{}").get("items") or []
+        except (ValueError, AttributeError):
+            items = None
+        if items is None:  # unknown, not absent
+            failed.add(kind)
+            continue
+        listed = True
+        for obj in items:
+            spec, meta = obj.get("spec") or {}, obj.get("metadata") or {}
+            containers = ((spec.get("template") or {}).get("containers") or [{}])
+            predictor = (spec.get("predictor") or {})
+            found.append({"name": meta.get("name", ""), "namespace": meta.get("namespace", ""), "kind": kind,
+                          "status": _status(obj),
+                          "replicas": str(spec.get("replicas", predictor.get("minReplicas", ""))),
+                          "server": (containers[0].get("image") or "").rsplit("/", 1)[-1]
+                          or (predictor.get("model") or {}).get("runtime", "")})
+    return (found if listed else None), failed
+
+
+def _table(header: tuple, rows: list[tuple]) -> None:
+    widths = [max(len(str(r[i])) for r in [header, *rows]) for i in range(len(header))]
+    print(BOLD + "  ".join(h.ljust(w) for h, w in zip(header, widths)).rstrip() + RESET)
+    for r in rows:
+        print("  ".join(str(c).ljust(w) for c, w in zip(r, widths)).rstrip())
+
+
+def list_models(o: Options, target: str) -> None:
+    if o.catalog_only and o.deployed_only:
+        abort("--catalog and --deployed are exclusive; omit both to show everything.")
+    catalog = Catalog.load()
+    live, failed = (None, set()) if o.catalog_only else _deployed(catalog.namespace)
+    if live is None and not o.catalog_only:
+        warn("Cannot list deployed models (no cluster access, or KServe not installed); status shown as '?'.")
+    elif failed:
+        warn(f"Cannot list {', '.join(sorted(failed))}: those models show '?' and the deployed table may be incomplete.")
+    by_key = {(d["name"], d["namespace"]): d for d in live or []}
+    in_catalog = set()
+    if not o.deployed_only:
+        rows = []
+        for e in catalog.models:
+            name = text(pick(e, "name"))
+            key = (name, text(pick(e, "namespace", catalog.namespace)))
+            in_catalog.add(key)
+            server, kind = _catalog_server(catalog, e)
+            status = ("-" if o.catalog_only else "?" if live is None
+                      else by_key[key]["status"] if key in by_key else "?" if kind in failed else "not deployed")
+            model_id = text(pick(e, "model_id"))
+            rows.append((f"{name} ({model_id})" if model_id else name, text(pick(e, "category")) or "auto",
+                         server or "-", *(() if o.catalog_only else (status,))))
+        print(f"{BOLD}{CYAN}Catalog{RESET} {DIM}({catalog.path}, {len(rows)} models){RESET}")
+        _table(("MODEL ALIAS NAME (ID)", "CATEGORY", "SERVER", *(() if o.catalog_only else ("STATUS",))), rows)
+    if o.catalog_only or live is None:
+        return
+    if not o.deployed_only:
+        print()
+    others = [d for d in live if o.deployed_only or (d["name"], d["namespace"]) not in in_catalog]
+    title = "Deployed" if o.deployed_only else "Deployed, not in the catalog (--as / --hfid)"
+    print(f"{BOLD}{CYAN}{title}{RESET} {DIM}({len(others)}){RESET}")
+    if others:
+        _table(("NAME", "NAMESPACE", "KIND", "SERVER", "REPLICAS", "STATUS"),
+               [(d["name"], d["namespace"], d["kind"], d["server"] or "-", d["replicas"] or "-", d["status"])
+                for d in sorted(others, key=lambda d: (d["namespace"], d["name"]))])
+    else:
+        print(f"  {DIM}none{RESET}")
+
+
 def cpu_collisions_check(o: Options, target: str) -> None:
     report = MM_DIR / "scripts" / "nri-cpu-report.py"
     if not report.is_file():
@@ -447,7 +561,8 @@ def cpu_collisions_check(o: Options, target: str) -> None:
                             env=env, check=False).returncode)
 
 
-COMMANDS = {"deploy": deploy, "undeploy": undeploy, "cpu-collisions-check": cpu_collisions_check, "_reconcile": reconcile}
+COMMANDS = {"deploy": deploy, "undeploy": undeploy, "list": list_models,
+            "cpu-collisions-check": cpu_collisions_check, "_reconcile": reconcile}
 
 
 def main() -> None:
@@ -459,10 +574,11 @@ def main() -> None:
         sys.exit(0 if command else 1)
     if command == "version":
         return print(f"model-manager {__version__}")
-    if not shutil.which("kubectl"):
+    # list needs no curl, and list --catalog reads only models.yaml.
+    if not shutil.which("kubectl") and not (command == "list" and o.catalog_only):
         abort("kubectl not found. Install it: https://kubernetes.io/docs/tasks/tools/ — then export "
               "KUBECONFIG=<path-to-kubeconfig> to connect to your cluster.")
-    if not shutil.which("curl"):
+    if not shutil.which("curl") and command != "list":
         abort("curl not found. Install it with your OS package manager.")
     if command not in COMMANDS:
         abort(f"Unknown command: {command} (run ./model-manager --help)")
