@@ -55,7 +55,7 @@ Tuning lives in the Toolkit Manager repo, because it configures the nodes:
 # nri_deployment_profile: "standard"   # minimal(8) | standard(12) | observability(16) | full(20)
 ```
 
-The profile sizes the CPU reservation for cluster services — the number in parentheses
+The profile sizes the CPU reservation for platform services — the number in parentheses
 is roughly how many cores are held back. Pick a larger profile when the cluster also runs
 observability or RAG workloads, so model pods don't contend with them.
 
