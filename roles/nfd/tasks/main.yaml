@@ -1,3 +1,0 @@
----
-- name: "nfd | Dispatch action: {{ component_action }}"
-  ansible.builtin.include_tasks: "{{ component_action }}.yaml"

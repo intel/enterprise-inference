@@ -13,14 +13,6 @@
 # =============================================================================
 
 components:
-  # Skipped on OpenShift: the cluster's NFD Operator provides NFD, and this role would
-  # install the upstream chart over it. The platform layer's node_feature_discovery
-  # checks the operator there.
-  - name: nfd
-    layer: inference
-    enabled: "{{ nfd_enabled | default(true) | bool and not (cluster_distribution | default('kubernetes') == 'openshift') }}"
-    depends_on: []
-
   - name: keycloak_config
     layer: inference
     # Both auth modes: people sign in through Keycloak; the gateway trusts its JWTs.

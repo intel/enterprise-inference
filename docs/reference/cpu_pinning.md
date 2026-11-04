@@ -115,8 +115,8 @@ mm_kubelet_threads_per_core: 1     # exported as MM_KUBELET_THREADS_PER_CORE
 
 ## Node placement
 
-Pinning decides *which cores*; node affinity decides *which node*. The `nfd` role labels
-every node with its hardware capabilities:
+Pinning decides *which cores*; node affinity decides *which node*. NFD, which the core platform
+layer installs (`node_feature_discovery`), labels every node with its hardware capabilities:
 
 ```
 feature.node.kubernetes.io/cpu-security.amx.enabled=true

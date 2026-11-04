@@ -265,6 +265,8 @@ during auto-deploy — e.g. `"--wait-timeout 1800"` to allow longer for large mo
 # nfd_version: "0.17.1"
 ```
 
+NFD is installed by the core repo's platform layer (`node_feature_discovery`), not by this
+repo; these settings are read there. On OpenShift it checks the NFD Operator instead.
 NFD runs as a DaemonSet and labels every node with its hardware capabilities:
 
 ```
