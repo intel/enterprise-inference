@@ -29,9 +29,7 @@ _PINNED_ID = re.compile(r"^[ \t]*(runAsUser|runAsGroup|fsGroup):[ \t]*[0-9]+[ \t
 def detect() -> None:
     """Resolve MM_PLATFORM and MM_LLMISVC_API_VERSION into the environment (inherited by the reconciler)."""
     if not os.environ.get("MM_PLATFORM"):
-        resources = _discover("api-resources", "--api-group=config.openshift.io", "-o", "name").split()
-        os.environ["MM_PLATFORM"] = ("openshift" if any(r.startswith("clusterversions") for r in resources)
-                                     else "kubernetes")
+        os.environ["MM_PLATFORM"] = _platform_of(_discover(*_PLATFORM_QUERY))
     if not os.environ.get("MM_LLMISVC_API_VERSION"):
         served = _discover("api-versions").split()
         old = "serving.kserve.io/v1alpha1" in served and LLMISVC_V1ALPHA2 not in served
@@ -43,6 +41,22 @@ def detect() -> None:
                            ("MM_AIGATEWAY_ENABLED", "false")):
             if not os.environ.get(key):
                 os.environ[key] = value
+
+
+def detect_platform() -> None:
+    """MM_PLATFORM alone, best effort, for list (which also works without a cluster): left unset,
+    so read as Kubernetes, when discovery fails."""
+    if not os.environ.get("MM_PLATFORM"):
+        r = k8s.run(*_PLATFORM_QUERY)
+        if r.returncode == 0 or r.stdout.strip():
+            os.environ["MM_PLATFORM"] = _platform_of(r.stdout)
+
+
+_PLATFORM_QUERY = ("api-resources", "--api-group=config.openshift.io", "-o", "name")
+
+
+def _platform_of(resources: str) -> str:
+    return "openshift" if any(r.startswith("clusterversions") for r in resources.split()) else "kubernetes"
 
 
 def _discover(*args: str) -> str:

@@ -201,17 +201,22 @@ def _engine_cli_args(o: Options) -> tuple[list[str], int]:
     return args, 1
 
 
-def workload_ready(m: Model) -> str:
-    """True once the serving pods pass probes. MainWorkloadReady, not Ready: for an LLMInferenceService
+def _ready_condition(obj: dict) -> dict | None:
+    """The condition that says the model serves. MainWorkloadReady, not Ready: for an LLMInferenceService
     Ready also needs the InferencePool Accepted, which model-manager itself patches once this is True.
     On OpenShift the Gateway controller reports the pool, so Ready covers the routes as well."""
+    conditions = {c.get("type"): c for c in (obj.get("status") or {}).get("conditions") or []}
+    if platform.is_openshift():
+        return conditions.get("Ready")
+    return conditions.get("MainWorkloadReady") or conditions.get("Ready")
+
+
+def workload_ready(m: Model) -> str:
+    """True once the model serves (see _ready_condition)."""
     obj = k8s.get_json(m.kind, m.name, "-n", m.namespace)
     if obj is None:
         return "NotFound"
-    status = {c.get("type"): c.get("status") for c in (obj.get("status") or {}).get("conditions") or []}
-    if platform.is_openshift():
-        return status.get("Ready") or "Pending"
-    return status.get("MainWorkloadReady") or status.get("Ready") or "Pending"
+    return (_ready_condition(obj) or {}).get("status") or "Pending"
 
 
 def pod_progress(m: Model) -> str:
@@ -471,8 +476,7 @@ def _catalog_server(catalog: Catalog, e: dict) -> tuple[str, str]:
 
 
 def _status(obj: dict) -> str:
-    conditions = {c.get("type"): c for c in (obj.get("status") or {}).get("conditions") or []}
-    c = conditions.get("MainWorkloadReady") or conditions.get("Ready")  # as workload_ready()
+    c = _ready_condition(obj)
     if c is None:
         return "Pending"
     return "Ready" if c.get("status") == "True" else f"Not ready ({c.get('reason')})" if c.get("reason") else "Not ready"
@@ -495,6 +499,8 @@ def _deployed(namespace: str) -> tuple[list[dict] | None, set[str]]:
         if items is None:  # unknown, not absent
             failed.add(kind)
             continue
+        if not listed:  # the cluster answers: which condition _status() reads depends on the platform
+            platform.detect_platform()
         listed = True
         for obj in items:
             spec, meta = obj.get("spec") or {}, obj.get("metadata") or {}
@@ -588,6 +594,6 @@ def main() -> None:
         abort("curl not found. Install it with your OS package manager.")
     if command not in COMMANDS:
         abort(f"Unknown command: {command} (run ./model-manager --help)")
-    if command != "list":  # list renders nothing, and must work without a cluster
+    if command != "list":  # list renders nothing and must work without a cluster: it detects as it goes
         platform.detect()
     COMMANDS[command](o, target)

@@ -340,6 +340,8 @@ def cluster(monkeypatch):
 
     def run(*args, stdin=None):
         state["calls"].append(args)
+        if args[0] == "api-resources":
+            return subprocess.CompletedProcess(args, 0, state.get("api_resources", ""), "")
         kind = args[1]
         if state["down"] or kind in state["failing"] or ("-A" in args and kind in state["denied"]):
             return subprocess.CompletedProcess(args, 1, "", "error")
@@ -348,6 +350,8 @@ def cluster(monkeypatch):
             items = [i for i in items if i["metadata"]["namespace"] == args[args.index("-n") + 1]]
         return subprocess.CompletedProcess(args, 0, json.dumps({"items": items}), "")
     monkeypatch.setenv("MM_CONFIG", str(FIXTURE_CATALOG))
+    monkeypatch.setenv("MM_PLATFORM", "")  # recorded, so the value list detects is undone after the test
+    monkeypatch.delenv("MM_PLATFORM")
     monkeypatch.setattr(k8s, "run", run)
     return state
 
@@ -380,6 +384,18 @@ def test_list_falls_back_to_the_catalog_namespace(cluster, capsys):
     assert "tmpl-inline" in out and "elsewhere" not in out
     assert ("get", "LLMInferenceService", "-l", "app.kubernetes.io/managed-by=model-manager", "-o", "json",
             "-n", "ns1") in cluster["calls"]
+
+
+@pytest.mark.parametrize("api_resources, want", [("clusterversions.config.openshift.io", r"Not ready \(NotAccepted\)"),
+                                                  ("", "Ready")])
+def test_list_status_on_openshift_covers_the_routes(cluster, capsys, api_resources, want):
+    # Healthy pods, but the Gateway rejected the route: Ready=False. Kubernetes reads MainWorkloadReady.
+    obj = _llmisvc("tmpl-inline", "ns1", "True")
+    obj["status"]["conditions"].append({"type": "Ready", "status": "False", "reason": "NotAccepted"})
+    cluster["items"]["LLMInferenceService"] = [obj]
+    cluster["api_resources"] = api_resources
+    cli.list_models(cli.Options(), "")
+    assert re.search(rf"^tmpl-inline .* {want}$", capsys.readouterr().out, re.M)
 
 
 def test_list_without_cluster_shows_unknown_status(cluster, capsys):
