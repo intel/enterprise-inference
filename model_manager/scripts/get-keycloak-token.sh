@@ -81,23 +81,24 @@ GATEWAY_IP=""
 [[ -n "$_gt_ocp" ]] || GATEWAY_IP=$(kubectl get svc -n envoy-gateway-system \
   -l gateway.envoyproxy.io/owning-gateway-name \
   --field-selector spec.type=LoadBalancer \
-  -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+  -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
 
 # On OpenShift the gateways are published through the router (passthrough
 # Routes), not a LoadBalancer: its ingress VIP, else its LoadBalancer, else (HostNetwork,
 # as on single-node clusters) the router pod's node. MM_GATEWAY_IP overrides it.
+# Each lookup may fail (no such Service, no RBAC): || true keeps set -e from exiting.
 GATEWAY_IP="${MM_GATEWAY_IP:-$GATEWAY_IP}"
 if [[ -z "$GATEWAY_IP" && -n "$_gt_ocp" ]]; then
   _gt_router=1
   GATEWAY_IP=$(kubectl get infrastructure cluster \
-    -o jsonpath='{.status.platformStatus.*.ingressIPs[0]}' 2>/dev/null)
+    -o jsonpath='{.status.platformStatus.*.ingressIPs[0]}' 2>/dev/null || true)
   [[ -n "$GATEWAY_IP" ]] || GATEWAY_IP=$(kubectl get svc -n openshift-ingress router-default \
-    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
   # The node's IP only serves the router with HostNetwork; otherwise use the *.apps DNS.
   [[ -n "$GATEWAY_IP" ]] || [[ "$(kubectl get deploy -n openshift-ingress router-default \
     -o jsonpath='{.spec.template.spec.hostNetwork}' 2>/dev/null)" != "true" ]] || GATEWAY_IP=$(kubectl get pods -n openshift-ingress \
     -l ingresscontroller.operator.openshift.io/deployment-ingresscontroller=default \
-    --field-selector=status.phase=Running -o jsonpath='{.items[0].status.hostIP}' 2>/dev/null)
+    --field-selector=status.phase=Running -o jsonpath='{.items[0].status.hostIP}' 2>/dev/null || true)
 fi
 
 if [[ -z "$GATEWAY_IP" && -z "${_gt_router:-}" ]]; then
