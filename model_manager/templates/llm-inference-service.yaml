@@ -27,8 +27,7 @@ spec:
           requests:
             cpu: "{{CPU}}"
             memory: {{MEMORY}}{{GPU_RESOURCE}}
-          limits:
-            cpu: "{{CPU}}"
+          limits:{{CPU_LIMIT}}
             memory: {{MEMORY}}{{GPU_RESOURCE}}
         startupProbe:
           httpGet:

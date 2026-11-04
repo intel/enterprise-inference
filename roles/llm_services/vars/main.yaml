@@ -21,6 +21,9 @@ __llm_mm_env_common:
   MM_NRI_ENABLED: "{{ 'true' if kubernetes_cpu_policy | default('nri-balloons') == 'nri-balloons' else 'false' }}"
   # SMT width for kubelet-static's full-pcpus-only alignment; empty = auto-detect.
   MM_KUBELET_THREADS_PER_CORE: "{{ mm_kubelet_threads_per_core | default('') | string }}"
+  # GPU deploy gate for device: gpu runtimes; resolved by accel_resource.yaml,
+  # empty unless the solutions layer is in rack-scale mode with a GPU vendor.
+  MM_ACCEL_RESOURCE: "{{ _mm_accel_resource | default('') | trim }}"
   # LiteLLM registration — only when auth_type=litellm_vkey.
   MM_LITELLM_ENABLED: "{{ __llm_mm_litellm | string | lower }}"
   MM_LITELLM_URL: "{{ ('http://litellm.' ~ (litellm_namespace | default('litellm')) ~ '.svc.cluster.local:4000') if __llm_mm_litellm | bool else '' }}"
