@@ -4,7 +4,7 @@
 > Validated on single-node OpenShift 4.22 with OpenShift AI 3.3. See
 > [Known gaps](#known-gaps) for what is not supported yet.
 
-On OpenShift the inference layer does not install KServe, the AI gateways or NFD.
+On OpenShift the inference layer does not install KServe or the AI gateways.
 OpenShift AI and the marketplace operators provide them. `install inference` checks
 that they are there, publishes OpenShift AI's inference Gateway behind Keycloak, and
 pins model pods to CPU balloons. `model-manager` then renders models for OpenShift AI.
@@ -31,7 +31,7 @@ detects. Nothing in `global_config.yaml` or `models.yaml` changes between platfo
 | Component | On OpenShift |
 |-----------|--------------|
 | `kserve` | **Checks** that OpenShift AI is installed: a DataScienceCluster with KServe `Managed`, the KServe controllers in `redhat-ods-applications`, and the LLMInferenceService and InferencePool CRDs. It installs nothing. Then it sets up the inference Gateway `openshift-ingress/openshift-ai-inference`: it creates the Gateway if it is missing, issues it a certificate for `inference.<domain>` from the platform CA (`gateway_tls_mode: custom` copies the operator's certificate instead), publishes it through a passthrough Route on `inference.<domain>`, and adds a Gateway-wide Keycloak `AuthPolicy` (Connectivity Link) when `auth_type: jwt`. Teardown does nothing. |
-| `nfd` | **Checks** that the NFD operator runs a NodeFeatureDiscovery instance, and lists the nodes that have AMX. It installs nothing, and teardown does nothing. |
+| `nfd` | Not run, on OpenShift or Kubernetes: NFD comes from the platform layer's `node_feature_discovery`, which on OpenShift checks the NFD operator's NodeFeatureDiscovery instance and lists the nodes that have AMX. |
 | `envoy_ai_gateway`, `agentgateway` | Skipped. Models are routed by OpenShift AI's inference Gateway at `/<namespace>/<model>/v1/...`. There is no unified `/v1` endpoint (AIGatewayRoute). |
 | `keycloak_config` | Unchanged, except that `kcadm` keeps its session in `/tmp`, because RHBK's `HOME=/` is not writable for the UID that the SCC assigns. |
 | `nri_cpu_balloons` (platform repo) | Grants the SCC, and selects OpenShift AI model pods into `vllm-balloon-tp1` by their `kserve.io/component=workload` label. v1alpha1 cannot annotate pods (see below). |
