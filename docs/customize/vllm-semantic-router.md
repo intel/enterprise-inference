@@ -56,7 +56,7 @@ elsewhere. `vllm_sr_expose` (`envoy` | `litellm` | `both`) overrides the choice.
 
 ### Prerequisites
 
-- The inference layer is installed with `ai_gateway_provider: envoy`, with at least one
+- Intel® Inference Toolkit is installed with `ai_gateway_provider: envoy`, with at least one
   model deployed
 - The models the router may pick are the chat models deployed in the model namespace,
   discovered at install time, or the ones listed in `vllm_sr_route_models`
@@ -86,7 +86,7 @@ The install will:
 3. Create the `semantic-router` gateway and its per-model routes
 4. With the dashboard on, publish it on the platform gateway
 5. With `auth_type: litellm_vkey`, register the router as a model in LiteLLM
-   (`vllm_sr_litellm_model_name`, default `semantic-router`; the agent toolkit sets
+   (`vllm_sr_litellm_model_name`, default `semantic-router`; Intel® Agent Toolkit sets
    `vllm-sr/auto`)
 
 `./es_auto_installer.sh validate inference` checks the router, the gateway, the
@@ -94,7 +94,7 @@ The install will:
 
 ### Verify
 
-Send a request through the routing layer, on the LiteLLM API
+Send a request through the router, on the LiteLLM API
 (`https://litellm.<base_domain_name>/v1/...`, or `https://<base_domain_name>/litellm/v1/...`
 with `routing_mode: path`; `DOMAIN` and `GATEWAY_IP` as in
 [Accessing Models](../deploy/accessing_models.md)):
@@ -127,7 +127,7 @@ curl -sk --noproxy '*' \
 
 ### Access the Dashboard
 
-Enable the dashboard with `vllm_sr_dashboard_enabled: true` (the agent toolkit turns it
+Enable the dashboard with `vllm_sr_dashboard_enabled: true` (Intel® Agent Toolkit turns it
 on). It is published through the platform gateway on its own host
 (`vllm_sr_dashboard_hostname`):
 
@@ -151,9 +151,9 @@ Prerequisites for the dashboard host:
 
 - **DNS:** `vllm-sr.<base_domain_name>` must resolve to the gateway (DNS record, or
   `/etc/hosts` on every client machine).
-- **TLS certificate:** with `gateway_tls_mode: selfsigned` the platform covers it (a
-  certificate of its own, or the wildcard one when services share the wildcard listener),
-  chained to the platform CA (`env/<env>/logs/ai-solutions-ca.crt`). A custom certificate
+- **TLS certificate:** with `gateway_tls_mode: selfsigned` a certificate Toolkit Manager
+  installs covers it (one of its own, or the wildcard one when services share the wildcard
+  listener), chained to its CA (`env/<env>/logs/ai-solutions-ca.crt`). A custom certificate
   must include the host.
 - **Corporate proxy:** add `vllm-sr.<base_domain_name>` to the browser/OS proxy bypass
   list, as for the other gateway hosts.

@@ -20,8 +20,8 @@ stack and the CLI that deploys and manages models at runtime.
 
 ## Ansible roles
 
-Each role is a component in the `inference` layer, registered in `components.yaml` and
-resolved by the core installer in dependency order.
+Each role is part of Intel® Inference Toolkit. They are registered in `components.yaml`
+under `inference`, and Toolkit Manager runs them in dependency order.
 
 | Role | Enabled when | Depends on |
 |------|--------------|------------|
@@ -36,7 +36,7 @@ resolved by the core installer in dependency order.
 | `vllm_sr` | `vllm_sr_enabled` (default `false`) and `ai_gateway_provider == envoy` | `llm_services` |
 
 > [!NOTE]
-> `nri_cpu_balloons` is **not** here — it lives in the solutions repo, because it
+> `nri_cpu_balloons` is **not** here — it lives in the Toolkit Manager repo, because it
 > configures kubelet-level settings on the nodes. See
 > [CPU Pinning & NUMA](cpu_pinning.md).
 
@@ -76,17 +76,17 @@ straight to `ai-gateway`; LiteLLM is not in the path. In **litellm_vkey** mode,
 Step-by-step packet detail, including a verified network trace, is in
 [Inference Request Flow](request_flow.md).
 
-## Integration with the solutions repo
+## Integration with Toolkit Manager
 
-The core installer clones this repo to `ext/enterprise.ai-inference/` — the branch is
-set in the solutions repo's `config/repos.yaml` — and wires it in automatically:
+Toolkit Manager clones this repo to `ext/enterprise.ai-inference/` — the branch is
+set in the Toolkit Manager repo's `config/repos.yaml` — and installs and operates it:
 
 ```
 enterprise-ai-solutions/
-├── es_auto_installer.sh          # main entry point
+├── es_auto_installer.sh          # Toolkit Manager entry point
 ├── model-manager                 # thin wrapper → ext/.../model_manager/model-manager
 ├── config/repos.yaml             # declares this repo, and which branch to clone
-├── env/<env>/global_config.yaml     # platform settings (base_domain_name, …)
+├── env/<env>/global_config.yaml     # Toolkit Manager settings (base_domain_name, …)
 ├── env/<env>/config.inference.yaml  # inference settings (auth_type, …), seeded from config.yaml
 ├── env/<env>/models.yaml            # per-environment model catalog (seeded by `init`)
 └── ext/
