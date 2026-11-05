@@ -198,7 +198,7 @@ curl -sk --noproxy '*' -N \
 
 ## Other endpoints
 
-Embedding and reranking models deployed through this layer serve on the same host:
+Embedding and reranking models deployed with this toolkit serve on the same host:
 
 | Workload | Endpoint |
 |---|---|

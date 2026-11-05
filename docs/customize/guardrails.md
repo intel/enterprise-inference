@@ -191,7 +191,7 @@ served LLM is about to receive. If the guard's context window is the smaller of 
 prompts in the gap are rejected by the guard and blocked (fail-closed) rather than screened
 — the guardrail silently becomes the request-size ceiling for the whole stack.
 
-Current pairing with the agent toolkit's default model (both 32768, so no gap):
+Current pairing with the Intel® Agent Toolkit default model (both 32768, so no gap):
 
 | | source of context length | effective |
 |---|---|---|
@@ -243,7 +243,7 @@ a sandbox mistake cannot take the guardrail down.
   lacks the `qwen3guard` entry; a name in neither fails the install
 - Free CPU/memory for the guard model (see `cpu`/`memory` on the `qwen3guard` catalog entry)
 
-### Deploy with the Inference Layer
+### Deploy with Intel® Inference Toolkit
 
 ```bash
 ./es_auto_installer.sh install inference   # or: install agent-toolkit
