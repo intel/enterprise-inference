@@ -25,12 +25,60 @@
 - name: "envoy_ai_gateway | Teardown"
   when: _eag_release.status is defined
   block:
+    # Routes first, while the controller can still release its finalizer on them;
+    # with the controller or the CRD gone first, a route deployed by model-manager
+    # keeps it and the CRD uninstall waits for it forever.
+    - name: "envoy_ai_gateway | Find all AIGatewayRoutes in namespace"
+      kubernetes.core.k8s_info:
+        api_version: aigateway.envoyproxy.io/v1beta1
+        kind: AIGatewayRoute
+        namespace: "{{ ai_gateway_namespace }}"
+      register: _aigw_routes
+      failed_when: false
+
+    - name: "envoy_ai_gateway | Delete AIGatewayRoutes"
+      kubernetes.core.k8s:
+        api_version: aigateway.envoyproxy.io/v1beta1
+        kind: AIGatewayRoute
+        name: "{{ item.metadata.name }}"
+        namespace: "{{ ai_gateway_namespace }}"
+        state: absent
+        wait: true
+        wait_timeout: 60
+      loop: "{{ _aigw_routes.resources | default([]) }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      failed_when: false
+
     - name: "envoy_ai_gateway | Uninstall controller"
       kubernetes.core.helm:
         name: aieg
         release_namespace: "{{ envoy_ai_gateway_namespace }}"
         state: absent
         wait: true
+      failed_when: false
+
+    # Fallback for a controller that was already down: nothing else can release it.
+    - name: "envoy_ai_gateway | Find AIGatewayRoutes still present"
+      kubernetes.core.k8s_info:
+        api_version: aigateway.envoyproxy.io/v1beta1
+        kind: AIGatewayRoute
+        namespace: "{{ ai_gateway_namespace }}"
+      register: _aigw_routes_left
+      failed_when: false
+
+    - name: "envoy_ai_gateway | Strip finalizers from AIGatewayRoutes"
+      kubernetes.core.k8s_json_patch:
+        api_version: aigateway.envoyproxy.io/v1beta1
+        kind: AIGatewayRoute
+        name: "{{ item.metadata.name }}"
+        namespace: "{{ ai_gateway_namespace }}"
+        patch:
+          - op: remove
+            path: /metadata/finalizers
+      loop: "{{ _aigw_routes_left.resources | default([]) | selectattr('metadata.finalizers', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
       failed_when: false
 
     - name: "envoy_ai_gateway | Uninstall CRDs Helm release"
@@ -84,40 +132,6 @@
            | selectattr('metadata.finalizers', 'contains', 'aigateway.envoyproxy.io/finalizer') | list }}
       loop_control:
         label: "{{ item.metadata.namespace }}/{{ item.metadata.name }}"
-      failed_when: false
-
-    - name: "envoy_ai_gateway | Find all AIGatewayRoutes in namespace"
-      kubernetes.core.k8s_info:
-        api_version: aigateway.envoyproxy.io/v1beta1
-        kind: AIGatewayRoute
-        namespace: "{{ ai_gateway_namespace }}"
-      register: _aigw_routes
-      failed_when: false
-
-    - name: "envoy_ai_gateway | Strip finalizers from AIGatewayRoutes"
-      kubernetes.core.k8s_json_patch:
-        api_version: aigateway.envoyproxy.io/v1beta1
-        kind: AIGatewayRoute
-        name: "{{ item.metadata.name }}"
-        namespace: "{{ ai_gateway_namespace }}"
-        patch:
-          - op: remove
-            path: /metadata/finalizers
-      loop: "{{ _aigw_routes.resources | default([]) | selectattr('metadata.finalizers', 'defined') | list }}"
-      loop_control:
-        label: "{{ item.metadata.name }}"
-      failed_when: false
-
-    - name: "envoy_ai_gateway | Delete AIGatewayRoutes"
-      kubernetes.core.k8s:
-        api_version: aigateway.envoyproxy.io/v1beta1
-        kind: AIGatewayRoute
-        name: "{{ item.metadata.name }}"
-        namespace: "{{ ai_gateway_namespace }}"
-        state: absent
-      loop: "{{ _aigw_routes.resources | default([]) }}"
-      loop_control:
-        label: "{{ item.metadata.name }}"
       failed_when: false
 
     - name: "envoy_ai_gateway | Delete external inference HTTPRoute"
