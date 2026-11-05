@@ -50,7 +50,7 @@ Applied to every model that doesn't override them.
 | `namespace` | `llm-inference` | Target namespace for deployments |
 | `runtime` | `vllm` | Engine used when a model omits one |
 | `replicas` | `1` | Replica count |
-| `require_amx` | `true` | Only schedule model pods on nodes with Intel® AMX. Relies on the NFD labels applied by the `nfd` role |
+| `require_amx` | `true` | Only schedule model pods on nodes with Intel® AMX. Relies on the NFD labels; NFD comes from the core platform layer's `node_feature_discovery` |
 
 ### `storage`
 

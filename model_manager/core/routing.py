@@ -6,11 +6,12 @@ import binascii
 import json
 import os
 import secrets
+import socket
 import time
 import urllib.error
 import urllib.request
 
-from . import k8s
+from . import k8s, platform
 from .config import MM_DIR, Model, config_value, env, gateway_ref, gateway_service, global_config, inference_config
 from .renderer import render, template
 from .ui import BOLD, CYAN, DIM, RESET, info, ok, warn
@@ -100,7 +101,10 @@ def deregister(m: Model) -> None:
 
 
 def patch_pool_status(m: Model) -> None:
-    """Mark the InferencePool Accepted so the gateway route goes live (done at ready time, after KServe creates it)."""
+    """Mark the InferencePool Accepted so the gateway route goes live (done at ready time, after KServe creates it).
+    On OpenShift the Gateway controller reports the status itself."""
+    if platform.is_openshift():
+        return
     pool = f"{m.name}-inference-pool"
     for _ in range(24):
         if k8s.succeeds("get", "inferencepool", pool, "-n", m.namespace):
@@ -249,8 +253,9 @@ def litellm_deregister(name: str) -> None:
 # ── Endpoint hints ────────────────────────────────────────────────────────────
 
 def path_mode() -> bool:
-    """routing_mode: path publishes every API on the base host, under its own path."""
-    return config_value(global_config(), "routing_mode") == "path"
+    """routing_mode: path publishes every API on the base host, under its own path. Not on OpenShift:
+    models are published on the inference Route (inference.<domain>) in both modes."""
+    return not platform.is_openshift() and config_value(global_config(), "routing_mode") == "path"
 
 
 def inference_path() -> str:
@@ -292,11 +297,26 @@ def inference_hostname() -> str:
     return ""
 
 
+def _resolves(host: str) -> bool:
+    if not host.strip():
+        return False
+    try:
+        socket.getaddrinfo(host, 443)
+        return True
+    except (OSError, UnicodeError):
+        return False
+
+
 def print_endpoints(m: Model) -> None:
     host, litellm = inference_hostname(), litellm_enabled()
-    gw_ip = k8s.out("get", "svc", "-n", env("MM_EG_GATEWAY_NS", "envoy-gateway-system"), "-l",
-                    f"gateway.envoyproxy.io/owning-gateway-name={env('MM_EG_GATEWAY_NAME', 'eg-gateway')}",
-                    "-o", "jsonpath={.items[0].status.loadBalancer.ingress[0].ip}")
+    if platform.is_openshift():
+        # Published through the router. No --resolve when the hostname resolves here, as with *.apps DNS,
+        # unless MM_GATEWAY_IP picks the address.
+        gw_ip = os.environ.get("MM_GATEWAY_IP") or ("" if _resolves(host) else platform.router_ip())
+    else:
+        gw_ip = k8s.out("get", "svc", "-n", env("MM_EG_GATEWAY_NS", "envoy-gateway-system"), "-l",
+                        f"gateway.envoyproxy.io/owning-gateway-name={env('MM_EG_GATEWAY_NAME', 'eg-gateway')}",
+                        "-o", "jsonpath={.items[0].status.loadBalancer.ingress[0].ip}")
     api = {"embed": "v1/embeddings", "rerank": "v1/score"}.get(m.category, "v1/chat/completions")
     # The AI Gateway and LiteLLM both serve every model on one URL, picked by "model" in the body.
     if gateway_enabled() or litellm:

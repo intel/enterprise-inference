@@ -14,7 +14,6 @@ stack and the CLI that deploys and manages models at runtime.
 | **Langfuse** | `roles/langfuse/` | LLM observability — request traces, token usage, prompt management |
 | **LLM services** | `roles/llm_services/` | Provisions the inference namespace and ServingRuntimes, and runs the model auto-deploy phase |
 | **Keycloak config** | `roles/keycloak_config/` | Inference realm + client for sign-in and JWT-based API auth (both auth modes) |
-| **NFD** | `roles/nfd/` | Node Feature Discovery — labels nodes with hardware capabilities (AMX, AVX512, NUMA count) |
 | **vLLM Semantic Router** | `roles/vllm_sr/`, `charts/vllm-sr/` | Opt-in classifier-based routing on a dedicated Envoy AI Gateway, plus its dashboard |
 | **Model Manager** | `model_manager/` | Bash CLI (`model-manager`) + runtime and manifest templates for the model lifecycle |
 
@@ -25,7 +24,6 @@ under `inference`, and Toolkit Manager runs them in dependency order.
 
 | Role | Enabled when | Depends on |
 |------|--------------|------------|
-| `nfd` | `nfd_enabled` (default `true`) | — |
 | `keycloak_config` | `keycloak_enabled` (default `true`; both auth modes) | — |
 | `envoy_ai_gateway` | `kserve_enabled` and `ai_gateway_provider == envoy` | — |
 | `agentgateway` | `ai_gateway_provider == agentgateway` | — |
