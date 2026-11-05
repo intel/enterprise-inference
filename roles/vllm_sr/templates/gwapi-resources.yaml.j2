@@ -27,6 +27,11 @@ spec:
       envoyService:
         type: ClusterIP
         name: {{ vllm_sr_gateway_service_name }}
+{% if (gateway_platform | default({})).envoy_proxy_image | default('', true) %}
+      envoyDeployment:
+        container:
+          image: {{ gateway_platform.envoy_proxy_image }}
+{% endif %}
 ---
 # Dedicated GatewayClass bound to the EnvoyProxy above (same Envoy Gateway
 # controller, so the AI Gateway extension — AIGatewayRoute/InferencePool — works).
