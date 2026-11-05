@@ -89,8 +89,25 @@
 
     # ── PostgreSQL credentials ────────────────────────────────────────────────
 
-    # PostgreSQL ran first (depends_on), so the secret exists now or not at all.
+    # PostgreSQL ran first (depends_on), or provides the secret below.
     - name: "langfuse | Read DB credentials secret"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: langfuse-db-secret
+        namespace: "{{ langfuse_namespace }}"
+      register: _langfuse_db_secret
+
+    # A teardown of Langfuse alone removes the copy (install langfuse --only): ask again.
+    - name: "langfuse | Database, user and secret from PostgreSQL"
+      ansible.builtin.include_role:
+        name: postgresql
+        tasks_from: consumer.yaml
+      vars:
+        postgresql_consumer: langfuse
+      when: _langfuse_db_secret.resources | default([]) | length == 0
+
+    - name: "langfuse | Read DB credentials secret again"
       kubernetes.core.k8s_info:
         api_version: v1
         kind: Secret
@@ -102,8 +119,8 @@
       ansible.builtin.assert:
         that: _langfuse_db_secret.resources | default([]) | length > 0
         fail_msg: >-
-          langfuse-db-secret not found in {{ langfuse_namespace }}. PostgreSQL creates it when
-          langfuse is enabled: run install langfuse without --only, or install postgresql first.
+          langfuse-db-secret not found in {{ langfuse_namespace }}, and PostgreSQL could not provide it:
+          install postgresql first.
         quiet: true
 
     - name: "langfuse | Wait for langfuse database to be ready (CNPG Database CRD)"

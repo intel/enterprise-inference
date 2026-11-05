@@ -239,8 +239,25 @@
     # The postgresql role creates the DB and copies credentials as
     # 'litellm-db-secret' into this namespace.
 
-    # PostgreSQL ran first (depends_on), so the secret exists now or not at all.
+    # PostgreSQL ran first (depends_on), or provides the secret below.
     - name: "litellm | Read DB credentials secret"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: litellm-db-secret
+        namespace: "{{ litellm_namespace }}"
+      register: _litellm_db_secret
+
+    # A teardown of LiteLLM alone removes the copy (install litellm --only): ask again.
+    - name: "litellm | Database, user and secret from PostgreSQL"
+      ansible.builtin.include_role:
+        name: postgresql
+        tasks_from: consumer.yaml
+      vars:
+        postgresql_consumer: litellm
+      when: _litellm_db_secret.resources | default([]) | length == 0
+
+    - name: "litellm | Read DB credentials secret again"
       kubernetes.core.k8s_info:
         api_version: v1
         kind: Secret
@@ -252,8 +269,8 @@
       ansible.builtin.assert:
         that: _litellm_db_secret.resources | default([]) | length > 0
         fail_msg: >-
-          litellm-db-secret not found in {{ litellm_namespace }}. PostgreSQL creates it when
-          litellm is enabled: run install litellm without --only, or install postgresql first.
+          litellm-db-secret not found in {{ litellm_namespace }}, and PostgreSQL could not provide it:
+          install postgresql first.
         quiet: true
 
     - name: "litellm | Wait for litellm database to be ready (CNPG Database CRD)"
