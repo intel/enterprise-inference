@@ -1,0 +1,16 @@
+---
+# Copyright (C) 2025-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+# =============================================================================
+# Layer version — enterprise.ai-inference
+# =============================================================================
+# Read by the core installer at preflight: recorded with the layer on install
+# and checked against the `requires.inference` ranges of the layers above.
+# =============================================================================
+
+schema: 1
+layer: inference
+layer_version: 1.1.0
+requires:
+  platform: ">=1.1.0,<1.2.0"
+  installer: ">=1.1.0,<2.0.0"
