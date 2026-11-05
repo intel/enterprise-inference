@@ -226,9 +226,12 @@
             envoyService:
               type: ClusterIP
               name: "{{ ai_gateway_service_name }}"
-            envoyDeployment:
-              pod:
-                affinity: "{{ _platform_affinity | default({}) }}"
+            envoyDeployment: >-
+              {{ {'pod': {'affinity': _platform_affinity | default({})}}
+                 | combine({'container': {'image': _eag_proxy_image}} if _eag_proxy_image | length > 0 else {}) }}
+  vars:
+    # The platform's patched proxy image; this EnvoyProxy replaces the release default.
+    _eag_proxy_image: "{{ (gateway_platform | default({})).envoy_proxy_image | default('', true) }}"
   when: ai_gateway_create | bool
 
 - name: "envoy_ai_gateway | Create GatewayClass for AI Gateway"
