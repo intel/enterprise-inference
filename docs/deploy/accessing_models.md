@@ -12,7 +12,7 @@ only selects the credential API clients send.
 | | **Keycloak JWT** (`auth_type: jwt`) | **LiteLLM virtual key** (`auth_type: litellm_vkey`) |
 |---|---|---|
 | **Hostname** | `inference.<base_domain_name>` (path mode: `<base_domain_name>`) | `litellm.<base_domain_name>` (path mode: `<base_domain_name>`) |
-| **Endpoint** | `https://inference.<domain>/v1/chat/completions` (path mode: `https://<domain>/inference/v1/...`) | `https://litellm.<domain>/v1/chat/completions` (path mode: `https://<domain>/litellm/v1/...`) |
+| **Endpoint** | `https://inference.<base_domain_name>/v1/chat/completions` (path mode: `https://<base_domain_name>/inference/v1/...`) | `https://litellm.<base_domain_name>/v1/chat/completions` (path mode: `https://<base_domain_name>/litellm/v1/...`) |
 | **Credential** | Keycloak OIDC JWT (`Authorization: Bearer <jwt>`) | LiteLLM master or virtual key (`Authorization: Bearer sk-...`) |
 | **Validated by** | The edge gateway, via `SecurityPolicy.jwt` | LiteLLM itself, before the request reaches a model |
 | **Also deployed** | Keycloak realm + client; LiteLLM, Langfuse, Valkey with `litellm_enabled: true` | Keycloak realm + client, LiteLLM, Langfuse, Valkey |
@@ -20,8 +20,8 @@ only selects the credential API clients send.
 
 > [!IMPORTANT]
 > The two modes serve on **different hostnames**. In `litellm_vkey` mode nothing is bound to
-> `inference.<domain>` — requests there return `404`. Use `litellm.<domain>`.
-> In `jwt` mode with `litellm_enabled: true`, `litellm.<domain>` also needs a Keycloak JWT.
+> `inference.<base_domain_name>` — requests there return `404`. Use `litellm.<base_domain_name>`.
+> In `jwt` mode with `litellm_enabled: true`, `litellm.<base_domain_name>` also needs a Keycloak JWT.
 
 Both hostnames resolve to the same edge gateway LoadBalancer IP. Set `ENV` to the
 environment you installed (`--env`, `local` by default); the LiteLLM endpoint follows
@@ -180,7 +180,7 @@ curl -sk --noproxy '*' \
 
 #### Manage keys via UI
 
-Open `https://litellm.<domain>/ui/` (login: username `admin`, password = master key) →
+Open `https://litellm.<base_domain_name>/ui/` (login: username `admin`, password = master key) →
 **Virtual Keys** tab. The UI lets you create, view spend, and revoke keys without curl.
 
 ### Observability
@@ -189,7 +189,7 @@ Request traces, token usage, and cost land in Langfuse automatically:
 
 | UI | URL | Login |
 |---|---|---|
-| Langfuse | `https://langfuse.<domain>` | `langfuse_admin_email` + `LANGFUSE_ADMIN_PASSWORD` |
+| Langfuse | `https://langfuse.<base_domain_name>` | `langfuse_admin_email` + `LANGFUSE_ADMIN_PASSWORD` |
 
 ## Streaming
 

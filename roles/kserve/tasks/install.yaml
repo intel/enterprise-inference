@@ -263,6 +263,12 @@
           {{ _kserve_crd_tpl.stdout | from_yaml_all | select
              | selectattr('kind', 'equalto', 'CustomResourceDefinition') | list }}
 
+    - name: "kserve | Check the chart rendered CRDs"
+      ansible.builtin.assert:
+        that: _kserve_crds | length > 0
+        fail_msg: "kserve-crd v{{ kserve_version }} rendered no CustomResourceDefinition; check the chart output."
+        quiet: true
+
     # Server-side: the CRDs are too large for the last-applied annotation. force_conflicts
     # takes over the fields an earlier `kubectl apply --server-side` owns.
     - name: "kserve | Apply the KServe CRDs (server-side)"
