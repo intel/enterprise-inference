@@ -257,11 +257,18 @@
       retries: "{{ helm_retries | default(3) }}"
       delay: 15
 
-    # Server-side: the CRDs are too large for the last-applied annotation.
+    - name: "kserve | Select the rendered CRDs"
+      ansible.builtin.set_fact:
+        _kserve_crds: >-
+          {{ _kserve_crd_tpl.stdout | from_yaml_all | select
+             | selectattr('kind', 'equalto', 'CustomResourceDefinition') | list }}
+
+    # Server-side: the CRDs are too large for the last-applied annotation. force_conflicts
+    # takes over the fields an earlier `kubectl apply --server-side` owns.
     - name: "kserve | Apply the KServe CRDs (server-side)"
       kubernetes.core.k8s:
         state: present
-        definition: "{{ _kserve_crd_tpl.stdout | from_yaml_all | select | list }}"
+        definition: "{{ _kserve_crds }}"
         server_side_apply:
           field_manager: ai-solutions-kserve
           force_conflicts: true
@@ -281,7 +288,7 @@
           type: Established
           status: "True"
         wait_timeout: 120
-      loop: "{{ _kserve_crd_tpl.stdout | from_yaml_all | select | list }}"
+      loop: "{{ _kserve_crds }}"
       loop_control:
         label: "{{ item.metadata.name }}"
 

@@ -11,7 +11,7 @@ only selects the credential API clients send.
 
 | | **Keycloak JWT** (`auth_type: jwt`) | **LiteLLM virtual key** (`auth_type: litellm_vkey`) |
 |---|---|---|
-| **Hostname** | `inference.<base_domain_name>` | `litellm.<base_domain_name>` |
+| **Hostname** | `inference.<base_domain_name>` (path mode: `<base_domain_name>`) | `litellm.<base_domain_name>` (path mode: `<base_domain_name>`) |
 | **Endpoint** | `https://inference.<domain>/v1/chat/completions` (path mode: `https://<domain>/inference/v1/...`) | `https://litellm.<domain>/v1/chat/completions` (path mode: `https://<domain>/litellm/v1/...`) |
 | **Credential** | Keycloak OIDC JWT (`Authorization: Bearer <jwt>`) | LiteLLM master or virtual key (`Authorization: Bearer sk-...`) |
 | **Validated by** | The edge gateway, via `SecurityPolicy.jwt` | LiteLLM itself, before the request reaches a model |
@@ -36,7 +36,7 @@ GATEWAY_IP=$(kubectl get svc -n envoy-gateway-system \
   -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}')
 
 DOMAIN=$(yq '.base_domain_name' env/$ENV/global_config.yaml)
-if [ "$(yq '.routing_mode // "subdomain"' env/$ENV/global_config.yaml)" = path ]; then
+if [ "$(yq '.routing_mode // "subdomain"' env/$ENV/global_config.yaml)" = "path" ]; then
   LITELLM_HOST=$DOMAIN;         LITELLM_URL=https://$DOMAIN/litellm
 else
   LITELLM_HOST=litellm.$DOMAIN; LITELLM_URL=https://litellm.$DOMAIN
