@@ -269,8 +269,9 @@
         fail_msg: "kserve-crd v{{ kserve_version }} rendered no CustomResourceDefinition; check the chart output."
         quiet: true
 
-    # Server-side: the CRDs are too large for the last-applied annotation. force_conflicts
-    # takes over the fields an earlier `kubectl apply --server-side` owns.
+    # Server-side: the CRDs are too large for the last-applied annotation. This role owns the
+    # KServe CRDs cluster-wide (this step runs only to install or upgrade its kserve-resources
+    # release); force_conflicts takes over the fields an earlier `kubectl apply --server-side` owns.
     - name: "kserve | Apply the KServe CRDs (server-side)"
       kubernetes.core.k8s:
         state: present

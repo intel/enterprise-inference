@@ -19,11 +19,13 @@ only selects the credential API clients send.
 | **Model selection** | `"model"` field in the request body | `"model"` field in the request body |
 
 > [!IMPORTANT]
-> The two modes serve on **different hostnames**. In `litellm_vkey` mode nothing is bound to
-> `inference.<base_domain_name>` — requests there return `404`. Use `litellm.<base_domain_name>`.
-> In `jwt` mode with `litellm_enabled: true`, `litellm.<base_domain_name>` also needs a Keycloak JWT.
+> With `routing_mode: subdomain` the two modes serve on **different hostnames**: in
+> `litellm_vkey` mode nothing is bound to `inference.<base_domain_name>` — requests there
+> return `404`; use `litellm.<base_domain_name>`. With `routing_mode: path` both share
+> `<base_domain_name>` and differ by path prefix: `/inference` (`jwt`) and `/litellm` (`litellm_vkey`).
+> In `jwt` mode with `litellm_enabled: true`, LiteLLM also needs a Keycloak JWT.
 
-Both hostnames resolve to the same edge gateway LoadBalancer IP. Set `ENV` to the
+Every hostname resolves to the same edge gateway LoadBalancer IP. Set `ENV` to the
 environment you installed (`--env`, `local` by default); the LiteLLM endpoint follows
 its `routing_mode`:
 
