@@ -26,6 +26,7 @@ models:              # 2. The models you can deploy — one entry per model
 runtimes:            # 3. The engines themselves — images, versions, shared settings
   vllm: { ... }
   openvino: { ... }
+  sglang: { ... }
 ```
 
 What that gives you:
@@ -50,7 +51,7 @@ Applied to every model that doesn't override them.
 | `namespace` | `llm-inference` | Target namespace for deployments |
 | `runtime` | `vllm` | Engine used when a model omits one |
 | `replicas` | `1` | Replica count |
-| `require_amx` | `true` | Only schedule model pods on nodes with Intel® AMX. Relies on the NFD labels applied by the `nfd` role |
+| `require_amx` | `true` | Only schedule model pods on nodes with Intel® AMX. Relies on the NFD labels applied by the `nfd` role; skipped automatically for GPU/XPU runtimes (e.g. `sglang`) |
 
 ### `storage`
 
@@ -88,6 +89,7 @@ models:
 | `model_id` | The Hugging Face repo to pull weights from |
 | `category` | Workload class — `llm`, `embed`, `rerank`, or `vlm`. Drives default args, CPU, and memory |
 | `cpu` / `memory` | Resource requests (default: from the category). `cpu: auto` sizes CPU to a NUMA node — see [below](#cpu-auto) |
+| `gpu` | Accelerators requested (default: from the category) — only for GPU/XPU runtimes such as `sglang`; one per tensor-parallel rank |
 | `replicas` | Replica count (default: 1) |
 | `tp` | Tensor parallelism — split the model across N CPU sockets |
 | `namespace` | Target namespace (default: `llm-inference`) |

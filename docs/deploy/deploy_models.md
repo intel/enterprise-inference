@@ -50,7 +50,7 @@ apply. Set `MM_FORCE_REDEPLOY=1` to force a full re-apply regardless.
 | `--hfid <hf/repo>` | Deploy any Hugging Face model directly, without a catalog entry (`--id` still works but is deprecated) |
 | `--name <name>` | Set the name to serve under (use with `--hfid`) |
 | `--as <name>` | Deploy a catalog model under a different name — run several variants at once |
-| `--server <name>` | Which engine serves the model: `vllm` (default) or `openvino` (alias: `--runtime`) |
+| `--server <name>` | Which engine serves the model: `vllm` (default), `openvino`, or `sglang` (alias: `--runtime`) |
 | `--server-version <v>` | Which version of that engine to use — see [below](#pick-an-engine-and-version) |
 | `--cpu N` | Number of CPU cores to give the model. `--cpu auto` sizes it to a NUMA node — see [CPU auto](../customize/catalog.md#cpu-auto) |
 | `--memory NGi` | Memory limit, e.g. `32Gi` |
@@ -163,7 +163,7 @@ Each `deploy` runs these steps in order:
 4. **Download weights** — a one-off Kubernetes Job pulls the model from Hugging Face
    onto that volume, skipped if the weights are already there.
 5. **Deploy** — create the serving pod: `LLMInferenceService` for vLLM,
-   `InferenceService` for OpenVINO.
+   `InferenceService` for OpenVINO and SGLang.
 6. **Register** — wire the model into the AI gateway (or LiteLLM) so it can receive
    requests.
 

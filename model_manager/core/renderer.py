@@ -118,11 +118,15 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
         if m.chat_template:
             path = f"{CHAT_TEMPLATE_DIR}/chat_template.jinja" if inline_chat_template(m) else m.chat_template
             args += ["--chat-template", path]
+    elif m.runtime == "sglang":  # SGLang's CLI (`--model-path`, `--served-model-name`) differs from vLLM's
+        args = ["--model-path", f"/models/{m.name}", "--served-model-name", m.name] + args
+    # AMX node-affinity targets CPU serving; GPU/XPU runtimes schedule on their accelerator instead.
+    require_amx = catalog.require_amx and text(pick(m.rt, "device")) != "gpu"
     common = {
         "MODEL_NAME": m.name, "NAMESPACE": m.namespace, "MODEL_URI": m.uri, "CPU": cpu, "MEMORY": m.memory,
         "REPLICAS": m.replicas, "ARGS": _list([f"        - {quote(a)}" for a in dedupe_args(args + cli_args)]),
         "ENV": _env(m, catalog, cli_args, o.env), "NRI_ANNOTATIONS": _annotations(annotations, m.kind),
-        "AFFINITY": _affinity(m.node, catalog.require_amx),
+        "AFFINITY": _affinity(m.node, require_amx),
         "EXTRA_LABELS": "".join(f"\n    {p.split('=', 1)[0]}: {quote(p.split('=', 1)[1])}" for p in o.label),
     }
     if m.kind == "LLMInferenceService":
@@ -136,8 +140,10 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
             CHAT_TEMPLATE_VOLUME=(f"    volumes:\n      - name: chat-template\n        configMap:\n"
                                   f"          name: {m.name}-chat-template\n") if inline else "")
     if m.kind == "InferenceService":
-        name = "inference-service-ovms.yaml" if m.runtime == "openvino" else "inference-service.yaml"
+        name = {"openvino": "inference-service-ovms.yaml", "sglang": "inference-service-sglang.yaml"}.get(
+            m.runtime, "inference-service.yaml")
         return render(template(name), **common, MODEL_ID=m.model_id, PVC_NAME=catalog.pvc,
-                      MODEL_FORMAT=text(pick(m.rt, "format")) or "openvino",
-                      RUNTIME_NAME=text(pick(m.rt, "runtime_name")) or f"{m.runtime}-runtime")
+                      MODEL_FORMAT=text(pick(m.rt, "format")) or m.runtime,
+                      RUNTIME_NAME=text(pick(m.rt, "runtime_name")) or f"{m.runtime}-runtime",
+                      GPU=m.gpu, ACCELERATOR_RESOURCE=text(pick(m.rt, "accelerator_resource")))
     abort(f"Unknown model kind: {m.kind}")

@@ -528,6 +528,38 @@ models:
       VLLM_CPU_SGL_KERNEL: "1"
       TORCHDYNAMO_DISABLE: "1"
 
+  # ── SGLang on Intel Arc Pro B-Series (XPU) GPUs ──────────────────────────────
+  #    GPU-backed runtime: `gpu` requests the accelerator extended resource (one
+  #    GPU per tensor-parallel rank, so keep it in sync with --tp-size); `cpu`/
+  #    `memory` size the host-side process only. See runtimes.sglang below and
+  #    model_manager/runtimes/sglang/.
+  - name: sglang-xpu-qwen3-30b-a3b-2507
+    model_id: Qwen/Qwen3-30B-A3B-Instruct-2507
+    category: llm
+    runtime: sglang
+    cpu: 8
+    memory: 64Gi
+    gpu: 4
+    args: [ "--tp-size", "4" ]
+
+  - name: sglang-xpu-qwen3-32b
+    model_id: Qwen/Qwen3-32B
+    category: llm
+    runtime: sglang
+    cpu: 8
+    memory: 64Gi
+    gpu: 4
+    args: [ "--tp-size", "4" ]
+
+  - name: sglang-xpu-deepseek-r1-distill-qwen-14b
+    model_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
+    category: llm
+    runtime: sglang
+    cpu: 8
+    memory: 32Gi
+    gpu: 2
+    args: [ "--tp-size", "2" ]
+
 
 # =============================================================================
 # Runtimes — per-engine deploy config (images, versions, env, categories)
@@ -621,3 +653,18 @@ runtimes:
         defaults: { cpu: 6, memory: "12Gi" }
       rerank:
         defaults: { cpu: 6, memory: "12Gi" }
+
+  # ── SGLang (Intel Arc Pro B-Series XPU) ───────────────────────────────────────
+  # Flat runtime (no version axis) — image + plumbing live in
+  # runtimes/sglang/values.yaml. `gpu` (per model/category) requests the
+  # GPU-backed extended resource that values.yaml's accelerator_resource names
+  # (gpu.intel.com/xe) — one accelerator per tensor-parallel rank, so keep a
+  # model's `--tp-size` arg and its `gpu:` count in sync.
+  sglang:
+    env:
+      SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN: "1"   # lets --context-length raise the model's trained max
+    categories:
+      llm:
+        args: [ --trust-remote-code, --dtype, bfloat16, --device, xpu, --attention-backend, intel_xpu,
+                --context-length, "9472", --mem-fraction-static, "0.9" ]
+        defaults: { cpu: 8, memory: "64Gi", gpu: 4 }

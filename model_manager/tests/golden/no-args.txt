@@ -10,7 +10,7 @@ Commands:
 Deploy Options:
   --id <hf/repo>       Ad-hoc deploy any HuggingFace model
   --name <name>        Override generated name (with --id)
-  --server <name>      Model server/engine: vllm (default) | openvino  (alias: --runtime)
+  --server <name>      Model server/engine: vllm (default) | openvino | sglang  (alias: --runtime)
   --server-version V   Server version (must be declared for the model if it uses servers:)
   --as <name>          Deploy under a distinct name (run multiple server/version variants at once)
   --cpu N              CPU cores

@@ -4,7 +4,7 @@
 [![Installed and operated by: Toolkit Manager](https://img.shields.io/badge/Installed%20and%20operated%20by-Toolkit%20Manager-0068B5)](https://github.com/intel/enterprise-ai-solutions)
 [![Platform: Intel® Xeon](https://img.shields.io/badge/Platform-Intel%C2%AE%20Xeon%C2%AE-0068B5)](https://www.intel.com/xeon)
 [![Serving: KServe](https://img.shields.io/badge/Serving-KServe-326CE5)](https://kserve.github.io/website/)
-[![Runtimes: vLLM · OVMS](https://img.shields.io/badge/Runtimes-vLLM%20%C2%B7%20OVMS-purple)](https://vllm.ai)
+[![Runtimes: vLLM · OVMS · SGLang](https://img.shields.io/badge/Runtimes-vLLM%20%C2%B7%20OVMS%20%C2%B7%20SGLang-purple)](https://vllm.ai)
 [![API: OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20Compatible-green)](https://platform.openai.com/docs/api-reference)
 
 **Serve any Hugging Face model on Intel® Xeon® CPUs with one command. Toolkit Manager installs and operates this toolkit.**
@@ -36,7 +36,7 @@ The result is a single OpenAI-compatible endpoint. The `model` field in the requ
 
 ## Architecture
 
-An inference request enters through the **LLM gateway**, which authenticates and authorizes it, then routes it to a serving engine — **vLLM** or **OpenVINO™ Model Server** — and returns an OpenAI-compatible response. The gateway also provides model endpoints, user and key management, token telemetry, and monitoring. It all runs on a Kubernetes-orchestrated, Helm-packaged stack over Intel® Xeon® infrastructure.
+An inference request enters through the **LLM gateway**, which authenticates and authorizes it, then routes it to a serving engine — **vLLM**, **OpenVINO™ Model Server**, or **SGLang** (on Intel® Arc™ Pro B-Series GPUs) — and returns an OpenAI-compatible response. The gateway also provides model endpoints, user and key management, token telemetry, and monitoring. It all runs on a Kubernetes-orchestrated, Helm-packaged stack over Intel® Xeon® infrastructure.
 
 <p align="center">
   <img src="docs/assets/intel-inference-toolkit-architecture.png" alt="Intel® Inference Toolkit: run and scale generative AI inference on a simplified AI stack, on Intel® GPU D-series and Intel® Xeon®, with open-source orchestration. Packaged one-click software deployment. An inference request enters the stack and an inference response leaves it. Top to bottom: API applications and services (samples, API apps and functions, OpenAI-compatible API endpoints); LLM gateway (authentication and authorization, model endpoints, user and key management, token telemetry, monitoring); inferencing engines (vLLM, SGLang, OVMS); orchestration (Kubernetes orchestrator, Helm charts); infrastructure core components (Ubuntu 22.04, Xeon and GPU software: operators, firmware, and drivers)." />

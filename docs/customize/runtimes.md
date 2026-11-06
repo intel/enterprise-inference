@@ -2,12 +2,13 @@
 
 ## What is it?
 
-A **runtime** is the engine that actually serves a model. Two are supported:
+A **runtime** is the engine that actually serves a model. Three are supported:
 
 | Runtime | Use case | Key optimizations |
 |---------|----------|-------------------|
 | **vLLM** | LLMs, VLMs | NUMA auto-bind, AMX kernels, prefix caching, chunked prefill |
 | **OpenVINO (OVMS)** | Embedding, reranking, INT4/INT8 LLMs | OpenVINO IR, MediaPipe graph |
+| **SGLang** | LLMs on Intel Arc Pro B-Series (XPU) GPUs | RadixAttention, tensor-parallel across GPUs |
 
 Each engine is configured **once**, in the `runtimes:` section at the bottom of
 `models.yaml`. That is where you define the available versions and their container
@@ -131,6 +132,67 @@ Clients always use the OpenAI `/v1/` paths. For OpenVINO-served models the AI ga
 rewrites `/v1/` → `/v3/` internally, since OVMS uses the v3 API — this is invisible to
 callers. See [Inference Request Flow](../reference/request_flow.md).
 
+## SGLang (Intel Arc Pro B-Series XPU)
+
+A **flat** runtime, like OpenVINO — no version axis.
+
+```yaml
+runtimes:
+  sglang:
+    env:
+      SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN: "1"
+    categories:
+      llm:
+        args: [ --trust-remote-code, --dtype, bfloat16, --device, xpu, --attention-backend, intel_xpu,
+                --context-length, "9472", --mem-fraction-static, "0.9" ]
+        defaults: { cpu: 8, memory: "64Gi", gpu: 4 }
+```
+
+Plumbing in `model_manager/runtimes/sglang/values.yaml`:
+
+```yaml
+image: "lmsysorg/sglang:v0.5.22-xpu"
+device: gpu
+kind: InferenceService
+format: sglang
+runtime_name: sglang-runtime                              # ClusterServingRuntime to reference
+routing: aigateway
+serving_runtime_manifest: sglang/serving-runtime.yaml     # applied on first deploy
+accelerator_resource: "gpu.intel.com/xe"                  # extended resource the Intel GPU device plugin advertises
+```
+
+### `gpu` — accelerators per model
+
+Unlike the CPU runtimes, SGLang models also set `gpu` (per model or category `defaults`):
+the number of accelerators requested via `accelerator_resource` in the container's
+`resources.limits` — one GPU per tensor-parallel rank, so keep it in sync with the
+model's `--tp-size` arg:
+
+```yaml
+- name: sglang-xpu-qwen3-32b
+  model_id: Qwen/Qwen3-32B
+  runtime: sglang
+  gpu: 4
+  args: [ "--tp-size", "4" ]
+```
+
+`cpu`/`memory` still apply — they size the host-side process that drives the
+accelerators, not the accelerators themselves.
+
+### Prerequisites
+
+The cluster needs the [Intel GPU device plugin](https://github.com/intel/intel-device-plugins-for-kubernetes)
+deployed (so nodes advertise `gpu.intel.com/xe`) and Node Feature Discovery labelling the
+Arc Pro B-Series nodes; Kubernetes schedules a model's pod onto a node with enough free
+accelerators purely from the extended-resource request, no further node affinity needed.
+
+### CPU policy
+
+GPU/XPU runtimes (`device: gpu` in the runtime's `values.yaml`) are deployed with the
+`best-effort` CPU policy by default — NUMA-aware CPU pinning targets CPU-bound serving,
+and buys nothing for a process that is bound by its accelerators. Pass `--cpu-policy`
+explicitly to override.
+
 ## Which kind of Kubernetes object?
 
 The runtime's `kind` decides what `model-manager` creates:
@@ -138,7 +200,8 @@ The runtime's `kind` decides what `model-manager` creates:
 | Runtime | Object | Template |
 |---|---|---|
 | vLLM | `LLMInferenceService` | `model_manager/templates/llm-inference-service.yaml` |
-| OpenVINO | `InferenceService` | `model_manager/templates/inference-service.yaml` |
+| OpenVINO | `InferenceService` | `model_manager/templates/inference-service-ovms.yaml` |
+| SGLang | `InferenceService` | `model_manager/templates/inference-service-sglang.yaml` |
 
 The raw `ClusterServingRuntime` manifests stay as files under
 `model_manager/runtimes/<name>/`.

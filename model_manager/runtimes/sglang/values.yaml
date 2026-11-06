@@ -1,0 +1,27 @@
+# =============================================================================
+# SGLang runtime — low-level plumbing (Intel Arc Pro B-Series XPU)
+# =============================================================================
+# SGLang deploy config (env, per-category args/defaults) lives in models.yaml →
+# runtimes.sglang. This file holds only the stable, low-level plumbing merged in
+# at load time (models.yaml wins on any key clash). SGLang is a flat runtime —
+# there is no version axis — so `image:` below is the single image every model
+# runs; requesting a version with --server-version aborts with a clear message.
+#
+# Supported plumbing keys: see model_manager/runtimes/openvino/values.yaml.
+# device: gpu additionally skips the AMX node-affinity requirement (it targets
+# CPU serving) and the CPU-pinning policy defaults to best-effort: the pod's
+# accelerators, not its handful of host CPUs, are what need scheduling.
+# =============================================================================
+
+image: "lmsysorg/sglang:v0.5.22-xpu"   # Intel Arc Pro B-Series (BMG) build of SGLang
+device: gpu
+kind: InferenceService
+format: sglang
+runtime_name: sglang-runtime                              # ClusterServingRuntime to reference
+routing: aigateway
+serving_runtime_manifest: sglang/serving-runtime.yaml     # raw CR manifest applied on first deploy
+
+# Extended resource the Intel GPU device plugin advertises for Arc Pro B-Series
+# cards; requested in the container's resources.limits, quantity = `gpu:` (the
+# model's tensor-parallel size — one accelerator per TP rank).
+accelerator_resource: "gpu.intel.com/xe"

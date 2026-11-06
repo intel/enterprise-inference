@@ -274,7 +274,10 @@ feature.node.kubernetes.io/memory-numa.node_count=2
 
 model-manager consumes these in `nodeAffinity` rules — notably the catalog's
 `require_amx: true` default, which keeps model pods off nodes without Intel® AMX.
-Disabling NFD means those affinity rules cannot be satisfied.
+Disabling NFD means those affinity rules cannot be satisfied. GPU/XPU runtimes (e.g.
+`sglang`) skip the AMX requirement automatically and instead rely on the accelerator's
+own extended resource (e.g. `gpu.intel.com/xe`, advertised by the Intel GPU device
+plugin) to schedule onto a node with a free GPU.
 
 ## Environment variables
 

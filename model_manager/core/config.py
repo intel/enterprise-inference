@@ -160,6 +160,7 @@ class Model:
     routing: str = ""
     cpu: str = ""
     memory: str = ""
+    gpu: str = ""                             # accelerators requested (runtimes with device: gpu)
     replicas: str = "1"
     node: str = ""
     chat_template: str = ""
@@ -212,6 +213,7 @@ def resolve(catalog: Catalog, target: str, o: Any) -> Model:
     defaults = pick(m.cat, "defaults", {})
     m.cpu = o.cpu or m.cpu or text(pick(defaults, "cpu", 8))
     m.memory = o.memory or m.memory or text(pick(defaults, "memory", "16Gi"))
+    m.gpu = m.gpu or text(pick(defaults, "gpu", 1))
     m.replicas = o.replicas or m.replicas
     m.node = o.node or m.node
     if o.routing:
@@ -238,7 +240,7 @@ def _from_catalog(catalog: Catalog, name: str, o: Any) -> Model:
               "as a block scalar.")
     m = Model(name=name, namespace=text(pick(e, "namespace", catalog.namespace)), kind=text(pick(e, "kind")),
               model_id=text(pick(e, "model_id")), draft_model_id=text(pick(e, "draft_model_id")),
-              cpu=text(pick(e, "cpu")), memory=text(pick(e, "memory")),
+              cpu=text(pick(e, "cpu")), memory=text(pick(e, "memory")), gpu=text(pick(e, "gpu")),
               replicas=text(pick(e, "replicas", catalog.replicas)), category=text(pick(e, "category")),
               image=text(pick(e, "image")), node=text(pick(e, "node")), routing=text(pick(e, "routing")),
               chat_template=text(pick(e, "chat_template")).rstrip("\n"),  # as legacy $(jq) did

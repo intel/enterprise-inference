@@ -16,7 +16,7 @@ from pathlib import Path
 from . import __version__, k8s, renderer, routing
 from .config import MM_DIR, Catalog, Model, is_uint, mm_path, pick, resolve, text, truthy
 from .download import download_weights
-from .policy import preflight_gate, resolve_auto_cpu, resolve_policy
+from .policy import BestEffort, preflight_gate, resolve_auto_cpu, resolve_policy
 from .ui import BOLD, CYAN, DIM, GREEN, RESET, YELLOW, abort, fmt_duration, info, ok, warn
 
 USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubernetes
@@ -34,7 +34,7 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
 {BOLD}{CYAN}Deploy Options:{RESET}
   {GREEN}--hfid{RESET} <hf/repo>     Ad-hoc deploy any HuggingFace model (--id still works, deprecated)
   {GREEN}--name{RESET} <name>        Override generated name (with --hfid)
-  {GREEN}--server{RESET} <name>      Model server/engine: vllm (default) | openvino  (alias: --runtime)
+  {GREEN}--server{RESET} <name>      Model server/engine: vllm (default) | openvino | sglang  (alias: --runtime)
   {GREEN}--server-version{RESET} V   Server version (must be declared for the model if it uses servers:)
   {GREEN}--as{RESET} <name>          Deploy under a distinct name (run multiple server/version variants at once)
   {GREEN}--cpu{RESET} N              CPU cores
@@ -316,6 +316,8 @@ def deploy(o: Options, target: str) -> None:
     if m.node:
         info(f"  Node: {m.node}")
     policy = resolve_policy(o.cpu_policy, m.node)
+    if not o.cpu_policy and text(pick(m.rt, "device")) == "gpu" and policy.name != "best-effort":
+        policy = BestEffort()  # GPU/XPU: the host CPUs just support the accelerator, no NUMA pinning needed
     info(f"  CPU policy: {policy.name}")
     cli_args, tp = _engine_cli_args(o)
     resolve_auto_cpu(policy, m, tp)

@@ -1,0 +1,83 @@
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: {{MODEL_NAME}}
+  namespace: {{NAMESPACE}}
+  labels:
+    app.kubernetes.io/name: {{MODEL_NAME}}
+    app.kubernetes.io/managed-by: model-manager{{EXTRA_LABELS}}
+spec:
+  predictor:
+{{NRI_ANNOTATIONS}}    minReplicas: {{REPLICAS}}
+    maxReplicas: {{REPLICAS}}
+    # supplementalGroups: the host's render (44) and video (990) groups, so the
+    # container can open /dev/dri/renderD* without running fully privileged.
+    securityContext:
+      supplementalGroups: [44, 990]
+    model:
+      modelFormat:
+        name: sglang
+      runtime: {{RUNTIME_NAME}}
+      # Overrides the image's default entrypoint with the `sglang serve` subcommand;
+      # ARGS below (model path, served name, tp-size, device flags, ...) follow it.
+      command: ["sglang", "serve"]
+      args: {{ARGS}}
+      env: {{ENV}}
+      resources:
+        requests:
+          cpu: "{{CPU}}"
+          memory: {{MEMORY}}
+          {{ACCELERATOR_RESOURCE}}: "{{GPU}}"
+        limits:
+          cpu: "{{CPU}}"
+          memory: {{MEMORY}}
+          {{ACCELERATOR_RESOURCE}}: "{{GPU}}"
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+          - ALL
+        # SGLang on XPU needs root to access the render node; see supplementalGroups above.
+        runAsNonRoot: false
+        runAsUser: 0
+        seccompProfile:
+          type: RuntimeDefault
+      # SGLang's /health round-trips through the scheduler and takes ~1s on XPU, so the
+      # startup probe's generous timeout avoids the 1s-default restart loop; failureThreshold
+      # 180 @ 20s gives up to an hour for the first weight download + load.
+      startupProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        periodSeconds: 20
+        timeoutSeconds: 10
+        failureThreshold: 180
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        periodSeconds: 15
+        timeoutSeconds: 10
+        failureThreshold: 3
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        periodSeconds: 30
+        timeoutSeconds: 10
+        failureThreshold: 5
+      volumeMounts:
+        - name: model-storage
+          mountPath: /models
+        - name: shm
+          mountPath: /dev/shm
+    volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: {{PVC_NAME}}
+      # Tensor-parallel workers exchange data through /dev/shm.
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi
+{{AFFINITY}}

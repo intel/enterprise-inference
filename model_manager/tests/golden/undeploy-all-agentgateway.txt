@@ -69,6 +69,15 @@
 [INFO ]  Undeploying qwen2-5-coder-14b-specdec
 [INFO ]  Waiting for qwen2-5-coder-14b-specdec pods to terminate (timeout: 180s)...
 [  OK ]  qwen2-5-coder-14b-specdec undeployed (all pods terminated, CPUs released)
+[INFO ]  Undeploying sglang-xpu-qwen3-30b-a3b-2507
+[INFO ]  Waiting for sglang-xpu-qwen3-30b-a3b-2507 pods to terminate (timeout: 180s)...
+[  OK ]  sglang-xpu-qwen3-30b-a3b-2507 undeployed (all pods terminated, CPUs released)
+[INFO ]  Undeploying sglang-xpu-qwen3-32b
+[INFO ]  Waiting for sglang-xpu-qwen3-32b pods to terminate (timeout: 180s)...
+[  OK ]  sglang-xpu-qwen3-32b undeployed (all pods terminated, CPUs released)
+[INFO ]  Undeploying sglang-xpu-deepseek-r1-distill-qwen-14b
+[INFO ]  Waiting for sglang-xpu-deepseek-r1-distill-qwen-14b pods to terminate (timeout: 180s)...
+[  OK ]  sglang-xpu-deepseek-r1-distill-qwen-14b undeployed (all pods terminated, CPUs released)
 --- stderr
 --- kubectl
 $ kubectl delete LLMInferenceService qwen3-0-6b -n llm-inference --ignore-not-found
@@ -140,3 +149,12 @@ $ kubectl delete httproute aigw-qwen3-coder-30b-specdec -n llm-inference --ignor
 $ kubectl delete LLMInferenceService qwen2-5-coder-14b-specdec -n llm-inference --ignore-not-found
 $ kubectl delete configmap qwen2-5-coder-14b-specdec-chat-template -n llm-inference --ignore-not-found
 $ kubectl delete httproute aigw-qwen2-5-coder-14b-specdec -n llm-inference --ignore-not-found
+$ kubectl delete InferenceService sglang-xpu-qwen3-30b-a3b-2507 -n llm-inference --ignore-not-found
+$ kubectl delete configmap sglang-xpu-qwen3-30b-a3b-2507-chat-template -n llm-inference --ignore-not-found
+$ kubectl delete httproute direct-sglang-xpu-qwen3-30b-a3b-2507 -n llm-inference --ignore-not-found
+$ kubectl delete InferenceService sglang-xpu-qwen3-32b -n llm-inference --ignore-not-found
+$ kubectl delete configmap sglang-xpu-qwen3-32b-chat-template -n llm-inference --ignore-not-found
+$ kubectl delete httproute direct-sglang-xpu-qwen3-32b -n llm-inference --ignore-not-found
+$ kubectl delete InferenceService sglang-xpu-deepseek-r1-distill-qwen-14b -n llm-inference --ignore-not-found
+$ kubectl delete configmap sglang-xpu-deepseek-r1-distill-qwen-14b-chat-template -n llm-inference --ignore-not-found
+$ kubectl delete httproute direct-sglang-xpu-deepseek-r1-distill-qwen-14b -n llm-inference --ignore-not-found

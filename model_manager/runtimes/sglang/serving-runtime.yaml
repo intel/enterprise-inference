@@ -1,0 +1,42 @@
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: sglang-runtime
+  labels:
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  annotations:
+    prometheus.kserve.io/port: "8000"
+    prometheus.kserve.io/path: "/metrics"
+  supportedModelFormats:
+    - name: sglang
+      autoSelect: true
+      priority: 1
+      version: "1"
+  protocolVersions:
+    - v1
+  containers:
+    - name: kserve-container
+      # {{RUNTIME_IMAGE}} is filled from the runtime's `image:` (runtimes/sglang/
+      # values.yaml, flat — SGLang on XPU has no version axis).
+      image: {{RUNTIME_IMAGE}}
+      command: ["sglang", "serve"]
+      args: []
+      ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+      resources:
+        requests:
+          cpu: "4"
+          memory: 8Gi
+        limits:
+          cpu: "4"
+          memory: 8Gi
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: false
+        runAsUser: 0
+        capabilities:
+          drop:
+            - ALL

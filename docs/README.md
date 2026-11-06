@@ -23,7 +23,7 @@ Add models, choose engines and versions, and change any setting.
 | Guide | What it covers |
 |-------|----------------|
 | [Model Catalog](customize/catalog.md) | The `models.yaml` catalog — every field, and auto-deploy at install time |
-| [Runtimes](customize/runtimes.md) | vLLM and OpenVINO — versions, images, and per-workload defaults |
+| [Runtimes](customize/runtimes.md) | vLLM, OpenVINO, and SGLang — versions, images, and per-workload defaults |
 | [Configuration](customize/configuration.md) | Every option in `config.yaml`, plus the `MM_*` environment variables |
 | [Guardrails](customize/guardrails.md) | Content-safety screening of LiteLLM requests with a guard model (Qwen3Guard) |
 | [Hybrid Router](customize/hybrid-router.md) | Complexity-tier and bandit routing behind one virtual model in LiteLLM |
