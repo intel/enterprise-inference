@@ -11,33 +11,43 @@ only selects the credential API clients send.
 
 | | **Keycloak JWT** (`auth_type: jwt`) | **LiteLLM virtual key** (`auth_type: litellm_vkey`) |
 |---|---|---|
-| **Hostname** | `inference.<base_domain_name>` | `litellm.<base_domain_name>` |
-| **Endpoint** | `https://inference.<domain>/v1/chat/completions` | `https://litellm.<domain>/v1/chat/completions` |
+| **Hostname** | `inference.<base_domain_name>` (path mode: `<base_domain_name>`) | `litellm.<base_domain_name>` (path mode: `<base_domain_name>`) |
+| **Endpoint** | `https://inference.<base_domain_name>/v1/chat/completions` (path mode: `https://<base_domain_name>/inference/v1/...`) | `https://litellm.<base_domain_name>/v1/chat/completions` (path mode: `https://<base_domain_name>/litellm/v1/...`) |
 | **Credential** | Keycloak OIDC JWT (`Authorization: Bearer <jwt>`) | LiteLLM master or virtual key (`Authorization: Bearer sk-...`) |
 | **Validated by** | The edge gateway, via `SecurityPolicy.jwt` | LiteLLM itself, before the request reaches a model |
 | **Also deployed** | Keycloak realm + client; LiteLLM, Langfuse, Valkey with `litellm_enabled: true` | Keycloak realm + client, LiteLLM, Langfuse, Valkey |
 | **Model selection** | `"model"` field in the request body | `"model"` field in the request body |
 
 > [!IMPORTANT]
-> The two modes serve on **different hostnames**. In `litellm_vkey` mode nothing is bound to
-> `inference.<domain>` — requests there return `404`. Use `litellm.<domain>`.
-> In `jwt` mode with `litellm_enabled: true`, `litellm.<domain>` also needs a Keycloak JWT.
+> With `routing_mode: subdomain` the two modes serve on **different hostnames**: in
+> `litellm_vkey` mode nothing is bound to `inference.<base_domain_name>` — requests there
+> return `404`; use `litellm.<base_domain_name>`. With `routing_mode: path` both share
+> `<base_domain_name>` and differ by path prefix: `/inference` (`jwt`) and `/litellm` (`litellm_vkey`).
+> In `jwt` mode with `litellm_enabled: true`, LiteLLM also needs a Keycloak JWT.
 
-Both hostnames resolve to the same edge gateway LoadBalancer IP:
+Every hostname resolves to the same edge gateway LoadBalancer IP. Set `ENV` to the
+environment you installed (`--env`, `local` by default); the LiteLLM endpoint follows
+its `routing_mode`:
 
 ```bash
-export KUBECONFIG=$(pwd)/env/local/kubeconfig.yaml
+ENV=local
+export KUBECONFIG=$(pwd)/env/$ENV/kubeconfig.yaml
 
 GATEWAY_IP=$(kubectl get svc -n envoy-gateway-system \
   -l gateway.envoyproxy.io/owning-gateway-name=eg-gateway \
   -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}')
 
-DOMAIN=$(yq '.base_domain_name' env/local/global_config.yaml)
+DOMAIN=$(yq '.base_domain_name' env/$ENV/global_config.yaml)
+if [ "$(yq '.routing_mode // "subdomain"' env/$ENV/global_config.yaml)" = "path" ]; then
+  LITELLM_HOST=$DOMAIN;         LITELLM_URL=https://$DOMAIN/litellm
+else
+  LITELLM_HOST=litellm.$DOMAIN; LITELLM_URL=https://litellm.$DOMAIN
+fi
 ```
 
 The examples below use `curl --resolve` so the request carries the correct `Host` and
 SNI without editing `/etc/hosts`. The installer's self-signed CA is at
-`env/local/logs/ai-solutions-ca.crt` — pass `--cacert <that path>` to verify the chain
+`env/$ENV/logs/ai-solutions-ca.crt` — pass `--cacert <that path>` to verify the chain
 properly instead of using `-k`.
 
 ## Keycloak JWT mode (default)
@@ -47,7 +57,7 @@ cluster, and exchanges them for a JWT:
 
 ```bash
 source ./ext/enterprise.ai-inference/model_manager/scripts/get-keycloak-token.sh
-# Exports: TOKEN, GATEWAY_IP, GATEWAY_DOMAIN
+# Exports: TOKEN, GATEWAY_IP, GATEWAY_DOMAIN, GATEWAY_URL (path-aware)
 ```
 
 Call the model:
@@ -56,9 +66,9 @@ Call the model:
 curl -sk --noproxy '*' \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  --resolve "inference.${DOMAIN}:443:${GATEWAY_IP}" \
+  --resolve "${GATEWAY_DOMAIN}:443:${GATEWAY_IP}" \
   -d '{"model":"qwen3-0-6b","messages":[{"role":"user","content":"Hello!"}],"max_tokens":64}' \
-  "https://inference.${DOMAIN}/v1/chat/completions"
+  "${GATEWAY_URL}/v1/chat/completions"
 ```
 
 List the models the gateway will route to:
@@ -66,8 +76,8 @@ List the models the gateway will route to:
 ```bash
 curl -sk --noproxy '*' \
   -H "Authorization: Bearer $TOKEN" \
-  --resolve "inference.${DOMAIN}:443:${GATEWAY_IP}" \
-  "https://inference.${DOMAIN}/v1/models"
+  --resolve "${GATEWAY_DOMAIN}:443:${GATEWAY_IP}" \
+  "${GATEWAY_URL}/v1/models"
 ```
 
 > [!NOTE]
@@ -99,9 +109,9 @@ Call the model:
 curl -sk --noproxy '*' \
   -H "Authorization: Bearer $MASTER_KEY" \
   -H "Content-Type: application/json" \
-  --resolve "litellm.${DOMAIN}:443:${GATEWAY_IP}" \
+  --resolve "${LITELLM_HOST}:443:${GATEWAY_IP}" \
   -d '{"model":"qwen3-0-6b","messages":[{"role":"user","content":"Hello!"}],"max_tokens":64}' \
-  "https://litellm.${DOMAIN}/v1/chat/completions"
+  "${LITELLM_URL}/v1/chat/completions"
 ```
 
 List the models registered with LiteLLM — every model that `model-manager deploy`
@@ -110,8 +120,8 @@ registered appears here:
 ```bash
 curl -sk --noproxy '*' \
   -H "Authorization: Bearer $MASTER_KEY" \
-  --resolve "litellm.${DOMAIN}:443:${GATEWAY_IP}" \
-  "https://litellm.${DOMAIN}/v1/models"
+  --resolve "${LITELLM_HOST}:443:${GATEWAY_IP}" \
+  "${LITELLM_URL}/v1/models"
 ```
 
 ### Virtual keys
@@ -122,8 +132,8 @@ instead — with its own model allow-list, budget, and expiry:
 ```bash
 # Create — returns {"key": "sk-..."}
 VIRTUAL_KEY=$(curl -sk --noproxy '*' \
-  --resolve "litellm.${DOMAIN}:443:${GATEWAY_IP}" \
-  "https://litellm.${DOMAIN}/key/generate" \
+  --resolve "${LITELLM_HOST}:443:${GATEWAY_IP}" \
+  "${LITELLM_URL}/key/generate" \
   -H "Authorization: Bearer ${MASTER_KEY}" \
   -H "Content-Type: application/json" \
   -d '{"models":["qwen3-0-6b"],"key_alias":"team-a","max_budget":5,"duration":"24h"}' \
@@ -136,9 +146,9 @@ Use the virtual key exactly like the master key — swap `$MASTER_KEY` for `$VIR
 curl -sk --noproxy '*' \
   -H "Authorization: Bearer $VIRTUAL_KEY" \
   -H "Content-Type: application/json" \
-  --resolve "litellm.${DOMAIN}:443:${GATEWAY_IP}" \
+  --resolve "${LITELLM_HOST}:443:${GATEWAY_IP}" \
   -d '{"model":"qwen3-0-6b","messages":[{"role":"user","content":"Hello!"}],"max_tokens":64}' \
-  "https://litellm.${DOMAIN}/v1/chat/completions"
+  "${LITELLM_URL}/v1/chat/completions"
 ```
 
 A request with an unknown or revoked key is rejected with `401` by LiteLLM before
@@ -149,22 +159,22 @@ anything reaches a model. A key used for a model outside its allow-list is rejec
 ```bash
 # List (includes alias, allow-list, budget, and spend to date)
 curl -sk --noproxy '*' \
-  --resolve "litellm.${DOMAIN}:443:${GATEWAY_IP}" \
-  "https://litellm.${DOMAIN}/key/list?return_full_object=true" \
+  --resolve "${LITELLM_HOST}:443:${GATEWAY_IP}" \
+  "${LITELLM_URL}/key/list?return_full_object=true" \
   -H "Authorization: Bearer ${MASTER_KEY}"
 
 # Update (e.g. extend budget)
 curl -sk --noproxy '*' \
-  --resolve "litellm.${DOMAIN}:443:${GATEWAY_IP}" \
-  "https://litellm.${DOMAIN}/key/update" \
+  --resolve "${LITELLM_HOST}:443:${GATEWAY_IP}" \
+  "${LITELLM_URL}/key/update" \
   -H "Authorization: Bearer ${MASTER_KEY}" \
   -H "Content-Type: application/json" \
   -d '{"key":"sk-...","max_budget":20}'
 
 # Revoke
 curl -sk --noproxy '*' \
-  --resolve "litellm.${DOMAIN}:443:${GATEWAY_IP}" \
-  "https://litellm.${DOMAIN}/key/delete" \
+  --resolve "${LITELLM_HOST}:443:${GATEWAY_IP}" \
+  "${LITELLM_URL}/key/delete" \
   -H "Authorization: Bearer ${MASTER_KEY}" \
   -H "Content-Type: application/json" \
   -d '{"keys":["sk-..."]}'
@@ -172,7 +182,7 @@ curl -sk --noproxy '*' \
 
 #### Manage keys via UI
 
-Open `https://litellm.<domain>/ui/` (login: username `admin`, password = master key) →
+Open `https://litellm.<base_domain_name>/ui/` (login: username `admin`, password = master key) →
 **Virtual Keys** tab. The UI lets you create, view spend, and revoke keys without curl.
 
 ### Observability
@@ -181,7 +191,7 @@ Request traces, token usage, and cost land in Langfuse automatically:
 
 | UI | URL | Login |
 |---|---|---|
-| Langfuse | `https://langfuse.<domain>` | `langfuse_admin_email` + `LANGFUSE_ADMIN_PASSWORD` |
+| Langfuse | `https://langfuse.<base_domain_name>` | `langfuse_admin_email` + `LANGFUSE_ADMIN_PASSWORD` |
 
 ## Streaming
 
@@ -191,9 +201,9 @@ Both modes support server-sent event streaming — add `"stream": true`:
 curl -sk --noproxy '*' -N \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  --resolve "inference.${DOMAIN}:443:${GATEWAY_IP}" \
+  --resolve "${GATEWAY_DOMAIN}:443:${GATEWAY_IP}" \
   -d '{"model":"qwen3-0-6b","messages":[{"role":"user","content":"Count to five."}],"stream":true}' \
-  "https://inference.${DOMAIN}/v1/chat/completions"
+  "${GATEWAY_URL}/v1/chat/completions"
 ```
 
 ## Other endpoints
