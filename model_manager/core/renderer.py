@@ -139,14 +139,19 @@ def _volumes(m: Model) -> tuple[str, str]:
     return "        volumeMounts:\n" + "".join(mounts), "    volumes:\n" + "".join(volumes)
 
 
+def gpu_toleration(m: Model, indent: int) -> str:
+    """The toleration for the taint GPU nodes carry, at a pod spec's indent; empty on CPU."""
+    key = text(pick(m.rt, "accelerator_toleration_key")) if m.gpu else ""
+    pad = " " * indent
+    return f"{pad}tolerations:\n{pad}  - key: {key}\n{pad}    operator: Exists\n{pad}    effect: NoSchedule" if key else ""
+
+
 def _gpu(m: Model, affinity: str) -> tuple[str, str]:
     """The accelerator line appended to requests and limits, and the toleration; both empty on CPU."""
     if not m.gpu:
         return "", ""
-    resource, key = m.accel_resource, text(pick(m.rt, "accelerator_toleration_key"))
+    resource, toleration = m.accel_resource, gpu_toleration(m, 4)
     limit = f'\n            {resource}: "{m.gpus}"' if resource else ""
-    toleration = (f"    tolerations:\n      - key: {key}\n        operator: Exists\n        effect: NoSchedule"
-                  if key else "")
     return limit, ("\n" if affinity and toleration else "") + toleration
 
 
