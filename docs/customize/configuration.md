@@ -2,11 +2,11 @@
 
 ## What is this?
 
-`config.yaml` at this repo's root holds the settings for the **inference layer** —
+`config.yaml` at this repo's root holds the settings for **Intel® Inference Toolkit** —
 which AI gateway to use, which KServe and LiteLLM versions to install, hostnames, and
 the cluster's CPU-pinning policy.
 
-The core installer loads it as Ansible extra vars:
+Toolkit Manager loads it as Ansible extra vars:
 
 ```
 -e @ext/enterprise.ai-inference/config.yaml
@@ -14,14 +14,14 @@ The core installer loads it as Ansible extra vars:
 
 ### How it fits together
 
-Three layers, each overriding the one before it:
+Three levels, each overriding the one before it:
 
 ```
 roles/<name>/defaults/main.yaml     role defaults — the baseline
         ↓
-config.yaml  (this repo)            inference-layer settings
+config.yaml  (this repo)            toolkit settings
         ↓
-env/<name>/global_config.yaml       platform settings (base_domain_name, auth_provider, …)
+env/<name>/global_config.yaml       Toolkit Manager settings (base_domain_name, auth_provider, …)
         ↓
 -e on the command line              one-off override
 ```
@@ -29,8 +29,8 @@ env/<name>/global_config.yaml       platform settings (base_domain_name, auth_pr
 > [!IMPORTANT]
 > `config.yaml` is checked into this repo, so it applies to **every** environment.
 > Anything environment-specific — domain, auth provider, storage — belongs in the
-> platform's `env/<name>/global_config.yaml` instead. See the
-> [solutions Configuration Reference](https://github.com/intel/enterprise-ai-solutions/blob/main/docs/customize/configuration.md).
+> Toolkit Manager's `env/<name>/global_config.yaml` instead. See the
+> [Toolkit Manager configuration reference](https://github.com/intel/enterprise-ai-solutions/blob/main/docs/customize/configuration.md).
 
 ### Do I need to change anything?
 
@@ -39,7 +39,7 @@ No. The defaults deploy a working inference stack. Reach for this file when:
 | If you want to… | Change |
 |---|---|
 | Use agentgateway instead of Envoy AI Gateway | `ai_gateway_provider: "agentgateway"` |
-| Turn the content-safety guardrail on (off by default; the Agent Toolkit turns it on) | `guardrails_enabled: true` |
+| Turn the content-safety guardrail on (off by default; Intel® Agent Toolkit turns it on) | `guardrails_enabled: true` |
 | Route by prompt complexity inside LiteLLM | `hybrid_router_enabled: true` |
 | Route with the vLLM Semantic Router | `vllm_sr_enabled: true` |
 | Apply changed LiteLLM settings to an installed release | `litellm_reconcile: true` |
@@ -63,7 +63,7 @@ ai_gateway_provider: "envoy"          # envoy | agentgateway
 | Value | What it deploys |
 |---|---|
 | `envoy` (default) | Envoy AI Gateway — `AIGatewayRoute` CRDs, EPP endpoint picker |
-| `agentgateway` | agentgateway — native Gateway API `HTTPRoute` → `InferencePool`, plus MCP / A2A support for the agentic layer |
+| `agentgateway` | agentgateway — native Gateway API `HTTPRoute` → `InferencePool`, plus MCP / A2A support for Intel® Agent Toolkit |
 
 ```yaml
 # Envoy AI Gateway (when ai_gateway_provider=envoy)
@@ -77,7 +77,7 @@ envoy_ai_gateway_namespace: "envoy-ai-gateway-system"
 
 ## Hostnames
 
-Every hostname defaults to a prefix on the platform's `base_domain_name`.
+Every hostname defaults to a prefix on Toolkit Manager's `base_domain_name`.
 
 | Setting | Default | Serves |
 |---|---|---|
@@ -93,8 +93,7 @@ Every hostname defaults to a prefix on the platform's `base_domain_name`.
 
 ## Keycloak
 
-The realm and client are owned by this solution; Keycloak itself is deployed by the
-platform.
+The realm and client belong to this toolkit. Toolkit Manager deploys Keycloak.
 
 ```yaml
 keycloak_realm: "inference"
@@ -113,7 +112,7 @@ These roles run only when `auth_provider` is not `litellm`.
 ```
 
 KServe runs in **Standard** mode — direct pod-based serving. It requires cert-manager and
-Envoy Gateway, both installed by the core platform. Standard is the validated and
+Envoy Gateway, both installed by Toolkit Manager. Standard is the validated and
 supported mode.
 
 ## LiteLLM and Langfuse
@@ -186,7 +185,7 @@ kubernetes_cpu_policy: "nri-balloons"   # nri-balloons | kubelet-static | best-e
 
 > [!WARNING]
 > This must match the value the cluster was **installed** with. It decides both how
-> kubelet is configured (solutions repo) and how model manifests are rendered (this
+> kubelet is configured (Toolkit Manager repo) and how model manifests are rendered (this
 > repo). Changing it on an existing cluster requires re-running
 > `./es_auto_installer.sh install kubernetes` so kubelet is reconfigured.
 
@@ -203,7 +202,7 @@ Tuning, per policy:
 
 Under `kubelet-static`, model pods are rendered as Guaranteed QoS (integer `cpu`,
 requests == limits) so kubelet's static CPU manager grants them exclusive whole cores.
-With `full-pcpus-only` enabled (the solutions default) a pod's `cpu` request must be a
+With `full-pcpus-only` enabled (the Toolkit Manager default) a pod's `cpu` request must be a
 multiple of the SMT width or kubelet rejects it with `SMTAlignmentError`; model-manager
 rounds `cpu` up to satisfy this.
 
@@ -227,8 +226,8 @@ llm_services_deploy_models: false      # run the model auto-deploy phase
 > has no effect until you also set this to `true`. See
 > [Auto-deploy on install](catalog.md#auto-deploy-on-install).
 
-`llm_services_autodeploy_models` is for a solution layer that needs a model to be up — the
-agent toolkit sets its default model here. Those models, and the guardrail's guard model
+`llm_services_autodeploy_models` is for another toolkit that needs a model to be up — Intel®
+Agent Toolkit sets its default model here. Those models, and the guardrail's guard model
 when the guardrail is on (deployed first), deploy even with `llm_services_deploy_models:
 false`. A name `env/<env>/models.yaml` lacks is taken from the shipped
 `model_manager/models.yaml`; a name neither has is reported — fatal for the guard model, or
@@ -271,7 +270,7 @@ Disabling NFD means those affinity rules cannot be satisfied.
 | `HF_TOKEN` | Hugging Face token for gated models |
 | `MM_CONFIG` | Path to the model catalog (`models.yaml`) |
 | `MM_CHAT_TEMPLATES` | Directory a model's relative `chat_template_file` is read from (default `model_manager/chat-templates`) |
-| `MM_GLOBAL_CONFIG` | Path to the platform's `global_config.yaml` |
+| `MM_GLOBAL_CONFIG` | Path to Toolkit Manager's `global_config.yaml` |
 | `MM_INFERENCE_HOSTNAME` | Override the resolved endpoint hostname in either auth mode |
 | `MM_INFERENCE_GATEWAY` / `MM_INFERENCE_GATEWAY_NS` | Gateway a model's routes attach to (default `ai-gateway` in `llm-inference`) |
 | `MM_INFERENCE_GATEWAY_SVC_NS` | Namespace of that gateway's Service, which LiteLLM calls (default: `MM_INFERENCE_GATEWAY_NS`, else `envoy-gateway-system`) |

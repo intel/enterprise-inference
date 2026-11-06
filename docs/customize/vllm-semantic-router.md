@@ -55,7 +55,7 @@ router is reached in-cluster at
 
 ### Prerequisites
 
-- The inference layer is installed with `ai_gateway_provider: envoy`, with at least one
+- Intel® Inference Toolkit is installed with `ai_gateway_provider: envoy`, with at least one
   model deployed
 - The models the router may pick are the chat models deployed in the model namespace,
   discovered at install time, or the ones listed in `vllm_sr_route_models`
@@ -83,7 +83,7 @@ The install will:
 3. Create the `semantic-router` gateway and its per-model routes
 4. With the dashboard on, publish it on `eg-gateway`
 5. With `auth_provider: litellm`, register the router as a model in LiteLLM
-   (`vllm_sr_litellm_model_name`, default `semantic-router`; the agent toolkit sets
+   (`vllm_sr_litellm_model_name`, default `semantic-router`; Intel® Agent Toolkit sets
    `vllm-sr/auto`)
 
 `./es_auto_installer.sh validate inference` checks the router, the gateway, the
@@ -91,7 +91,7 @@ The install will:
 
 ### Verify
 
-Send a request through the routing layer, on the LiteLLM API
+Send a request through the router, on the LiteLLM API
 (`https://litellm.<base_domain_name>/v1/...`; `DOMAIN` and `GATEWAY_IP` as in
 [Accessing Models](../deploy/accessing_models.md)):
 
@@ -123,7 +123,7 @@ curl -sk --noproxy '*' \
 
 ### Access the Dashboard
 
-Enable the dashboard with `vllm_sr_dashboard_enabled: true` (the agent toolkit turns it
+Enable the dashboard with `vllm_sr_dashboard_enabled: true` (Intel® Agent Toolkit turns it
 on). It is published on `eg-gateway` on its own host
 (`vllm_sr_dashboard_hostname`):
 
@@ -147,8 +147,8 @@ Prerequisites for the dashboard host:
 
 - **DNS:** `vllm-sr.<base_domain_name>` must resolve to the gateway (DNS record, or
   `/etc/hosts` on every client machine).
-- **TLS certificate:** with `gateway_tls_mode: selfsigned` the platform's wildcard
-  certificate (`*.<base_domain_name>`) covers it, chained to the platform CA
+- **TLS certificate:** with `gateway_tls_mode: selfsigned` the wildcard
+  certificate Toolkit Manager installs (`*.<base_domain_name>`) covers it, chained to its CA
   (`env/<env>/logs/ai-solutions-ca.crt`). A custom certificate must include the host.
 - **Corporate proxy:** add `vllm-sr.<base_domain_name>` to the browser/OS proxy bypass
   list, as for the other gateway hosts.

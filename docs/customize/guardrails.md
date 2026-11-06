@@ -1,6 +1,6 @@
 # Guardrails — Safety Content Moderation
 
-**Guardrails** provides safety content moderation for LLM requests that go through LiteLLM. It screens chat requests through a dedicated guard model before they reach the main LLM, blocking unsafe or policy-violating content. It is off by default; the Agent Toolkit layer turns it on with `auth_provider: litellm`, where LiteLLM is the only way to the models.
+**Guardrails** provides safety content moderation for LLM requests that go through LiteLLM. It screens chat requests through a dedicated guard model before they reach the main LLM, blocking unsafe or policy-violating content. It is off by default; Intel® Agent Toolkit turns it on with `auth_provider: litellm`, where LiteLLM is the only way to the models.
 
 Two components:
 
@@ -77,7 +77,7 @@ LiteLLM UI.
 Set in `env/<env>/config.inference.yaml`:
 
 ```yaml
-guardrails_enabled: true   # default: false (the Agent Toolkit turns it on with auth_provider: litellm)
+guardrails_enabled: true   # default: false (Intel® Agent Toolkit turns it on with auth_provider: litellm)
 ```
 
 - `true` — deploys the guard model and registers the guardrail; LiteLLM screens every chat request before it reaches the main LLM.
@@ -192,7 +192,7 @@ served LLM is about to receive. If the guard's context window is the smaller of 
 prompts in the gap are rejected by the guard and blocked (fail-closed) rather than screened
 — the guardrail silently becomes the request-size ceiling for the whole stack.
 
-Current pairing with the agent toolkit's default model (both 32768, so no gap):
+Current pairing with the Intel® Agent Toolkit default model (both 32768, so no gap):
 
 | | source of context length | effective |
 |---|---|---|
@@ -244,7 +244,7 @@ a sandbox mistake cannot take the guardrail down.
   lacks the `qwen3guard` entry; a name in neither fails the install
 - Free CPU/memory for the guard model (see `cpu`/`memory` on the `qwen3guard` catalog entry)
 
-### Deploy with the Inference Layer
+### Deploy with Intel® Inference Toolkit
 
 ```bash
 ./es_auto_installer.sh install inference   # or: install agent-toolkit
