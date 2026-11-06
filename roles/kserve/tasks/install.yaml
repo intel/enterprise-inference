@@ -269,6 +269,7 @@
       kubernetes.core.k8s:
         state: present
         definition: "{{ _kserve_crds }}"
+        apply: true
         server_side_apply:
           field_manager: ai-solutions-kserve
           force_conflicts: true
