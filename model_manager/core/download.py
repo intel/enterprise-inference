@@ -8,7 +8,7 @@ import time
 
 from . import k8s
 from .config import Catalog, Model, hf_model_info, pick, text
-from .renderer import proxy_env, quote, render, template, trust_remote_code
+from .renderer import gpu_toleration, proxy_env, quote, render, template, trust_remote_code
 from .ui import YELLOW, RESET, abort, info, ok
 
 TIMEOUT = 7200
@@ -102,6 +102,10 @@ def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
                          "                  name: hf-token\n                  key: token")
     env_items += [f"            - name: {k}\n              value: {quote(v)}" for k, v in proxy_env(catalog)]
     uid = "5000" if m.runtime == "openvino" else "1000"  # the serving image's user, so it can read the files
+    # Where GPU nodes are tainted they can be the only nodes the Job may use (no untainted
+    # worker, or a node-local PVC bound to one), so a GPU model's Job tolerates the serving
+    # pod's taint too. It requests no GPU.
+    toleration = gpu_toleration(m, 6)
     job = f"download-{m.name}"
     manifest = render(
         template("download-job.yaml"), MODEL_NAME=m.name, NAMESPACE=m.namespace, MODEL_ID=m.model_id,
@@ -110,7 +114,8 @@ def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
         DOWNLOAD_CMD="\n".join("              " + line for line in _script(m, cli_args).split("\n")),
         # Small requests so the job schedules; limits track the serving envelope (OVMS converts in memory).
         DL_CPU_REQUEST="500m", DL_MEM_REQUEST="2Gi", DL_CPU_LIMIT=m.cpu or "2", DL_MEM_LIMIT=m.memory or "8Gi",
-        TTL_SECONDS=os.environ.get("DOWNLOAD_JOB_TTL") or "300", TIMEOUT=str(TIMEOUT))
+        TTL_SECONDS=os.environ.get("DOWNLOAD_JOB_TTL") or "300", TIMEOUT=str(TIMEOUT),
+        TOLERATIONS="\n" + toleration if toleration else "")
 
     k8s.run("delete", "job", job, "-n", m.namespace, "--ignore-not-found")
     k8s.apply(manifest)

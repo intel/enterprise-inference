@@ -26,6 +26,10 @@ GPU = {"MM_ACCEL_RESOURCE": "nvidia.com/gpu"}
 # GPU pods are Burstable since the B300 run: no CPU limit, so kubelet's static CPU manager never pins them.
 BURSTABLE_GPU = (r'^(          limits:)\n            cpu: "[^"]+"\n(            memory: \S+\n            nvidia\.com/gpu:)',
                  r"\1\n\2")
+# The weight-download Job tolerates the GPU taint too, so it can run where only tainted GPU nodes fit.
+GPU_DOWNLOAD_TOLERATION = (r"^(      restartPolicy: Never\n)",
+                           r"\1      tolerations:\n        - key: nvidia.com/gpu\n          operator: Exists\n"
+                           r"          effect: NoSchedule\n")
 LLAMA_GPU_READY = [[r"get LLMInferenceService llama-3-1-70b-instruct-cuda -n llm-inference -o json$", 0,
                     _ready("MainWorkloadReady")]]
 
@@ -41,7 +45,7 @@ GPU_CASES = [
     case("gpu-gate-refuses", "deploy", "qwen3-0-6b-cuda"),
     case("gpu-bad-count", "deploy", "qwen3-0-6b-cuda", "--gpus", "x", env=GPU),
     case("gpu-deploy-wait", "deploy", "llama-3-1-70b-instruct-cuda", "--wait", env=GPU,
-         k8s=DOWNLOAD + POOL + LLAMA_GPU_READY, deviations=[NO_LITELLM_URL, BURSTABLE_GPU]),
+         k8s=DOWNLOAD + POOL + LLAMA_GPU_READY, deviations=[NO_LITELLM_URL, BURSTABLE_GPU, GPU_DOWNLOAD_TOLERATION]),
 ]
 
 
