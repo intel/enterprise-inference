@@ -215,6 +215,7 @@
         ./model-manager deploy "{{ item }}" --wait {{ model_deploy_flags | default('') }}
       args:
         chdir: "{{ _mm_dir }}"
+      # MM_ACCEL_RESOURCE, the GPU deploy gate, comes in __llm_mm_env (accel_resource.yaml).
       environment: >-
         {{ __llm_mm_env | combine({
              'KUBECONFIG': kubernetes_kubeconfig | default(ansible_env.HOME + '/.kube/config'),

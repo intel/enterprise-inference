@@ -171,6 +171,16 @@ class KubeletStatic(BestEffort):
                 "(proceed anyway) or MM_SKIP_PREFLIGHT=1 (skip check).")
 
 
+class GpuRuntime(BestEffort):
+    """device: gpu runtimes carry no CPU pinning: balloons and static-CPU alignment are Xeon placement
+    controls, and the accelerator resource limit does the scheduling. The pod is rendered without a CPU
+    limit (Burstable), so kubelet's static CPU manager does not pin it either. Never selected by --cpu-policy."""
+    name = "n/a (GPU runtime — no CPU pinning)"
+
+    def annotations(self, m: Model, tp: int) -> tuple[dict, str]:
+        return {}, m.cpu
+
+
 POLICIES = {p.name: p for p in (NriBalloons, KubeletStatic, BestEffort)}
 
 
