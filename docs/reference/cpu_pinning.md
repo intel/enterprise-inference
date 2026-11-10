@@ -7,7 +7,7 @@ A model whose threads are spread across NUMA nodes pays a memory-latency penalty
 every token, and a model sharing cores with a noisy neighbour loses throughput
 unpredictably.
 
-This layer pins model pods to physical cores that respect the node's NUMA topology, so
+Intel® Inference Toolkit pins model pods to physical cores that respect the node's NUMA topology, so
 each model gets exclusive, locality-aware CPU.
 
 ## The three policies
@@ -28,7 +28,7 @@ kubernetes_cpu_policy: "nri-balloons"   # nri-balloons | kubelet-static | best-e
 
 > [!WARNING]
 > This must match the value the cluster was **installed** with. It decides both how
-> kubelet is configured (solutions repo) and how model manifests are rendered (this
+> kubelet is configured (Toolkit Manager repo) and how model manifests are rendered (this
 > repo). Changing it on an existing cluster requires re-running
 > `./es_auto_installer.sh install kubernetes` so kubelet is reconfigured.
 
@@ -48,14 +48,14 @@ incorrectly — the model still serves, without exclusive cores.
 The NRI balloons policy groups CPUs into *balloons* and assigns pods to them, keeping
 each pod's cores within one NUMA node where possible.
 
-Tuning lives in the solutions repo, because it configures the nodes:
+Tuning lives in the Toolkit Manager repo, because it configures the nodes:
 
 ```yaml
 # nri_reserved_cpu_list: ""            # Linux cpuset for system CPUs (auto-sized if empty)
 # nri_deployment_profile: "standard"   # minimal(8) | standard(12) | observability(16) | full(20)
 ```
 
-The profile sizes the CPU reservation for platform workloads — the number in parentheses
+The profile sizes the CPU reservation for platform services — the number in parentheses
 is roughly how many cores are held back. Pick a larger profile when the cluster also runs
 observability or RAG workloads, so model pods don't contend with them.
 
@@ -103,7 +103,7 @@ Under `kubelet-static`, model pods are rendered as **Guaranteed QoS** — intege
 with requests equal to limits — so kubelet's static CPU manager grants them exclusive
 whole cores.
 
-With `full-pcpus-only` enabled (the solutions default), a pod's `cpu` request must be a
+With `full-pcpus-only` enabled (the Toolkit Manager default), a pod's `cpu` request must be a
 multiple of the SMT width, or kubelet rejects the pod with `SMTAlignmentError`.
 model-manager rounds `cpu` up to satisfy this automatically.
 

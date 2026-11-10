@@ -159,7 +159,7 @@ once under `runtimes:`. See [Runtimes](runtimes.md).
   install leaves it unchanged.
 - `--cpu N` overrides it for one deploy, and `--cpu auto` asks for the sizing from the
   command line. `--dry-run` shows the number it resolves to.
-- Under `nri-balloons` it reads the `nri.intel.com/max-tp` node labels the solutions
+- Under `nri-balloons` it reads the `nri.intel.com/max-tp` node labels the Toolkit Manager
   repo's NRI balloons role sets. When fewer CPUs than the category default are free, the
   deploy stops with `cpu: auto — only N free CPUs per NUMA node …`: undeploy a model,
   add a node, or pass `--cpu`.
@@ -238,7 +238,7 @@ Point vLLM at that path in `args`:
 
 ## Auto-deploy on install
 
-By default **no models are deployed during install** — the inference layer only stands
+By default **no models are deployed during install** — Intel® Inference Toolkit only stands
 up serving infrastructure. Bringing a model up automatically takes **two** settings:
 
 1. Flag the model in the catalog:
@@ -263,8 +263,8 @@ up serving infrastructure. Bringing a model up automatically takes **two** setti
 Once enabled, only models flagged `autodeploy: true` are deployed.
 
 > [!NOTE]
-> Two kinds of model deploy without either setting: models a solution layer requests by
-> name in `llm_services_autodeploy_models` (the agent toolkit sets its default model
+> Two kinds of model deploy without either setting: models another toolkit requests by
+> name in `llm_services_autodeploy_models` (Intel® Agent Toolkit sets its default model
 > there), and the guardrail's guard model (`guardrail_model`) whenever the guardrail is
 > on. The guard model deploys first, so models with `cpu: auto` size themselves around it.
 > They come from the same catalog. The environment copy is seeded once, at `init`, so an

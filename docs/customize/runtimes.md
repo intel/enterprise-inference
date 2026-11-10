@@ -18,9 +18,9 @@ means the full picture of what a server runs with is easy to see and to change.
 Models then opt into a runtime and version through their
 [server binding](catalog.md#choose-which-server-and-version-a-model-may-use).
 
-## How settings layer
+## How settings combine
 
-Every layer overrides the one before it:
+Every level overrides the one before it:
 
 ```
 env   = runtime common env  +  category env  +  version env delta  +  per-model env  +  --env
@@ -51,7 +51,7 @@ runtimes:
         image: "docker.io/vllm/vllm-openai-cpu:v0.28.0"
       "0.19.1":
         image: "docker.io/vllm/vllm-openai-cpu:v0.19.1"
-        # optional env:/args: DELTAS layer on top of the common env and category args
+        # optional env:/args: DELTAS on top of the common env and category args
     categories:
       llm:    { defaults: { cpu: 8,  memory: "16Gi", kv_cache_gb: 8 } }
       embed:  { defaults: { cpu: 6,  memory: "16Gi", kv_cache_gb: 16 } }

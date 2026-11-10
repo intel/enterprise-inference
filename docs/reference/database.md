@@ -2,7 +2,7 @@
 
 ## Overview
 
-The inference platform uses a **shared CloudNativePG (CNPG) PostgreSQL cluster** to serve all platform services. Each consumer (LiteLLM, Langfuse, Keycloak, etc.) gets its own isolated database and user within the same cluster.
+The Intel Inference Toolkit uses a **shared CloudNativePG (CNPG) PostgreSQL cluster**. Each consumer (LiteLLM, Langfuse, Keycloak, and the other services Toolkit Manager installs) gets its own isolated database and user within the same cluster.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐

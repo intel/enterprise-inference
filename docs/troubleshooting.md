@@ -44,7 +44,7 @@ Detail → [CPU Pinning & NUMA](reference/cpu_pinning.md).
 
 | Symptom | Likely cause / fix |
 |---------|--------------------|
-| No models deployed after `install inference` | Expected. `config.yaml` ships `llm_services_deploy_models: false`, and only models flagged `autodeploy: true` deploy. **Both** are required — see [Auto-deploy on install](customize/catalog.md#auto-deploy-on-install). Models a solution requests in `llm_services_autodeploy_models` (and the guard model) deploy regardless. |
+| No models deployed after `install inference` | Expected. `config.yaml` ships `llm_services_deploy_models: false`, and only models flagged `autodeploy: true` deploy. **Both** are required — see [Auto-deploy on install](customize/catalog.md#auto-deploy-on-install). Models Intel® Agent Toolkit requests in `llm_services_autodeploy_models` (and the guard model) deploy regardless. |
 | No LiteLLM (no `litellm.<domain>`) after the install | LiteLLM is deployed with `auth_type: litellm_vkey`, or as an add-on with `litellm_enabled: true`, in `env/<env>/config.inference.yaml`. The default `jwt` serves the models on `inference.<domain>`. See [Accessing Models](deploy/accessing_models.md). |
 | Install stops at "does not allowlist the guard host" | The install upgrades a LiteLLM release whose config lacks the guard host, so the upgrade did not reach the release the guardrail is registered with: check the Helm upgrade in the install log, and that `guardrail_litellm_namespace` is `litellm_namespace` — see [Guardrails](customize/guardrails.md#outbound-url-allowlist). |
 | Install stops, or warns, that a model is "not found in the model catalog" | The name (the guard model `guardrail_model`, or one in `llm_services_autodeploy_models`) is neither in `env/<env>/models.yaml` nor in `model_manager/models.yaml`. Add an entry for it, or fix the name. A requested model only the shipped catalog has is deployed from it, with a "NOTICE: … not in …" line. |
@@ -74,5 +74,5 @@ kubectl get gateway,httproute -A
 kubectl get aigatewayroute -A          # ai_gateway_provider=envoy
 ```
 
-For platform-level problems — cluster, storage, certificates, DNS — see the
-[solutions documentation](https://github.com/intel/enterprise-ai-solutions/blob/main/docs/README.md).
+For cluster, storage, certificate, and DNS problems, see the
+[Toolkit Manager documentation](https://github.com/intel/enterprise-ai-solutions/blob/main/docs/README.md).

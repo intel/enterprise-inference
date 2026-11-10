@@ -1,6 +1,6 @@
 # Inference Request Flow
 
-End-to-end path for an inference request through the platform, from external client to model response.
+End-to-end path for an inference request, from external client to model response.
 
 ## Architecture
 

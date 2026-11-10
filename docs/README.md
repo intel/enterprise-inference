@@ -1,11 +1,11 @@
-# Intel® AI for Enterprise Inference Documentation
+# Intel® Inference Toolkit Documentation
 
-The technical documentation for the inference layer. Start with **Deploy** to get
+The technical documentation for Intel® Inference Toolkit. Start with **Deploy** to get
 a model serving, use **Customize** to add models and tune the engines, then look
 things up in **Reference**.
 
 > New here? The three-step quick start is in the [project README](../README.md#quick-start).
-> This layer is a component of [Intel® AI for Enterprise Solutions](https://github.com/intel/enterprise-ai-solutions) — install that platform first.
+> [Toolkit Manager](https://github.com/intel/enterprise-ai-solutions) installs and operates this toolkit — install Toolkit Manager first.
 
 ## Deploy
 
@@ -32,11 +32,11 @@ Add models, choose engines and versions, and change any setting.
 
 ## Reference
 
-How the layer is built and how a request travels through it.
+How the toolkit is built and how a request travels through it.
 
 | Guide | What it covers |
 |-------|----------------|
-| [Architecture](reference/architecture.md) | Components, Ansible roles, and how this repo plugs into the platform |
+| [Architecture](reference/architecture.md) | Components, Ansible roles, and how Toolkit Manager installs and operates this toolkit |
 | [Inference Request Flow](reference/request_flow.md) | End-to-end request routing for both auth modes, with a verified network trace |
 | [CPU Pinning & NUMA](reference/cpu_pinning.md) | The three CPU policies, the pre-flight capacity check, and NUMA placement |
 | [Database Architecture](reference/database.md) | Shared PostgreSQL schema and provisioning for LiteLLM and Langfuse |
