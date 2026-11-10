@@ -5,12 +5,50 @@
 
 # ── LLMIsvc add-on (if enabled) ─────────────────────────────────────────────
 
+# First, while the llmisvc controller can still clear the finalizer KServe 0.21
+# puts on each LLMInferenceServiceConfig preset.
+- name: "kserve | Uninstall KServe runtime configs"
+  kubernetes.core.helm:
+    name: kserve-runtime-configs
+    release_namespace: "{{ kserve_namespace }}"
+    state: absent
+    wait: true
+  failed_when: false
+
+- name: "kserve | Find LLMIsvc presets still present"
+  kubernetes.core.k8s_info:
+    api_version: serving.kserve.io/v1alpha2
+    kind: LLMInferenceServiceConfig
+    namespace: "{{ kserve_namespace }}"
+  register: _kserve_presets_left
+  failed_when: false
+  when: kserve_llmisvc_enabled | bool
+
 - name: "kserve | Uninstall LLMIsvc resources"
   kubernetes.core.helm:
     name: kserve-llmisvc-resources
     release_namespace: "{{ kserve_namespace }}"
     state: absent
     wait: true
+  failed_when: false
+  when: kserve_llmisvc_enabled | bool
+
+# A controller already gone (partial install) cannot clear its own finalizer.
+- name: "kserve | Strip the llmisvc finalizer from presets left behind"
+  kubernetes.core.k8s:
+    api_version: serving.kserve.io/v1alpha2
+    kind: LLMInferenceServiceConfig
+    name: "{{ item.metadata.name }}"
+    namespace: "{{ kserve_namespace }}"
+    state: patched
+    definition:
+      metadata:
+        finalizers: "{{ item.metadata.finalizers | reject('eq', 'serving.kserve.io/llmisvcconfig-finalizer') | list }}"
+  loop: >-
+    {{ _kserve_presets_left.resources | default([]) | selectattr('metadata.finalizers', 'defined')
+       | selectattr('metadata.finalizers', 'contains', 'serving.kserve.io/llmisvcconfig-finalizer') | list }}
+  loop_control:
+    label: "{{ item.metadata.name }}"
   failed_when: false
   when: kserve_llmisvc_enabled | bool
 
@@ -72,14 +110,6 @@
   when: kserve_llmisvc_enabled | bool
 
 # ── KServe core (all modes) ─────────────────────────────────────────────────
-
-- name: "kserve | Uninstall KServe runtime configs"
-  kubernetes.core.helm:
-    name: kserve-runtime-configs
-    release_namespace: "{{ kserve_namespace }}"
-    state: absent
-    wait: true
-  failed_when: false
 
 - name: "kserve | Uninstall KServe resources"
   kubernetes.core.helm:

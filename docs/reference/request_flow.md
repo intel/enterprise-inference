@@ -197,7 +197,7 @@ POST http://envoy-llm-inference-ai-gateway-62f06ddf.envoy-gateway-system.svc.clu
 
 **Kubernetes resources:**
 - `InferencePool` spec: `endpointPickerRef → llama3-8b-awq-epp-service:9002`
-- EPP runs in pod `llama3-8b-awq-kserve-router-scheduler` (containers: `main`, `tokenizer`)
+- EPP runs in pod `llama3-8b-awq-kserve-router-scheduler` (containers: `main`, plus `tokenizer` on KServe 0.18)
 
 ---
 

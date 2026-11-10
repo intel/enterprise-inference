@@ -3,7 +3,7 @@
 # the version follows the platform controller (closest older minor when newer
 # than listed); set envoy_ai_gateway_version to pin one.
 envoy_ai_gateway_versions:
-  "1.9": "1.2.0"
+  "1.9": "1.2.1"
   "1.8": "1.1.0"
   "1.7": "0.6.0"
 _eag_eg_minor: "{{ ((gateway_platform | default({})).version | default('', true) | string).split('.')[:2] | join('.') }}"

@@ -177,17 +177,23 @@
 
 - name: "kserve | Detect version"
   ansible.builtin.set_fact:
-    _kserve_installed_chart: "{{ _kserve_release.status.chart | default('') }}"
-    _kserve_target_chart: "kserve-resources-v{{ kserve_version }}"
+    _kserve_installed_chart: "{{ _kserve_installed }}"
+    _kserve_version: "{{ _kserve_installed_version if _kserve_newer | bool else kserve_version }}"
+    _kserve_target_chart: "kserve-resources-v{{ _kserve_installed_version if _kserve_newer | bool else kserve_version }}"
+  vars:
+    _kserve_installed: "{{ _kserve_release.status.chart | default('') }}"
+    _kserve_installed_version: "{{ _kserve_installed | regex_replace('^kserve-resources-v', '') }}"
+    _kserve_newer: "{{ _kserve_installed | length > 0 and _kserve_installed_version is version(kserve_version, '>') }}"
 
 - name: "kserve | Status"
   ansible.builtin.debug:
     msg: >-
       {{ 'Upgrading' if _kserve_installed_chart and _kserve_installed_chart != _kserve_target_chart
-         else ('Already at v' ~ kserve_version ~ ' — reconciling') if _kserve_installed_chart
+         else ('Already at v' ~ _kserve_version ~ ' — reconciling') if _kserve_installed_chart
          else 'Fresh install' }}
-      KServe v{{ kserve_version }}
+      KServe v{{ _kserve_version }}
       {{ ('(from ' ~ _kserve_installed_chart ~ ')') if _kserve_installed_chart and _kserve_installed_chart != _kserve_target_chart else '' }}
+      {{ '(v' ~ kserve_version ~ ' selected; never downgrades)' if _kserve_version != kserve_version else '' }}
 
 - name: "kserve | Label namespace — Istio"
   kubernetes.core.k8s:
@@ -251,7 +257,7 @@
     - name: "kserve | Render the KServe CRDs"
       kubernetes.core.helm_template:
         chart_ref: "{{ kserve_helm_repo }}/kserve-crd"
-        chart_version: "v{{ kserve_version }}"
+        chart_version: "v{{ _kserve_version }}"
       register: _kserve_crd_tpl
       until: _kserve_crd_tpl is succeeded
       retries: "{{ helm_retries | default(3) }}"
@@ -266,7 +272,7 @@
     - name: "kserve | Check the chart rendered CRDs"
       ansible.builtin.assert:
         that: _kserve_crds | length > 0
-        fail_msg: "kserve-crd v{{ kserve_version }} rendered no CustomResourceDefinition; check the chart output."
+        fail_msg: "kserve-crd v{{ _kserve_version }} rendered no CustomResourceDefinition; check the chart output."
         quiet: true
 
     # Server-side: the CRDs are too large for the last-applied annotation. This role owns the
@@ -304,7 +310,7 @@
       kubernetes.core.helm:
         name: kserve-resources
         chart_ref: "{{ kserve_helm_repo }}/kserve-resources"
-        chart_version: "v{{ kserve_version }}"
+        chart_version: "v{{ _kserve_version }}"
         release_namespace: "{{ kserve_namespace }}"
         create_namespace: true
         wait: true
@@ -330,17 +336,23 @@
       register: _llmisvc_release_precheck
       failed_when: false
 
+    # An older llmisvc webhook rejects the new presets; the LLMIsvc block
+    # upgrades it first and installs the runtime configs after.
     - name: "kserve | Compute initial llmisvcConfigs enablement"
       ansible.builtin.set_fact:
-        _kserve_initial_llmisvc_configs: >-
-          {{ (_llmisvc_release_precheck.status is defined
-              and _llmisvc_release_precheck.status is not none) | bool }}
+        _kserve_initial_llmisvc_configs: "{{ _llmisvc_exists | bool }}"
+        _kserve_defer_runtime_configs: >-
+          {{ _llmisvc_exists | bool and kserve_llmisvc_enabled | bool
+             and _llmisvc_release_precheck.status.chart | default('') != 'kserve-llmisvc-resources-v' ~ _kserve_version }}
+      vars:
+        _llmisvc_exists: "{{ _llmisvc_release_precheck.status is defined and _llmisvc_release_precheck.status is not none }}"
 
     - name: "kserve | Install KServe runtime configs via Helm"
+      when: not _kserve_defer_runtime_configs | bool
       kubernetes.core.helm:
         name: kserve-runtime-configs
         chart_ref: "{{ kserve_helm_repo }}/kserve-runtime-configs"
-        chart_version: "v{{ kserve_version }}"
+        chart_version: "v{{ _kserve_version }}"
         release_namespace: "{{ kserve_namespace }}"
         wait: true
         set_values:
@@ -529,14 +541,29 @@
       ansible.builtin.set_fact:
         _llmisvc_needs_install: >-
           {{ (_llmisvc_release.status is not defined or _llmisvc_release.status is none)
-             or (_llmisvc_release.status.chart | default('') != 'kserve-llmisvc-resources-v' ~ kserve_version) }}
+             or (_llmisvc_release.status.chart | default('') != 'kserve-llmisvc-resources-v' ~ _kserve_version) }}
 
     # -- Install LLMIsvc CRDs + controller --
+    # The core pass applies this shared CRD; from 0.21 kserve-llmisvc-crd
+    # renders it unless another release's annotation claims it.
+    - name: "kserve | LLMIsvc — mark the shared storage-container CRD as core-owned"
+      kubernetes.core.k8s:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: clusterstoragecontainers.serving.kserve.io
+        state: patched
+        definition:
+          metadata:
+            annotations:
+              meta.helm.sh/release-name: kserve-resources
+              meta.helm.sh/release-namespace: "{{ kserve_namespace }}"
+      when: _llmisvc_needs_install | bool
+
     - name: "kserve | LLMIsvc — install CRDs via Helm"
       kubernetes.core.helm:
         name: kserve-llmisvc-crd
         chart_ref: "{{ kserve_helm_repo }}/kserve-llmisvc-crd"
-        chart_version: "v{{ kserve_version }}"
+        chart_version: "v{{ _kserve_version }}"
         release_namespace: "{{ kserve_namespace }}"
         wait: true
       when: _llmisvc_needs_install | bool
@@ -574,7 +601,7 @@
       kubernetes.core.helm:
         name: kserve-llmisvc-resources
         chart_ref: "{{ kserve_helm_repo }}/kserve-llmisvc-resources"
-        chart_version: "v{{ kserve_version }}"
+        chart_version: "v{{ _kserve_version }}"
         release_namespace: "{{ kserve_namespace }}"
         wait: true
         set_values:
@@ -613,7 +640,7 @@
       kubernetes.core.helm:
         name: kserve-runtime-configs
         chart_ref: "{{ kserve_helm_repo }}/kserve-runtime-configs"
-        chart_version: "v{{ kserve_version }}"
+        chart_version: "v{{ _kserve_version }}"
         release_namespace: "{{ kserve_namespace }}"
         wait: true
         set_values:
@@ -625,6 +652,7 @@
       delay: 15
 
     # -- Repin the scheduler preset's llm-d images (see defaults/main.yaml) --
+    # KServe 0.21's preset ships pullable images and no tokenizer sidecar.
     - name: "kserve | LLMIsvc — read scheduler preset"
       kubernetes.core.k8s_info:
         api_version: serving.kserve.io/v1alpha2
@@ -632,6 +660,7 @@
         name: kserve-config-llm-scheduler
         namespace: "{{ kserve_namespace }}"
       register: _kserve_scheduler_preset
+      when: _kserve_version is version('0.21.0', '<')
 
     - name: "kserve | LLMIsvc — repin llm-d router images"
       kubernetes.core.k8s_json_patch:
@@ -654,7 +683,9 @@
           image: "{{ kserve_llmisvc_tokenizer_image }}"
       loop_control:
         label: "{{ item.name }} → {{ item.image }}"
-      when: _kserve_scheduler_preset.resources | length > 0
+      when:
+        - _kserve_version is version('0.21.0', '<')
+        - _kserve_scheduler_preset.resources | length > 0
 
     # -- Pre-pull the tokenizer sidecar image so LLMIsvc pods start fast --
     # The tokenizer image (vllm-based) is multi-GB; without pre-pulling it
@@ -662,6 +693,7 @@
     # The EPP image is a small Go binary (~50 MB) and is not pre-pulled.
     # Wrapped in block/always so the DaemonSet is cleaned up even on failure.
     - name: "kserve | LLMIsvc — pre-pull tokenizer image"
+      when: _kserve_version is version('0.21.0', '<')
       block:
         - name: "kserve | LLMIsvc — create image pre-pull DaemonSet"
           kubernetes.core.k8s:
@@ -804,5 +836,5 @@
 - name: "kserve | Install complete"
   ansible.builtin.debug:
     msg: >-
-      KServe v{{ kserve_version }} installed in {{ kserve_namespace }}
+      KServe v{{ _kserve_version }} installed in {{ kserve_namespace }}
       (mode: {{ kserve_deploy_mode }}){{ kserve_llmisvc_enabled | bool | ternary(' + LLMIsvc add-on', '') }}.
