@@ -182,8 +182,16 @@ curl -sk --noproxy '*' \
 
 #### Manage keys via UI
 
-Open `https://litellm.<base_domain_name>/ui/` (login: username `admin`, password = master key) →
-**Virtual Keys** tab. The UI lets you create, view spend, and revoke keys without curl.
+Open the UI (the trailing slash is required) → **Virtual Keys** tab. The UI lets you create,
+view spend, and revoke keys without curl.
+
+- `routing_mode: subdomain`: `https://litellm-ui.<base_domain_name>/ui/`
+- `routing_mode: path`: `https://<base_domain_name>/litellm/ui/`
+
+With Keycloak (the default) the UI signs you in through Keycloak; only `litellm_ui_groups`
+(default: the platform admin group) are admitted. Without Keycloak, log in as `admin` with
+the password from the `litellm-ui-auth` secret:
+`kubectl get secret -n litellm litellm-ui-auth -o jsonpath='{.data.password}' | base64 -d`.
 
 ### Observability
 
