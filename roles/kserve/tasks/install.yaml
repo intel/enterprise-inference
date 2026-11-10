@@ -342,10 +342,17 @@
       ansible.builtin.set_fact:
         _kserve_initial_llmisvc_configs: "{{ _llmisvc_exists | bool }}"
         _kserve_defer_runtime_configs: >-
-          {{ _llmisvc_exists | bool and kserve_llmisvc_enabled | bool
+          {{ _llmisvc_exists | bool
              and _llmisvc_release_precheck.status.chart | default('') != 'kserve-llmisvc-resources-v' ~ _kserve_version }}
       vars:
         _llmisvc_exists: "{{ _llmisvc_release_precheck.status is defined and _llmisvc_release_precheck.status is not none }}"
+
+    - name: "kserve | Runtime configs kept until the LLMIsvc add-on is upgraded"
+      ansible.builtin.debug:
+        msg: >-
+          {{ _llmisvc_release_precheck.status.chart }} is installed but kserve_llmisvc_enabled is false, so
+          kserve-runtime-configs stays at its current version; run with kserve_llmisvc_enabled: true to upgrade both.
+      when: _kserve_defer_runtime_configs | bool and not kserve_llmisvc_enabled | bool
 
     - name: "kserve | Install KServe runtime configs via Helm"
       when: not _kserve_defer_runtime_configs | bool
