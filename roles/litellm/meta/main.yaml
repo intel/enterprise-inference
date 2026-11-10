@@ -1,6 +1,8 @@
 ---
 galaxy_info:
   role_name: litellm
+  author: Intel Corporation
   description: LiteLLM proxy — OpenAI-compatible gateway with virtual key auth
+  license: Apache-2.0
   min_ansible_version: "2.15"
 dependencies: []

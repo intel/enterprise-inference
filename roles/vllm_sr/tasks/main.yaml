@@ -1,3 +1,15 @@
 ---
+# Not on OpenShift yet: it reaches the models through the Envoy AI Gateway, which
+# OpenShift does not get (models route through OpenShift AI's inference Gateway).
+- name: "vllm_sr | Not supported on OpenShift"
+  ansible.builtin.fail:
+    msg: >-
+      The vLLM Semantic Router (vllm_sr_enabled) is not supported on OpenShift yet: it needs the Envoy AI Gateway, which
+      the installer does not deploy there. Use auth_type: jwt, or see docs/deploy/openshift.md (Known gaps).
+  when:
+    - cluster_distribution | default('kubernetes') == 'openshift'
+    - component_action | default('install') == 'install'
+    - vllm_sr_enabled | default(false) | bool
+
 - name: "vllm_sr | Dispatch action: {{ component_action }}"
   ansible.builtin.include_tasks: "{{ component_action }}.yaml"

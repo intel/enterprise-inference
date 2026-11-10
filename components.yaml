@@ -13,25 +13,22 @@
 # =============================================================================
 
 components:
-  - name: nfd
-    layer: inference
-    enabled: "{{ nfd_enabled | default(true) | bool }}"
-    depends_on: []
-
   - name: keycloak_config
     layer: inference
     # Both auth modes: people sign in through Keycloak; the gateway trusts its JWTs.
     enabled: "{{ keycloak_enabled | default(true) | bool }}"
     depends_on: []
 
+  # The AI gateways are skipped on OpenShift: models are routed through the
+  # OpenShift AI inference Gateway (openshift-ingress/openshift-ai-inference).
   - name: envoy_ai_gateway
     layer: inference
-    enabled: "{{ kserve_enabled | default(true) | bool and (ai_gateway_provider | default('envoy')) == 'envoy' }}"
+    enabled: "{{ kserve_enabled | default(true) | bool and (ai_gateway_provider | default('envoy')) == 'envoy' and not (cluster_distribution | default('kubernetes') == 'openshift') }}"
     depends_on: []
 
   - name: agentgateway
     layer: inference
-    enabled: "{{ (ai_gateway_provider | default('envoy')) == 'agentgateway' }}"
+    enabled: "{{ (ai_gateway_provider | default('envoy')) == 'agentgateway' and not (cluster_distribution | default('kubernetes') == 'openshift') }}"
     depends_on: []
 
   - name: kserve

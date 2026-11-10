@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections import defaultdict
+from pathlib import Path
 
 try:
     from kubernetes import client, config
@@ -22,8 +23,19 @@ try:
 except ImportError:
     sys.exit("ERROR: 'kubernetes' package not installed. Run: pip install kubernetes")
 
+# The balloon rules model-manager's capacity check applies (model_manager/core).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from core.nri_policy import label_balloon_types, label_matches  # noqa: E402
+
 
 _NRI_ANN_PREFIX = "balloon.balloons.resource-policy.nri.io/"
+
+
+def _label_balloon_types(custom_api) -> list[tuple[str, list[dict]]]:
+    try:
+        return label_balloon_types(custom_api.list_cluster_custom_object("config.nri", "v1alpha1", "balloonspolicies"))
+    except Exception:
+        return []
 
 
 def _parse_cpuset(spec: str) -> list[int]:
@@ -132,6 +144,7 @@ def main():
 
     core_api = client.CoreV1Api()
     pods = core_api.list_namespaced_pod(args.namespace)
+    label_types = _label_balloon_types(client.CustomObjectsApi())
 
     balloon_pods = []
     for pod in pods.items:
@@ -139,6 +152,9 @@ def main():
             continue
         anns = pod.metadata.annotations or {}
         balloon = next((v for k, v in anns.items() if k.startswith(_NRI_ANN_PREFIX)), None)
+        if not balloon:
+            balloon = next((name for name, exprs in label_types
+                            if label_matches(pod.metadata.labels or {}, exprs)), None)
         if balloon:
             balloon_pods.append({
                 "name": pod.metadata.name,
@@ -147,7 +163,7 @@ def main():
             })
 
     if not balloon_pods:
-        print(f"No running pods with NRI balloon annotations in '{args.namespace}'")
+        print(f"No running pods with NRI balloon annotations or balloon-matched labels in '{args.namespace}'")
         return
 
     # Get topology from first pod on each node

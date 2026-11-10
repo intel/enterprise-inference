@@ -137,6 +137,8 @@
     # requests fail with "Invalid client credentials". Pushing our secret via
     # kcadm makes the k8s value authoritative and converges both every run. Runs
     # in-pod (kcadm against localhost), so no port-forward/curl/JSON parsing.
+    # kcadm keeps its session in --config: under /tmp, because HOME is not
+    # writable for the SCC-assigned UID on OpenShift (RHBK sets HOME=/).
 
     - name: "keycloak_config | Read Keycloak admin credentials"
       kubernetes.core.k8s_info:
@@ -168,7 +170,7 @@
         namespace: "{{ keycloak_namespace }}"
         pod: "{{ keycloak_pod_name }}"
         command: >-
-          /opt/keycloak/bin/kcadm.sh config credentials
+          /opt/keycloak/bin/kcadm.sh config credentials --config {{ keycloak_kcadm_config }}
           --server {{ keycloak_admin_server_url }} --realm master
           --user {{ _kcc_admin_sec.resources[0].data.username | b64decode }}
           --password {{ _kcc_admin_sec.resources[0].data.password | b64decode }}
@@ -179,7 +181,7 @@
         namespace: "{{ keycloak_namespace }}"
         pod: "{{ keycloak_pod_name }}"
         command: >-
-          /opt/keycloak/bin/kcadm.sh get clients -r {{ keycloak_realm }}
+          /opt/keycloak/bin/kcadm.sh get clients --config {{ keycloak_kcadm_config }} -r {{ keycloak_realm }}
           -q clientId={{ keycloak_client_id }} --fields id --format csv --noquotes
       register: _kcc_client_uuid
       changed_when: false
@@ -200,7 +202,7 @@
         namespace: "{{ keycloak_namespace }}"
         pod: "{{ keycloak_pod_name }}"
         command: >-
-          /opt/keycloak/bin/kcadm.sh update clients/{{ _kcc_client_uuid.stdout | trim }}
+          /opt/keycloak/bin/kcadm.sh update clients/{{ _kcc_client_uuid.stdout | trim }} --config {{ keycloak_kcadm_config }}
           -r {{ keycloak_realm }} -s secret={{ _kcc_client_secret }}
       no_log: "{{ secure_logs | default(true) }}"
 

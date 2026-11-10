@@ -236,6 +236,34 @@ def test_litellm_endpoint_is_unified(monkeypatch, tmp_path, capsys, routing_mode
     monkeypatch.setattr(k8s, "out", lambda *a: "")
     routing.print_endpoints(Model(name="m", namespace="n", kind="LLMInferenceService"))
     assert f"Endpoint: {want}" in capsys.readouterr().out
+
+
+def test_openshift_endpoint_ignores_path_mode(monkeypatch, tmp_path):
+    for var in ("MM_LITELLM_ENABLED", "MM_INFERENCE_HOSTNAME", "MM_INFERENCE_PATH"):
+        monkeypatch.delenv(var, raising=False)
+    (tmp_path / "global.yaml").write_text("base_domain_name: ex.test\nrouting_mode: path\n")
+    monkeypatch.setenv("MM_GLOBAL_CONFIG", str(tmp_path / "global.yaml"))
+    monkeypatch.setenv("MM_PLATFORM", "openshift")
+    assert (routing.inference_hostname(), routing.inference_path()) == ("inference.ex.test", "")
+
+
+@pytest.mark.parametrize("gateway_ip, want", [("", ""), ("10.0.0.9", "10.0.0.9")])
+def test_openshift_gateway_ip_override(monkeypatch, capsys, gateway_ip, want):
+    monkeypatch.setenv("MM_PLATFORM", "openshift")
+    monkeypatch.setenv("MM_INFERENCE_HOSTNAME", "inference.ex.test")
+    monkeypatch.setenv("MM_AIGATEWAY_ENABLED", "false")
+    monkeypatch.setenv("MM_LITELLM_ENABLED", "false")
+    monkeypatch.setenv("MM_GATEWAY_IP", gateway_ip)
+    monkeypatch.setattr(routing, "_resolves", lambda host: True)
+    routing.print_endpoints(Model(name="m", namespace="n", kind="LLMInferenceService"))
+    out = capsys.readouterr().out
+    assert (f"resolve inference.ex.test → {want}" in out) == bool(want)
+
+
+def test_empty_host_does_not_resolve():
+    assert not routing._resolves("") and not routing._resolves("  ")
+
+
 @pytest.mark.parametrize("current, applied", [("", True), ("img:new", False), ("img:old", True)])
 def test_runtime_installed_or_updated_on_image_change(monkeypatch, current, applied):
     calls = []
@@ -312,6 +340,8 @@ def cluster(monkeypatch):
 
     def run(*args, stdin=None):
         state["calls"].append(args)
+        if args[0] == "api-resources":
+            return subprocess.CompletedProcess(args, 0, state.get("api_resources", ""), "")
         kind = args[1]
         if state["down"] or kind in state["failing"] or ("-A" in args and kind in state["denied"]):
             return subprocess.CompletedProcess(args, 1, "", "error")
@@ -320,6 +350,8 @@ def cluster(monkeypatch):
             items = [i for i in items if i["metadata"]["namespace"] == args[args.index("-n") + 1]]
         return subprocess.CompletedProcess(args, 0, json.dumps({"items": items}), "")
     monkeypatch.setenv("MM_CONFIG", str(FIXTURE_CATALOG))
+    monkeypatch.setenv("MM_PLATFORM", "")  # recorded, so the value list detects is undone after the test
+    monkeypatch.delenv("MM_PLATFORM")
     monkeypatch.setattr(k8s, "run", run)
     return state
 
@@ -352,6 +384,18 @@ def test_list_falls_back_to_the_catalog_namespace(cluster, capsys):
     assert "tmpl-inline" in out and "elsewhere" not in out
     assert ("get", "LLMInferenceService", "-l", "app.kubernetes.io/managed-by=model-manager", "-o", "json",
             "-n", "ns1") in cluster["calls"]
+
+
+@pytest.mark.parametrize("api_resources, want", [("clusterversions.config.openshift.io", r"Not ready \(NotAccepted\)"),
+                                                  ("", "Ready")])
+def test_list_status_on_openshift_covers_the_routes(cluster, capsys, api_resources, want):
+    # Healthy pods, but the Gateway rejected the route: Ready=False. Kubernetes reads MainWorkloadReady.
+    obj = _llmisvc("tmpl-inline", "ns1", "True")
+    obj["status"]["conditions"].append({"type": "Ready", "status": "False", "reason": "NotAccepted"})
+    cluster["items"]["LLMInferenceService"] = [obj]
+    cluster["api_resources"] = api_resources
+    cli.list_models(cli.Options(), "")
+    assert re.search(rf"^tmpl-inline .* {want}$", capsys.readouterr().out, re.M)
 
 
 def test_list_without_cluster_shows_unknown_status(cluster, capsys):
@@ -391,6 +435,29 @@ def test_list_catalog_needs_no_cluster(cluster, capsys):
     assert re.search(r"^nocat \(org/nocat\) +auto +vllm 0\.24\.0$", out, re.M)
 
 
+@pytest.mark.parametrize("op, values, labels, want", [
+    ("In", ["workload"], {"c": "workload"}, True), ("In", ["*"], {"c": "x"}, True), ("In", ["*"], {}, False),
+    ("NotIn", ["workload"], {}, True), ("Equals", ["*"], {"c": "x"}, True), ("NotEqual", ["x"], {}, True),
+    ("Matches", ["work*"], {"c": "workload"}, True), ("MatchesNot", ["work*"], {}, True),
+    ("MatchesAny", ["a*", "w*"], {"c": "workload"}, True), ("MatchesNone", ["w*"], {"c": "workload"}, False),
+    ("Exists", [], {"c": ""}, True), ("NotExist", [], {"c": "x"}, False), ("AlwaysTrue", [], {}, True),
+    ("Bogus", ["x"], {"c": "x"}, False),
+])
+def test_label_matches_follows_nri_semantics(op, values, labels, want):
+    assert nri_policy.label_matches(labels, [{"key": "pod/labels/c", "operator": op, "values": values}]) is want
+
+
+@pytest.mark.parametrize("args, kubectl_on_path", [(["list", "--catalog"], False), (["list"], True)])
+def test_list_works_offline_through_main(cluster, monkeypatch, capsys, args, kubectl_on_path):
+    cluster["down"] = True
+    for key in ("MM_PLATFORM", "MM_LLMISVC_API_VERSION"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(cli.shutil, "which", lambda name: kubectl_on_path and f"/usr/bin/{name}")
+    monkeypatch.setattr(sys, "argv", ["model-manager", *args])
+    cli.main()
+    assert re.search(r"^nocat \(org/nocat\) +auto +vllm 0\.24\.0", capsys.readouterr().out, re.M)
+
+
 def test_list_flags_are_exclusive(cluster):
     with pytest.raises(SystemExit):
         cli.list_models(cli.Options(catalog_only=True, deployed_only=True), "")
@@ -401,3 +468,159 @@ def test_hfid_and_deprecated_id_alias(capsys, flag, warned):
     o = cli.parse_args(["deploy", flag, "Qwen/Qwen3-0.6B"])
     assert o.id == "Qwen/Qwen3-0.6B" and o.positional == ["deploy"]
     assert ("--id is deprecated; use --hfid" in capsys.readouterr().err) is warned
+
+
+LLMISVC = """apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: m
+spec:
+  annotations:
+    balloon.balloons.resource-policy.nri.io/container.main: vllm-balloon-tp1
+  model:
+    uri: pvc://model-store/m
+  template:
+    containers:
+      - name: main
+        args:
+          - "--served-model-name"
+          - "served"
+          - "--max-model-len=4096"
+          - "--chat-template"
+          - "/etc/chat-template/a b.jinja"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+"""
+
+
+@pytest.mark.parametrize("value, expected", [("openshift", "openshift"), ("", "kubernetes")])
+def test_platform_detect(monkeypatch, value, expected):
+    from core import platform
+    for key in ("MM_PLATFORM", "MM_LLMISVC_API_VERSION", "MM_INFERENCE_GATEWAY", "MM_AIGATEWAY_ENABLED"):
+        monkeypatch.delenv(key, raising=False)
+    answers = {"api-resources": "clusterversions.config.openshift.io\n" if value else "",
+               "api-versions": "serving.kserve.io/v1alpha1\n"}
+    monkeypatch.setattr(k8s, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 0, answers.get(a[0], ""), ""))
+    platform.detect()
+    assert os.environ["MM_PLATFORM"] == expected and os.environ["MM_LLMISVC_API_VERSION"] == "v1alpha1"
+    assert (os.environ.get("MM_INFERENCE_GATEWAY") == "openshift-ai-inference") == bool(value)
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("", (("openshift-ai-inference", "openshift-ingress"), False)),
+    ("x", (("x", "x"), True)),
+])
+def test_openshift_gateway_overrides(monkeypatch, value, expected):
+    # An empty override falls back to the OpenShift Gateway and keeps the AI gateway off; a set one is kept.
+    from core import platform
+    monkeypatch.setenv("MM_PLATFORM", "openshift")
+    monkeypatch.setenv("MM_LLMISVC_API_VERSION", "v1alpha1")
+    for key in ("MM_INFERENCE_GATEWAY", "MM_INFERENCE_GATEWAY_NS", "MM_AIGATEWAY_ENABLED"):
+        monkeypatch.setenv(key, value)
+    platform.detect()
+    assert (config.gateway_ref(), routing.gateway_enabled()) == expected
+
+
+@pytest.mark.parametrize("stdout, aborts", [("", True), ("clusterversions.config.openshift.io\n", False)])
+def test_platform_detect_failure(monkeypatch, stdout, aborts):
+    # Forbidden prints nothing: abort rather than assume Kubernetes. A stale aggregated API
+    # fails discovery but still prints the list.
+    from core import platform
+    for key in ("MM_PLATFORM", "MM_LLMISVC_API_VERSION", "MM_INFERENCE_GATEWAY", "MM_AIGATEWAY_ENABLED"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(k8s, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 1, stdout, "Forbidden"))
+    if aborts:
+        with pytest.raises(SystemExit):
+            platform.detect()
+    else:
+        platform.detect()
+        assert os.environ["MM_PLATFORM"] == "openshift"
+
+
+def test_openshift_llmisvc(monkeypatch):
+    # OpenShift AI 3.3: v1alpha1, vLLM started by its template script, no pinned UIDs.
+    import yaml
+    from core import platform
+    monkeypatch.setenv("MM_PLATFORM", "openshift")
+    monkeypatch.setenv("MM_LLMISVC_API_VERSION", "v1alpha1")
+    doc = yaml.safe_load(platform.adapt_llmisvc(platform.adapt(LLMISVC)))
+    main = doc["spec"]["template"]["containers"][0]
+    assert doc["apiVersion"] == "serving.kserve.io/v1alpha1" and "annotations" not in doc["spec"]
+    assert doc["metadata"]["annotations"] == {"balloon.balloons.resource-policy.nri.io/container.main": "vllm-balloon-tp1"}
+    assert doc["spec"]["model"] == {"uri": "pvc://model-store/m", "name": "served"}
+    assert "args" not in main and main["env"] == [
+        {"name": "VLLM_ADDITIONAL_ARGS", "value": "--max-model-len=4096 --chat-template '/etc/chat-template/a b.jinja'"}]
+    assert main["readinessProbe"]["httpGet"]["scheme"] == "HTTPS"
+    assert main["securityContext"] == {"runAsNonRoot": True}
+
+
+def test_openshift_llmisvc_keeps_given_vllm_args(monkeypatch):
+    # A VLLM_ADDITIONAL_ARGS from the catalog or --env stays, after the translated args.
+    import yaml
+    from core import platform
+    monkeypatch.setenv("MM_PLATFORM", "openshift")
+    monkeypatch.setenv("MM_LLMISVC_API_VERSION", "v1alpha1")
+    doc = yaml.safe_load(platform.adapt(LLMISVC))
+    doc["spec"]["template"]["containers"][0]["env"] = [
+        {"name": "VLLM_ADDITIONAL_ARGS", "value": "--enable-auto-tool-choice --tool-call-parser hermes"}]
+    main = yaml.safe_load(platform.adapt_llmisvc(yaml.safe_dump(doc)))["spec"]["template"]["containers"][0]
+    assert main["env"] == [{"name": "VLLM_ADDITIONAL_ARGS", "value": "--max-model-len=4096 --chat-template "
+                            "'/etc/chat-template/a b.jinja' --enable-auto-tool-choice --tool-call-parser hermes"}]
+
+
+def test_kubernetes_llmisvc_unchanged(monkeypatch):
+    from core import platform
+    monkeypatch.setenv("MM_PLATFORM", "kubernetes")
+    monkeypatch.setenv("MM_LLMISVC_API_VERSION", "v1alpha2")
+    assert platform.adapt_llmisvc(platform.adapt(LLMISVC)) == LLMISVC
+
+
+def test_openshift_skips_pool_status(monkeypatch, kubectl):
+    monkeypatch.setenv("MM_PLATFORM", "openshift")
+    routing.patch_pool_status(Model(name="m", namespace="ns"))
+    assert kubectl == []
+
+
+def test_balloon_cpu_counts_label_selected_pods(monkeypatch):
+    # OpenShift AI's v1alpha1 models land in their balloon by label, without the annotation:
+    # the capacity check must count them like annotated pods, and nothing else.
+    from core import nri_policy
+
+    def pod(name, cpu, labels=None, annotations=None, phase="Running"):
+        return {"metadata": {"name": name, "labels": labels or {}, "annotations": annotations or {}},
+                "status": {"phase": phase},
+                "spec": {"containers": [{"resources": {"requests": {"cpu": cpu}}}]}}
+    policies = {"items": [{"spec": {"balloonTypes": [
+        {"name": "vllm-balloon-tp1", "matchExpressions": [
+            {"key": "pod/labels/kserve.io/component", "operator": "In", "values": ["workload"]}]},
+        {"name": "default"}]}}]}
+    pods = {"items": [
+        pod("annotated", "4", annotations={"balloon.balloons.resource-policy.nri.io/container.main": "vllm-balloon"}),
+        pod("by-label", "8", labels={"kserve.io/component": "workload"}),
+        pod("by-label-done", "16", labels={"kserve.io/component": "workload"}, phase="Succeeded"),
+        pod("other", "2000m", labels={"app": "x"})]}
+    monkeypatch.setattr(nri_policy, "_kubectl_json",
+                        lambda *a: policies if a[1] == nri_policy._BALLOONSPOLICY_CRD else pods)
+    assert nri_policy._balloon_pods_cpu_on_node("n1") == 12
+
+
+@pytest.mark.parametrize("platform_name, want", [("kubernetes", "True"), ("openshift", "False")])
+def test_workload_ready_waits_for_routes_on_openshift(monkeypatch, platform_name, want):
+    monkeypatch.setenv("MM_PLATFORM", platform_name)
+    conditions = [{"type": "MainWorkloadReady", "status": "True"}, {"type": "Ready", "status": "False"}]
+    monkeypatch.setattr(k8s, "get_json", lambda *a: {"status": {"conditions": conditions}})
+    assert cli.workload_ready(Model(name="m", namespace="n", kind="LLMInferenceService")) == want
+
+
+@pytest.mark.parametrize("host_network, want", [("true", "10.0.0.5"), ("false", "")])
+def test_router_ip_node_fallback_needs_host_network(monkeypatch, host_network, want):
+    from core import platform
+    monkeypatch.delenv("MM_GATEWAY_IP", raising=False)
+    answers = {"deploy": host_network, "pods": "10.0.0.5"}
+    monkeypatch.setattr(k8s, "out", lambda *a: answers.get(a[1], ""))
+    assert platform.router_ip() == want
