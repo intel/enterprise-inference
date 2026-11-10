@@ -170,7 +170,7 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
         "NRI_ANNOTATIONS": _annotations(annotations, m.kind) if annotations else "",
         # GPU pods skip the AMX requirement (a Xeon placement control) and prefer the vendor's nodes.
         "AFFINITY": _affinity(m.node, catalog.require_amx and not m.gpu,
-                              gpu_vendor(os.environ.get("MM_ACCEL_RESOURCE", "")) if m.gpu else ""),
+                              gpu_vendor(m.accel_resource) if m.gpu else ""),
         "EXTRA_LABELS": "".join(f"\n    {p.split('=', 1)[0]}: {quote(p.split('=', 1)[1])}" for p in o.label),
     }
     if m.kind == "LLMInferenceService":

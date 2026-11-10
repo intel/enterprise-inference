@@ -30,13 +30,21 @@ BURSTABLE_GPU = (r'^(          limits:)\n            cpu: "[^"]+"\n(            
 GPU_DOWNLOAD_TOLERATION = (r"^(      restartPolicy: Never\n)",
                            r"\1      tolerations:\n        - key: nvidia.com/gpu\n          operator: Exists\n"
                            r"          effect: NoSchedule\n")
+# The vendor preference follows the resource the manifest requests, so an ungated --dry-run shows it too.
+UNGATED_VENDOR_PREFERENCE = (r"^(    tolerations:\n)",
+                             r"    affinity:\n      nodeAffinity:\n"
+                             r"        preferredDuringSchedulingIgnoredDuringExecution:\n"
+                             r"          - weight: 100\n            preference:\n              matchExpressions:\n"
+                             r"                - key: gpu-vendor\n                  operator: In\n"
+                             r"                  values:\n                    - nvidia\n\1")
 LLAMA_GPU_READY = [[r"get LLMInferenceService llama-3-1-70b-instruct-cuda -n llm-inference -o json$", 0,
                     _ready("MainWorkloadReady")]]
 
 GPU_CASES = [
     # gpu-llama-70b is the manifest that served on B300.
     case("gpu-llama-70b", "deploy", "llama-3-1-70b-instruct-cuda", "--dry-run", env=GPU, deviations=[BURSTABLE_GPU]),
-    case("gpu-dry-run-ungated", "deploy", "qwen3-0-6b-cuda", "--dry-run", deviations=[BURSTABLE_GPU]),
+    case("gpu-dry-run-ungated", "deploy", "qwen3-0-6b-cuda", "--dry-run",
+         deviations=[BURSTABLE_GPU, UNGATED_VENDOR_PREFERENCE]),
     case("gpu-count-node", "deploy", "qwen3-0-6b-cuda", "--gpus", "2", "--node", "w1", "--dry-run", env={**GPU, **NRI},
          deviations=[BURSTABLE_GPU]),
     case("gpu-explicit-tp", "deploy", "llama-3-1-70b-instruct-cuda", "--tp", "4", "--dry-run", env=GPU,
