@@ -1,0 +1,62 @@
+# pull_request_target: runs the main-branch copy of this file on a base-branch checkout; the PR is
+# only read as a diff, never checked out. Skips drafts and bots; claude-code-action then fails the run
+# unless github.actor has write access (author_association is unusable: intel memberships are private,
+# so members show as CONTRIBUTOR). The agent has no shell or file-write tools, so diff content cannot
+# run commands, push, or edit files. Review only - no approval is granted.
+# Diffs the API refuses (HTTP 406, too large) fail the run instead of being reviewed.
+# AI_SYS_BOT_GH_TOKEN (required) posts reviews as sys-aibot.
+name: claude-review
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+jobs:
+  review:
+    if: >-
+      !github.event.pull_request.draft &&
+      !endsWith(github.actor, '[bot]')
+    concurrency:
+      group: claude-review-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: fetch PR diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          curl -sSf -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.diff" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls/$PR" > "$RUNNER_TEMP/pr.diff"
+      - id: claude
+        uses: anthropics/claude-code-action@6d5ae526d25ce88daa2200be073e1a373167f064 # v1.0.265
+        env:
+          AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+          AWS_REGION: us-east-2
+        with:
+          use_bedrock: "true"
+          github_token: ${{ secrets.AI_SYS_BOT_GH_TOKEN }}
+          track_progress: true
+          prompt: |
+            Review this PR against .github/REVIEW_RULES.md (read it first).
+            The full PR diff is in ${{ runner.temp }}/pr.diff.
+            The working tree is the base branch, not the PR.
+            Open other files only when a finding needs surrounding context.
+            First line of your final comment must be exactly `Verdict: LGTM` or `Verdict: needs changes`,
+            then the findings as the rules describe.
+          claude_args: >-
+            --model us.anthropic.claude-opus-5-5 --fallback-model us.anthropic.claude-opus-5
+            --max-turns 30 --disallowedTools Bash,Edit,Write,MultiEdit,NotebookEdit
+      - name: show Claude error
+        if: failure() && steps.claude.outcome == 'failure'
+        run: |
+          f="$RUNNER_TEMP/claude-execution-output.json"
+          [ ! -f "$f" ] || jq -r '.. | objects | select(.type? == "result") | .result // .error // empty' "$f" | head -c 3000
