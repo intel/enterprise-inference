@@ -3,7 +3,12 @@
 # KServe Role Defaults
 # =============================================================================
 
-kserve_version: "0.18.0"
+# The platform's envoy_gateway_upgrade picks the line: latest pairs with the
+# Envoy AI Gateway 1.x that KServe 0.21 is tested with. Never downgrades.
+kserve_releases:
+  baseline: "0.18.0"
+  latest: "0.21.0"
+kserve_version: "{{ kserve_releases['latest' if envoy_gateway_upgrade | default(false) | bool else 'baseline'] }}"
 kserve_namespace: "kserve"
 # ── OpenShift (cluster_distribution) ─────────────────────────────────────────
 # OpenShift AI runs the KServe controllers, and routes every LLMInferenceService
@@ -89,7 +94,7 @@ kserve_lws_helm_repo: "oci://registry.k8s.io/lws/charts/lws"
 #   the old ghcr packages, so the images KServe ≤0.19 pins in its scheduler
 #   preset (llm-d-inference-scheduler:v0.7.1) now 403 on pull. These are the
 #   pins KServe 0.20.0 ships; the preset's EPP flags are byte-identical between
-#   0.18 and 0.20, so repinning the images is the whole fix.
+#   0.18 and 0.20, so repinning the images is the whole fix. Baseline line only.
 # ---------------------------------------------------------------------------
 kserve_llmisvc_epp_image: "ghcr.io/llm-d/llm-d-router-endpoint-picker:v0.9.0"
 kserve_llmisvc_tokenizer_image: "ghcr.io/llm-d/llm-d-uds-tokenizer:vllm-v0.19.1"
