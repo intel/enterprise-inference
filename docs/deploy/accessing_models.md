@@ -188,9 +188,10 @@ view spend, and revoke keys without curl.
 - `routing_mode: subdomain`: `https://litellm-ui.<base_domain_name>/ui/`
 - `routing_mode: path`: `https://<base_domain_name>/litellm/ui/`
 
-With Keycloak (the default) the UI signs you in through Keycloak; only `litellm_ui_groups`
-(default: the platform admin group) are admitted. Without Keycloak, log in as `admin` with
-the password from the `litellm-ui-auth` secret:
+The UI signs you in through Keycloak; only `litellm_ui_groups` (default: the platform admin
+group) are admitted. Without Keycloak the UI is not published on the gateway. Reach it with
+`kubectl port-forward -n litellm svc/litellm 4000` at `http://localhost:4000/ui/` and log in
+as `admin` with the password from the `litellm-ui-auth` secret:
 `kubectl get secret -n litellm litellm-ui-auth -o jsonpath='{.data.password}' | base64 -d`.
 
 ### Observability
