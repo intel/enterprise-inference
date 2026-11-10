@@ -18,7 +18,9 @@ A violation in changed code is a finding.
 - **Component lifecycle.** A component is registered in `components.yaml` and its role has `install`, `teardown` and `validate` tasks. Teardown removes what install created (releases, CRDs, finalizers, namespaces) and tolerates a partly installed cluster.
 - **Both modes.** Code and docs work for `routing_mode` `subdomain` and `path`, and for `auth_type` `jwt` and `litellm_vkey`.
 - **Security baseline.** Namespaces keep Pod Security `restricted` and Istio ambient labels where the role sets them; workloads run as non-root with dropped capabilities; mesh exceptions are as narrow as the port and source allow.
-- **Tests.** Changed `model_manager` behaviour has tests in `model_manager/tests`, which CI runs.
+- **model_manager is Python 3.9+.** It must run on Python 3.9 with PyYAML 5.4.1 as well as current versions (both CI rows): no `match` or other 3.10+ syntax, and `X | Y` types only in annotations, which `from __future__ import annotations` keeps unevaluated. Standard library and PyYAML only; a new dependency needs a reason. Type hints on functions; shared data as dataclasses in `core/config.py`.
+- **model_manager safety.** External tools run through `subprocess` with an argument list (`kubectl` through `core/k8s.py`), never `shell=True`, `os.system` or `eval`; each `# nosec` names the Bandit check and why it holds. YAML through `yaml.safe_load`. Output and failures go through `core/ui.py` (`info`, `ok`, `warn`, `abort`) and never include tokens or keys.
+- **Tests.** Changed `model_manager` behaviour has tests in `model_manager/tests` (unit tests, and parity tests against the `fakebin` stand-ins for `kubectl` and `curl`, no live cluster), which CI runs.
 
 Report all findings, each with `file:line`, ordered by severity. No praise, no diff summary.
 Group them for easier reading if more than 10.
