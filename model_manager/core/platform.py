@@ -121,8 +121,9 @@ def _openshift_ai_template(doc: dict) -> None:
         eval "vllm serve /mnt/models --served-model-name <spec.model.name> --port 8000
               ${VLLM_ADDITIONAL_ARGS} --ssl-certfile ... --ssl-keyfile ..."
     so container args would replace that script. Instead the flags go, shell-quoted for that eval,
-    into VLLM_ADDITIONAL_ARGS; the served name becomes spec.model.name; and the probes speak HTTPS,
-    because vLLM serves TLS there."""
+    into VLLM_ADDITIONAL_ARGS, ahead of any value it already has (catalog or --env; the later flag
+    wins in vLLM); the served name becomes spec.model.name; and the probes speak HTTPS, because
+    vLLM serves TLS there."""
     main = next(c for c in doc["spec"]["template"]["containers"] if c.get("name") == "main")
     served, rest, args = "", [], iter(main.pop("args", None) or [])
     for arg in args:
@@ -133,8 +134,11 @@ def _openshift_ai_template(doc: dict) -> None:
         else:
             rest.append(arg)
     doc["spec"].setdefault("model", {})["name"] = served or doc["metadata"]["name"]
-    main["env"] = [e for e in main.get("env") or [] if e.get("name") != "VLLM_ADDITIONAL_ARGS"] + [
-        {"name": "VLLM_ADDITIONAL_ARGS", "value": " ".join(shlex.quote(a) for a in rest)}]
+    env = main.get("env") or []
+    given = next((e.get("value") or "" for e in env if e.get("name") == "VLLM_ADDITIONAL_ARGS"), "")
+    value = " ".join([shlex.quote(a) for a in rest] + ([given] if given else []))
+    main["env"] = [e for e in env if e.get("name") != "VLLM_ADDITIONAL_ARGS"] + [
+        {"name": "VLLM_ADDITIONAL_ARGS", "value": value}]
     for probe in ("startupProbe", "livenessProbe", "readinessProbe"):
         if "httpGet" in main.get(probe, {}):
             main[probe]["httpGet"]["scheme"] = "HTTPS"

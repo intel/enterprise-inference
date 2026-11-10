@@ -314,6 +314,28 @@
                     body:
                       value: '{"error":"forbidden","message":"the token is not issued for this service"}'
 
+    # Auth off leaves the Gateway to the Kubernetes-token AuthPolicy odh-model-controller
+    # puts on it; a Keycloak one left by an install with auth would still override it.
+    - name: "kserve | OpenShift: look for the Keycloak AuthPolicy"
+      when: not kserve_openshift_auth_enabled | bool
+      kubernetes.core.k8s_info:
+        api_version: kuadrant.io/v1
+        kind: AuthPolicy
+        name: "{{ kserve_openshift_gateway_name }}-keycloak"
+        namespace: "{{ kserve_openshift_gateway_namespace }}"
+      register: _kserve_ocp_authpolicy
+
+    - name: "kserve | OpenShift: remove the Keycloak AuthPolicy (auth disabled)"
+      when:
+        - not kserve_openshift_auth_enabled | bool
+        - _kserve_ocp_authpolicy.resources | default([]) | length > 0
+      kubernetes.core.k8s:
+        state: absent
+        api_version: kuadrant.io/v1
+        kind: AuthPolicy
+        name: "{{ kserve_openshift_gateway_name }}-keycloak"
+        namespace: "{{ kserve_openshift_gateway_namespace }}"
+
     - name: "kserve | OpenShift: inference Gateway summary"
       ansible.builtin.debug:
         msg: >-

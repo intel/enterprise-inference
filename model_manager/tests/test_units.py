@@ -559,6 +559,20 @@ def test_openshift_llmisvc(monkeypatch):
     assert main["securityContext"] == {"runAsNonRoot": True}
 
 
+def test_openshift_llmisvc_keeps_given_vllm_args(monkeypatch):
+    # A VLLM_ADDITIONAL_ARGS from the catalog or --env stays, after the translated args.
+    import yaml
+    from core import platform
+    monkeypatch.setenv("MM_PLATFORM", "openshift")
+    monkeypatch.setenv("MM_LLMISVC_API_VERSION", "v1alpha1")
+    doc = yaml.safe_load(platform.adapt(LLMISVC))
+    doc["spec"]["template"]["containers"][0]["env"] = [
+        {"name": "VLLM_ADDITIONAL_ARGS", "value": "--enable-auto-tool-choice --tool-call-parser hermes"}]
+    main = yaml.safe_load(platform.adapt_llmisvc(yaml.safe_dump(doc)))["spec"]["template"]["containers"][0]
+    assert main["env"] == [{"name": "VLLM_ADDITIONAL_ARGS", "value": "--max-model-len=4096 --chat-template "
+                            "'/etc/chat-template/a b.jinja' --enable-auto-tool-choice --tool-call-parser hermes"}]
+
+
 def test_kubernetes_llmisvc_unchanged(monkeypatch):
     from core import platform
     monkeypatch.setenv("MM_PLATFORM", "kubernetes")
