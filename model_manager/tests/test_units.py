@@ -624,3 +624,76 @@ def test_router_ip_node_fallback_needs_host_network(monkeypatch, host_network, w
     answers = {"deploy": host_network, "pods": "10.0.0.5"}
     monkeypatch.setattr(k8s, "out", lambda *a: answers.get(a[1], ""))
     assert platform.router_ip() == want
+
+
+# ── Autoscaling (KEDA) ────────────────────────────────────────────────────────
+
+def _render(monkeypatch, *argv, catalog=None):
+    import yaml
+    from core import renderer
+    monkeypatch.setenv("MM_PLATFORM", "kubernetes")
+    monkeypatch.setenv("MM_LLMISVC_API_VERSION", "v1alpha2")
+    o = cli.parse_args(["deploy", *argv])
+    cat = Catalog(catalog or cli.MM_DIR / "models.yaml")
+    m = config.resolve(cat, o.positional[1] if len(o.positional) > 1 else "", o)
+    return m, yaml.safe_load(renderer.manifest(m, cat, o, {}, m.cpu, []))
+
+
+def test_autoscaling_renders_keda_scaling_instead_of_replicas(monkeypatch):
+    monkeypatch.setenv("MM_PROMETHEUS_URL", "http://prom:9090")
+    m, doc = _render(monkeypatch, "qwen3-0-6b", "--max-replicas", "3", "--scale-target", "4")
+    assert m.autoscaled and m.replicas == "1"
+    assert "replicas" not in doc["spec"]  # the CRD rejects replicas together with scaling
+    assert doc["spec"]["scaling"] == {"minReplicas": 1, "maxReplicas": 3, "keda": {"pollingInterval": 15, "triggers": [
+        {"type": "prometheus", "metadata": {
+            "serverAddress": "http://prom:9090", "threshold": "4",
+            "query": 'sum(vllm:num_requests_waiting{namespace="llm-inference",model="qwen3-0-6b"})'}}]}}
+
+
+def test_autoscaling_from_catalog_and_fixed_replicas_override(monkeypatch, tmp_path):
+    catalog = tmp_path / "models.yaml"
+    catalog.write_text((cli.MM_DIR / "models.yaml").read_text().replace(
+        "  - name: qwen3-0-6b ", "  - name: qwen3-0-6b\n    autoscaling: {min_replicas: 2, max_replicas: 4}\n    x: ", 1))
+    m, doc = _render(monkeypatch, "qwen3-0-6b", catalog=catalog)
+    assert (doc["spec"]["scaling"]["minReplicas"], doc["spec"]["scaling"]["maxReplicas"]) == (2, 4)
+    assert doc["spec"]["scaling"]["keda"]["triggers"][0]["metadata"]["threshold"] == "2"
+    m, doc = _render(monkeypatch, "qwen3-0-6b", "--replicas", "2", catalog=catalog)
+    assert not m.autoscaled and doc["spec"]["replicas"] == 2 and "scaling" not in doc["spec"]
+
+
+def test_equal_min_and_max_is_a_fixed_count(monkeypatch):
+    m, doc = _render(monkeypatch, "qwen3-0-6b", "--min-replicas", "2", "--max-replicas", "2")
+    assert not m.autoscaled and doc["spec"]["replicas"] == 2 and "scaling" not in doc["spec"]
+
+
+@pytest.mark.parametrize("argv", [
+    ["--replicas", "2", "--max-replicas", "3"],
+    ["--min-replicas", "4", "--max-replicas", "3"],
+    ["--min-replicas", "2"],
+    ["--max-replicas", "0"],
+])
+def test_bad_autoscaling_rejected(monkeypatch, argv):
+    with pytest.raises(SystemExit):
+        _render(monkeypatch, "qwen3-0-6b", *argv)
+
+
+@pytest.mark.parametrize("model, env", [("qwen3-5-2b-ovms", "kubernetes"), ("qwen3-0-6b", "openshift")])
+def test_autoscaling_limited_to_vllm_on_kubernetes(monkeypatch, model, env):
+    from core import renderer
+    o = cli.parse_args(["deploy", model, "--max-replicas", "3"])
+    cat = Catalog(cli.MM_DIR / "models.yaml")
+    m = config.resolve(cat, model, o)
+    monkeypatch.setenv("MM_PLATFORM", env)
+    with pytest.raises(SystemExit):
+        renderer.manifest(m, cat, o, {}, m.cpu, [])
+
+
+def test_autoscaling_needs_keda(monkeypatch):
+    monkeypatch.setattr(k8s, "run", lambda *args, stdin=None: subprocess.CompletedProcess(args, 1, "", "NotFound"))
+    with pytest.raises(SystemExit):
+        cli._require_keda()
+
+
+def test_list_shows_the_autoscaling_range():
+    assert cli._replicas({"scaling": {"minReplicas": 1, "maxReplicas": 3}}, {}) == "1-3"
+    assert cli._replicas({"replicas": 2}, {}) == "2"

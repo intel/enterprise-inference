@@ -161,11 +161,18 @@ class Model:
     cpu: str = ""
     memory: str = ""
     replicas: str = "1"
+    min_replicas: str = ""                    # autoscaling (KEDA) when max_replicas > min_replicas
+    max_replicas: str = ""
+    scale_target: str = ""                    # average waiting requests per replica
     node: str = ""
     chat_template: str = ""
     args: list = field(default_factory=list)
     env: dict = field(default_factory=dict)
     uri: str = ""
+
+    @property
+    def autoscaled(self) -> bool:
+        return bool(self.max_replicas) and int(self.max_replicas) > int(self.min_replicas or 1)
 
     @property
     def cat(self) -> dict:
@@ -213,6 +220,7 @@ def resolve(catalog: Catalog, target: str, o: Any) -> Model:
     m.cpu = o.cpu or m.cpu or text(pick(defaults, "cpu", 8))
     m.memory = o.memory or m.memory or text(pick(defaults, "memory", "16Gi"))
     m.replicas = o.replicas or m.replicas
+    _resolve_autoscaling(m, o)
     m.node = o.node or m.node
     if o.routing:
         m.routing = o.routing
@@ -244,6 +252,9 @@ def _from_catalog(catalog: Catalog, name: str, o: Any) -> Model:
               chat_template=text(pick(e, "chat_template")).rstrip("\n"),  # as legacy $(jq) did
               env=shaped(f"model '{name}' env", pick(e, "env", {}), dict, catalog.path),
               args=shaped(f"model '{name}' args", pick(e, "args", []), list, catalog.path))
+    scaling = shaped(f"model '{name}' autoscaling", pick(e, "autoscaling", {}), dict, catalog.path)
+    m.min_replicas, m.max_replicas, m.scale_target = (
+        text(pick(scaling, k)) for k in ("min_replicas", "max_replicas", "target_waiting"))
     template_file = text(pick(e, "chat_template_file"))
     if template_file:
         if m.chat_template:
@@ -267,6 +278,32 @@ def _from_catalog(catalog: Catalog, name: str, o: Any) -> Model:
         abort(f"Model '{name}' is not declared to support '{m.runtime}' version '{m.version}'. "
               f"Declared versions: {', '.join(declared)}")
     return m
+
+
+def _resolve_autoscaling(m: Model, o: Any) -> None:
+    """CLI over catalog; --replicas pins a fixed count. Autoscaled, m.replicas is the minimum."""
+    if o.replicas and (o.min_replicas or o.max_replicas):
+        abort("--replicas sets a fixed count: use it, or --min-replicas/--max-replicas, not both.")
+    if o.replicas:
+        m.min_replicas = m.max_replicas = m.scale_target = ""
+        return
+    m.min_replicas = o.min_replicas or m.min_replicas
+    m.max_replicas = o.max_replicas or m.max_replicas
+    m.scale_target = o.scale_target or m.scale_target
+    for what, value in (("min_replicas", m.min_replicas), ("max_replicas", m.max_replicas),
+                        ("target_waiting", m.scale_target)):
+        if value and not (is_uint(value) and int(value) > 0):
+            abort(f"Model '{m.name}' autoscaling {what} must be a positive integer, got: {value}")
+    if m.min_replicas and not m.max_replicas:
+        abort(f"Model '{m.name}': min_replicas needs max_replicas (--max-replicas).")
+    if m.max_replicas and int(m.min_replicas or 1) > int(m.max_replicas):
+        abort(f"Model '{m.name}': min_replicas ({m.min_replicas}) exceeds max_replicas ({m.max_replicas}).")
+    if m.autoscaled:
+        m.min_replicas = m.min_replicas or "1"
+        m.scale_target = m.scale_target or "2"
+        m.replicas = m.min_replicas
+    elif m.max_replicas:  # max == min: a fixed count
+        m.replicas, m.min_replicas, m.max_replicas, m.scale_target = m.max_replicas, "", "", ""
 
 
 def _chat_template_file(name: str, file: str) -> str:

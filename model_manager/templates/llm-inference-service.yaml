@@ -9,7 +9,7 @@ metadata:
 spec:
 {{NRI_ANNOTATIONS}}  model:
     uri: {{MODEL_URI}}
-  replicas: {{REPLICAS}}
+{{SCALING}}
   router:
     gateway:
       refs:

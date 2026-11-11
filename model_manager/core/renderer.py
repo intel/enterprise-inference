@@ -111,6 +111,22 @@ def _annotations(annotations: dict, kind: str) -> str:
         f"{pad}  {k}: {quote(v) if v.isdigit() or v in ('true', 'false') else v}\n" for k, v in annotations.items())
 
 
+PROMETHEUS_URL = "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
+
+
+def _replicas(m: Model) -> str:
+    """spec.replicas, or spec.scaling with a KEDA trigger on vLLM's waiting queue (KServe makes the ScaledObject).
+    The CRD rejects both together."""
+    if not m.autoscaled:
+        return f"  replicas: {m.replicas}"
+    query = f'sum(vllm:num_requests_waiting{{namespace="{m.namespace}",model="{m.name}"}})'
+    return "\n".join([
+        "  scaling:", f"    minReplicas: {m.min_replicas}", f"    maxReplicas: {m.max_replicas}", "    keda:",
+        "      pollingInterval: 15", "      triggers:", "        - type: prometheus", "          metadata:",
+        f"            serverAddress: {quote(os.environ.get('MM_PROMETHEUS_URL') or PROMETHEUS_URL)}",
+        f"            query: {quote(query)}", f"            threshold: {quote(m.scale_target)}"])
+
+
 def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_args: list[str]) -> str:
     """The LLMInferenceService / InferenceService for m. cli_args already carries any --tp injection."""
     args = engine_args(m)
@@ -126,11 +142,14 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
         "AFFINITY": _affinity(m.node, catalog.require_amx),
         "EXTRA_LABELS": "".join(f"\n    {p.split('=', 1)[0]}: {quote(p.split('=', 1)[1])}" for p in o.label),
     }
+    if m.autoscaled and (m.kind != "LLMInferenceService" or platform.is_openshift()):
+        abort(f"Autoscaling supports vLLM models (LLMInferenceService) on Kubernetes only; deploy {m.name} "
+              "with a fixed --replicas.")
     if m.kind == "LLMInferenceService":
         inline = inline_chat_template(m)
         gateway, gateway_ns = gateway_ref()
         return platform.adapt_llmisvc(render(
-            template("llm-inference-service.yaml"), **common, IMAGE=m.image,
+            template("llm-inference-service.yaml"), **common, IMAGE=m.image, SCALING=_replicas(m),
             GATEWAY_NAME=gateway, GATEWAY_NAMESPACE=gateway_ns,
             CHAT_TEMPLATE_MOUNT=(f"        volumeMounts:\n          - name: chat-template\n"
                                  f"            mountPath: {CHAT_TEMPLATE_DIR}\n            readOnly: true\n") if inline else "",

@@ -14,8 +14,11 @@ spec:
     matchLabels:
       app.kubernetes.io/part-of: llminferenceservice
       app.kubernetes.io/component: llminferenceservice-workload
+  # KServe 0.21 names the workload port http, 0.18 https (plain HTTP on both);
+  # a port the Service lacks yields no target.
   endpoints:
-    - port: https
+    - &vllm_endpoint
+      port: http
       path: /metrics
       interval: 30s
       scheme: http
@@ -27,3 +30,5 @@ spec:
           targetLabel: namespace
         - replacement: vllm
           targetLabel: engine
+    - <<: *vllm_endpoint
+      port: https

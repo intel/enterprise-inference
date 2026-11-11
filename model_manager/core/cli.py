@@ -39,7 +39,10 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
   {GREEN}--as{RESET} <name>          Deploy under a distinct name (run multiple server/version variants at once)
   {GREEN}--cpu{RESET} N              CPU cores
   {GREEN}--memory{RESET} NGi         Memory (e.g. 32Gi)
-  {GREEN}--replicas{RESET} N         Replica count (default: 1)
+  {GREEN}--replicas{RESET} N         Fixed replica count (default: 1); turns autoscaling off
+  {GREEN}--min-replicas{RESET} N     Autoscaling (KEDA, vLLM): fewest replicas (default: 1)
+  {GREEN}--max-replicas{RESET} N     Autoscaling: most replicas; above --min-replicas turns it on
+  {GREEN}--scale-target{RESET} N     Autoscaling: waiting requests per replica that trigger a scale-up (default: 2)
   {GREEN}--tp{RESET} N               Tensor-parallel size (splits across N NUMA nodes)
   {GREEN}--cpu-policy{RESET} <p>     CPU pinning: nri-balloons | kubelet-static | best-effort
                             (default: MM_CPU_POLICY, else auto-detected)
@@ -66,6 +69,7 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
 {BOLD}{CYAN}For status / scale / logs, use kubectl:{RESET}
   kubectl get llminferenceservices,inferenceservices -n llm-inference
   kubectl patch llminferenceservice <name> -n llm-inference -p '{{"spec":{{"replicas":N}}}}'
+  kubectl get scaledobject,hpa -n llm-inference          # autoscaled models
   kubectl logs -n llm-inference -l app.kubernetes.io/name=<name> -f
 
 {BOLD}{CYAN}Environment:{RESET}
@@ -115,6 +119,9 @@ class Options:
     cpu: str = ""
     memory: str = ""
     replicas: str = ""
+    min_replicas: str = ""
+    max_replicas: str = ""
+    scale_target: str = ""
     tp: str = ""
     cpu_policy: str = ""
     category: str = ""
@@ -129,7 +136,8 @@ class Options:
 FLAGS = {"--dry-run": "dry_run", "--wait": "wait", "--catalog": "catalog_only", "--deployed": "deployed_only"}
 VALUES = {"--wait-timeout": "wait_timeout", "--hfid": "id", "--id": "id", "--name": "name", "--server": "server",
           "--runtime": "server", "--server-version": "server_version", "--as": "alias", "--cpu": "cpu",
-          "--memory": "memory", "--replicas": "replicas", "--tp": "tp", "--cpu-policy": "cpu_policy",
+          "--memory": "memory", "--replicas": "replicas", "--tp": "tp",
+          "--min-replicas": "min_replicas", "--max-replicas": "max_replicas", "--scale-target": "scale_target", "--cpu-policy": "cpu_policy",
           "--category": "category", "--routing": "routing", "--node": "node"}
 LISTS = {"--env": "env", "--arg": "arg", "--label": "label"}
 
@@ -167,7 +175,8 @@ def parse_args(argv: list[str]) -> Options:
                 abort(f"{a} requires a value")
             i += 1
             value = argv[i]  # taken verbatim, so `--arg --max-model-len=4096` works
-            if a in ("--wait-timeout", "--replicas", "--tp") and not (is_uint(value) and int(value) > 0):
+            if a in ("--wait-timeout", "--replicas", "--tp", "--min-replicas", "--max-replicas",
+                     "--scale-target") and not (is_uint(value) and int(value) > 0):
                 abort(f"{a} requires a positive integer, got: {value}")
             if a == "--label":
                 _check_label(value)
@@ -316,6 +325,24 @@ def _spawn_reconciler(m: Model, timeout: int) -> tuple[Path, bool]:
     return log, True
 
 
+def _require_keda() -> None:
+    if not k8s.succeeds("get", "crd", "scaledobjects.keda.sh"):
+        abort("Autoscaling needs KEDA, which is not installed: set keda_enabled: true in global_config.yaml and "
+              "install the platform layer, or deploy with a fixed --replicas.")
+
+
+def _warn_max_unplaceable(policy, m: Model, tp: int) -> None:
+    """Pre-flight gates the minimum; a maximum that does not fit only leaves the extra replicas Pending."""
+    if truthy(os.environ.get("MM_SKIP_PREFLIGHT", "")):
+        return
+    floor, m.replicas = m.replicas, m.max_replicas
+    try:
+        if policy.preflight(m, tp):
+            warn(f"{m.name}: {m.max_replicas} replicas do not all fit now; scale-ups past capacity stay Pending.")
+    finally:
+        m.replicas = floor
+
+
 def deploy(o: Options, target: str) -> None:
     catalog = Catalog.load()
     m = resolve(catalog, target, o)
@@ -323,7 +350,9 @@ def deploy(o: Options, target: str) -> None:
     info(f"Deploying {m.name} ({m.kind})")
     info(f"  Runtime: {m.runtime}{f' @ {m.version}' if m.version else ''} | Category: {m.category} | "
          f"Routing: {m.routing or 'default'}")
-    info(f"  CPU: {m.cpu} | Memory: {m.memory} | Replicas: {m.replicas}")
+    replicas = (f"{m.min_replicas}-{m.max_replicas} (autoscaled on waiting requests > {m.scale_target}/replica)"
+                if m.autoscaled else m.replicas)
+    info(f"  CPU: {m.cpu} | Memory: {m.memory} | Replicas: {replicas}")
     if m.node:
         info(f"  Node: {m.node}")
     policy = resolve_policy(o.cpu_policy, m.node)
@@ -335,6 +364,8 @@ def deploy(o: Options, target: str) -> None:
     manifest = renderer.manifest(m, catalog, o, annotations, cpu, cli_args)
     if o.dry_run:
         return print(manifest, end="")
+    if m.autoscaled:
+        _require_keda()
 
     # Unchanged spec: skip pre-flight and apply (the running pods would count against their own cores).
     action = "apply"
@@ -354,6 +385,8 @@ def deploy(o: Options, target: str) -> None:
         _apply_chat_template(m)
     if action == "apply":
         preflight_gate(policy, m, tp)
+        if m.autoscaled:
+            _warn_max_unplaceable(policy, m, tp)
         k8s.ensure_storage(m.namespace, catalog.pvc)
         download_weights(m, catalog, cli_args)
         _install_runtime(m)
@@ -508,10 +541,18 @@ def _deployed(namespace: str) -> tuple[list[dict] | None, set[str]]:
             predictor = (spec.get("predictor") or {})
             found.append({"name": meta.get("name", ""), "namespace": meta.get("namespace", ""), "kind": kind,
                           "status": _status(obj),
-                          "replicas": str(spec.get("replicas", predictor.get("minReplicas", ""))),
+                          "replicas": _replicas(spec, predictor),
                           "server": (containers[0].get("image") or "").rsplit("/", 1)[-1]
                           or (predictor.get("model") or {}).get("runtime", "")})
     return (found if listed else None), failed
+
+
+def _replicas(spec: dict, predictor: dict) -> str:
+    """Fixed count, or min-max for an autoscaled LLMInferenceService."""
+    scaling = spec.get("scaling") or {}
+    if scaling:
+        return f"{scaling.get('minReplicas', 1)}-{scaling.get('maxReplicas', '?')}"
+    return str(spec.get("replicas", predictor.get("minReplicas", "")))
 
 
 def _table(header: tuple, rows: list[tuple]) -> None:
