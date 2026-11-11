@@ -114,7 +114,7 @@ def _annotations(annotations: dict, kind: str) -> str:
 PROMETHEUS_URL = "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
 
 
-def _replicas(m: Model) -> str:
+def _llmisvc_replicas(m: Model) -> str:
     """spec.replicas, or spec.scaling with a KEDA trigger on vLLM's waiting queue (KServe makes the ScaledObject).
     The CRD rejects both together."""
     if not m.autoscaled:
@@ -142,14 +142,11 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
         "AFFINITY": _affinity(m.node, catalog.require_amx),
         "EXTRA_LABELS": "".join(f"\n    {p.split('=', 1)[0]}: {quote(p.split('=', 1)[1])}" for p in o.label),
     }
-    if m.autoscaled and (m.kind != "LLMInferenceService" or platform.is_openshift()):
-        abort(f"Autoscaling supports vLLM models (LLMInferenceService) on Kubernetes only; deploy {m.name} "
-              "with a fixed --replicas.")
     if m.kind == "LLMInferenceService":
         inline = inline_chat_template(m)
         gateway, gateway_ns = gateway_ref()
         return platform.adapt_llmisvc(render(
-            template("llm-inference-service.yaml"), **common, IMAGE=m.image, SCALING=_replicas(m),
+            template("llm-inference-service.yaml"), **common, IMAGE=m.image, SCALING=_llmisvc_replicas(m),
             GATEWAY_NAME=gateway, GATEWAY_NAMESPACE=gateway_ns,
             CHAT_TEMPLATE_MOUNT=(f"        volumeMounts:\n          - name: chat-template\n"
                                  f"            mountPath: {CHAT_TEMPLATE_DIR}\n            readOnly: true\n") if inline else "",

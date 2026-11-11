@@ -51,8 +51,8 @@ network:
 #                    A deployed model keeps its CPU; --cpu N overrides.
 #   replicas:        replica count                (default: 1)
 #   autoscaling:     vLLM only, needs KEDA (keda_enabled); replaces replicas
-#                    {min_replicas: 1, max_replicas: 3, target_waiting: 2}
-#                    scales up when waiting requests per replica exceed target_waiting
+#                    {min_replicas: 1, max_replicas: 3, target: 2}
+#                    scales up when waiting requests per replica exceed target
 #   namespace:       target namespace             (default: llm-inference)
 #   node:            pin to a specific node
 #   routing:         epp | direct

@@ -12,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from . import platform
 from .ui import abort, info
 
 MM_DIR = Path(__file__).resolve().parents[1]
@@ -161,9 +162,9 @@ class Model:
     cpu: str = ""
     memory: str = ""
     replicas: str = "1"
-    min_replicas: str = ""                    # autoscaling (KEDA) when max_replicas > min_replicas
+    min_replicas: str = ""
     max_replicas: str = ""
-    scale_target: str = ""                    # average waiting requests per replica
+    scale_target: str = ""                    # waiting requests per replica that trigger a scale-up
     node: str = ""
     chat_template: str = ""
     args: list = field(default_factory=list)
@@ -254,7 +255,7 @@ def _from_catalog(catalog: Catalog, name: str, o: Any) -> Model:
               args=shaped(f"model '{name}' args", pick(e, "args", []), list, catalog.path))
     scaling = shaped(f"model '{name}' autoscaling", pick(e, "autoscaling", {}), dict, catalog.path)
     m.min_replicas, m.max_replicas, m.scale_target = (
-        text(pick(scaling, k)) for k in ("min_replicas", "max_replicas", "target_waiting"))
+        text(pick(scaling, k)) for k in ("min_replicas", "max_replicas", "target"))
     template_file = text(pick(e, "chat_template_file"))
     if template_file:
         if m.chat_template:
@@ -291,7 +292,7 @@ def _resolve_autoscaling(m: Model, o: Any) -> None:
     m.max_replicas = o.max_replicas or m.max_replicas
     m.scale_target = o.scale_target or m.scale_target
     for what, value in (("min_replicas", m.min_replicas), ("max_replicas", m.max_replicas),
-                        ("target_waiting", m.scale_target)):
+                        ("target", m.scale_target)):
         if value and not (is_uint(value) and int(value) > 0):
             abort(f"Model '{m.name}' autoscaling {what} must be a positive integer, got: {value}")
     if m.min_replicas and not m.max_replicas:
@@ -299,6 +300,9 @@ def _resolve_autoscaling(m: Model, o: Any) -> None:
     if m.max_replicas and int(m.min_replicas or 1) > int(m.max_replicas):
         abort(f"Model '{m.name}': min_replicas ({m.min_replicas}) exceeds max_replicas ({m.max_replicas}).")
     if m.autoscaled:
+        if m.kind != "LLMInferenceService" or platform.is_openshift():
+            abort(f"Autoscaling supports vLLM models (LLMInferenceService) on Kubernetes only; deploy {m.name} "
+                  "with a fixed --replicas.")
         m.min_replicas = m.min_replicas or "1"
         m.scale_target = m.scale_target or "2"
         m.replicas = m.min_replicas

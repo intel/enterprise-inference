@@ -134,7 +134,8 @@ def test_chat_template_file_absolute_path(tmp_path):
     assert m.chat_template == "{{ messages }}"  # used like inline Jinja, trailing newlines dropped
 
 
-@pytest.mark.parametrize("flag", ["--tp", "--replicas", "--wait-timeout"])
+@pytest.mark.parametrize("flag", ["--tp", "--replicas", "--wait-timeout", "--min-replicas", "--max-replicas",
+                                  "--scale-target"])
 def test_zero_counts_rejected(flag):
     with pytest.raises(SystemExit):
         cli.parse_args(["deploy", "m", flag, "0"])
@@ -653,10 +654,11 @@ def test_autoscaling_renders_keda_scaling_instead_of_replicas(monkeypatch):
 def test_autoscaling_from_catalog_and_fixed_replicas_override(monkeypatch, tmp_path):
     catalog = tmp_path / "models.yaml"
     catalog.write_text((cli.MM_DIR / "models.yaml").read_text().replace(
-        "  - name: qwen3-0-6b ", "  - name: qwen3-0-6b\n    autoscaling: {min_replicas: 2, max_replicas: 4}\n    x: ", 1))
+        "  - name: qwen3-0-6b ", "  - name: qwen3-0-6b\n    autoscaling: {min_replicas: 2, max_replicas: 4, target: 5}\n"
+        "    x: ", 1))
     m, doc = _render(monkeypatch, "qwen3-0-6b", catalog=catalog)
     assert (doc["spec"]["scaling"]["minReplicas"], doc["spec"]["scaling"]["maxReplicas"]) == (2, 4)
-    assert doc["spec"]["scaling"]["keda"]["triggers"][0]["metadata"]["threshold"] == "2"
+    assert doc["spec"]["scaling"]["keda"]["triggers"][0]["metadata"]["threshold"] == "5"
     m, doc = _render(monkeypatch, "qwen3-0-6b", "--replicas", "2", catalog=catalog)
     assert not m.autoscaled and doc["spec"]["replicas"] == 2 and "scaling" not in doc["spec"]
 
@@ -679,13 +681,10 @@ def test_bad_autoscaling_rejected(monkeypatch, argv):
 
 @pytest.mark.parametrize("model, env", [("qwen3-5-2b-ovms", "kubernetes"), ("qwen3-0-6b", "openshift")])
 def test_autoscaling_limited_to_vllm_on_kubernetes(monkeypatch, model, env):
-    from core import renderer
-    o = cli.parse_args(["deploy", model, "--max-replicas", "3"])
-    cat = Catalog(cli.MM_DIR / "models.yaml")
-    m = config.resolve(cat, model, o)
     monkeypatch.setenv("MM_PLATFORM", env)
+    o = cli.parse_args(["deploy", model, "--max-replicas", "3"])
     with pytest.raises(SystemExit):
-        renderer.manifest(m, cat, o, {}, m.cpu, [])
+        config.resolve(Catalog(cli.MM_DIR / "models.yaml"), model, o)
 
 
 def test_autoscaling_needs_keda(monkeypatch):
@@ -697,3 +696,44 @@ def test_autoscaling_needs_keda(monkeypatch):
 def test_list_shows_the_autoscaling_range():
     assert cli._replicas({"scaling": {"minReplicas": 1, "maxReplicas": 3}}, {}) == "1-3"
     assert cli._replicas({"replicas": 2}, {}) == "2"
+
+
+@pytest.fixture
+def deploy_env(monkeypatch):
+    """deploy() against a cluster where every kubectl call fails (no KEDA, nothing deployed)."""
+    calls = []
+    for k, v in {"MM_PLATFORM": "kubernetes", "MM_LLMISVC_API_VERSION": "v1alpha2", "MM_CPU_POLICY": "best-effort",
+                 "MM_CONFIG": str(cli.MM_DIR / "models.yaml")}.items():
+        monkeypatch.setenv(k, v)
+
+    def run(*args, stdin=None):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 1, "", "NotFound")
+    monkeypatch.setattr(k8s, "run", run)
+    return calls
+
+
+def test_dry_run_needs_no_keda(deploy_env, capsys):
+    cli.deploy(cli.parse_args(["deploy", "qwen3-0-6b", "--max-replicas", "3", "--dry-run"]), "qwen3-0-6b")
+    assert "scaling:" in capsys.readouterr().out
+    assert not any(a[:2] == ("get", "crd") for a in deploy_env)
+
+
+def test_missing_keda_aborts_before_any_change(deploy_env):
+    with pytest.raises(SystemExit):
+        cli.deploy(cli.parse_args(["deploy", "qwen3-0-6b", "--max-replicas", "3"]), "qwen3-0-6b")
+    assert ("get", "crd", "scaledobjects.keda.sh") in deploy_env
+    assert not any(a[0] in ("apply", "create", "delete") for a in deploy_env)
+
+
+@pytest.mark.parametrize("fits_max, warned", [(True, False), (False, True)])
+def test_max_replicas_only_warns(monkeypatch, capsys, fits_max, warned):
+    class Policy:
+        def preflight(self, m, tp):
+            print("policy note")  # its notes were printed by the first pass already
+            return [] if fits_max or m.replicas != "3" else ["too big"]
+    m = Model(name="m", namespace="n", replicas="1", min_replicas="1", max_replicas="3")
+    cli._warn_max_unplaceable(Policy(), m, 1)
+    out = capsys.readouterr()
+    assert m.replicas == "1" and "policy note" not in out.out + out.err
+    assert ("do not all fit" in out.err) == warned

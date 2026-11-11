@@ -1,7 +1,10 @@
 """model-manager CLI: deploy, undeploy, list and cpu-collisions-check."""
 from __future__ import annotations
 
+import contextlib
+import dataclasses
 import fcntl
+import io
 import json
 import os
 import re
@@ -332,15 +335,14 @@ def _require_keda() -> None:
 
 
 def _warn_max_unplaceable(policy, m: Model, tp: int) -> None:
-    """Pre-flight gates the minimum; a maximum that does not fit only leaves the extra replicas Pending."""
+    """Pre-flight gates the minimum; a maximum that does not fit only leaves the extra replicas Pending.
+    The first pass already printed the policy's own notes, so this one runs silently on a copy."""
     if truthy(os.environ.get("MM_SKIP_PREFLIGHT", "")):
         return
-    floor, m.replicas = m.replicas, m.max_replicas
-    try:
-        if policy.preflight(m, tp):
-            warn(f"{m.name}: {m.max_replicas} replicas do not all fit now; scale-ups past capacity stay Pending.")
-    finally:
-        m.replicas = floor
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        errors = policy.preflight(dataclasses.replace(m, replicas=m.max_replicas), tp)
+    if errors:
+        warn(f"{m.name}: {m.max_replicas} replicas do not all fit now; scale-ups past capacity stay Pending.")
 
 
 def deploy(o: Options, target: str) -> None:
