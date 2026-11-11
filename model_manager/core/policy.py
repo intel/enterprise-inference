@@ -176,12 +176,41 @@ class GpuRuntime(BestEffort):
     controls, and the accelerator resource limit does the scheduling. The pod is rendered without a CPU
     limit (Burstable), so kubelet's static CPU manager does not pin it either. Never selected by --cpu-policy."""
     name = "n/a (GPU runtime — no CPU pinning)"
+    label = "GPU"
 
     def annotations(self, m: Model, tp: int) -> tuple[dict, str]:
         return {}, m.cpu
 
+    def preflight(self, m: Model, tp: int) -> list[str]:
+        """The cluster's allocatable GPUs decide, not the declared accelerator: a node in the rack profile
+        that never joined, or whose device plugin is not up, advertises none."""
+        nodes = k8s.get_json("node", m.node) if m.node else k8s.get_json("nodes")
+        if not nodes:
+            warn(f"Could not list nodes to verify {m.accel_resource} capacity — skipping the GPU capacity check.")
+            return []
+        alloc = [_allocatable(n, m.accel_resource) for n in ([nodes] if m.node else nodes.get("items", []))
+                 if not pick(n.get("spec"), "unschedulable", False)]
+        largest, need = max(alloc, default=0), int(m.gpus)
+        if largest >= need:
+            return []
+        if not largest:
+            return [f"No schedulable node advertises allocatable {m.accel_resource}: no GPU node has joined the "
+                    "cluster, or its device plugin is not ready yet."]
+        return [f"No node has {need} allocatable {m.accel_resource}; the largest offers {largest}. A pod's GPUs "
+                "cannot span nodes, so it would stay Pending."]
+
+    def failure(self, m: Model, tp: int) -> str:
+        return (f"GPU pre-flight failed: cannot place {m.name} ({m.gpus} x {m.accel_resource}) on any node. Lower "
+                "--gpus, or wait until the GPU node is Ready with its device plugin. Override with MM_PREFLIGHT=warn "
+                "(proceed anyway) or MM_SKIP_PREFLIGHT=1 (skip check).")
+
 
 POLICIES = {p.name: p for p in (NriBalloons, KubeletStatic, BestEffort)}
+
+
+def _allocatable(node: dict, resource: str) -> int:
+    value = text(pick(pick(node.get("status"), "allocatable", {}), resource, "0"))
+    return int(value) if is_uint(value) else 0
 
 
 def _whole_cpus(cpu: str, floor: bool = False) -> int:

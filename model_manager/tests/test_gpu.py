@@ -9,6 +9,7 @@ dir>` from that branch, with bash 5.2's patsub_replacement off.
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 import tempfile
@@ -17,7 +18,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from core import cli, config, renderer  # noqa: E402
+from core import cli, config, k8s, policy, renderer  # noqa: E402
 from core.config import Catalog, Model  # noqa: E402
 from core.renderer import gpu_vendor  # noqa: E402
 from test_parity import BE, DOWNLOAD, GOLDEN, MM, NO_LITELLM_URL, NRI, POOL, _ready, case, run  # noqa: E402
@@ -40,6 +41,16 @@ UNGATED_VENDOR_PREFERENCE = (r"^(    tolerations:\n)",
 LLAMA_GPU_READY = [[r"get LLMInferenceService llama-3-1-70b-instruct-cuda -n llm-inference -o json$", 0,
                     _ready("MainWorkloadReady")]]
 
+
+def _nodes(*gpus, unschedulable=()):
+    """`kubectl get nodes -o json`: one node per entry, with that many allocatable GPUs (None: no GPUs)."""
+    return {"items": [{"metadata": {"name": f"n{i}"}, "spec": {"unschedulable": i in unschedulable},
+                       "status": {"allocatable": {"cpu": "64", **({} if g is None else {"nvidia.com/gpu": str(g)})}}}
+                      for i, g in enumerate(gpus)]}
+
+
+GPU_NODES = [[r"get nodes -o json$", 0, json.dumps(_nodes(8))]]
+
 GPU_CASES = [
     # gpu-llama-70b is the manifest that served on B300.
     case("gpu-llama-70b", "deploy", "llama-3-1-70b-instruct-cuda", "--dry-run", env=GPU, deviations=[BURSTABLE_GPU]),
@@ -53,7 +64,8 @@ GPU_CASES = [
     case("gpu-gate-refuses", "deploy", "qwen3-0-6b-cuda"),
     case("gpu-bad-count", "deploy", "qwen3-0-6b-cuda", "--gpus", "x", env=GPU),
     case("gpu-deploy-wait", "deploy", "llama-3-1-70b-instruct-cuda", "--wait", env=GPU,
-         k8s=DOWNLOAD + POOL + LLAMA_GPU_READY, deviations=[NO_LITELLM_URL, BURSTABLE_GPU, GPU_DOWNLOAD_TOLERATION]),
+         k8s=GPU_NODES + DOWNLOAD + POOL + LLAMA_GPU_READY,
+         deviations=[NO_LITELLM_URL, BURSTABLE_GPU, GPU_DOWNLOAD_TOLERATION]),
 ]
 
 
@@ -143,6 +155,44 @@ def test_gpu_gate_is_inert_on_cpu(monkeypatch):
     cli._gpu_gate(Model(name="m", namespace="n", runtime="vllm", rt={"device": "cpu"}), dry_run=False)
 
 
+GPU_MODEL = {"name": "m", "namespace": "n", "runtime": "vllm-cuda",
+             "rt": {"device": "gpu", "accelerator_resource": "nvidia.com/gpu"}}
+
+
+@pytest.mark.parametrize("nodes, gpus, fits", [
+    (_nodes(None, None), "1", False),               # no GPU node has joined
+    (_nodes(4, 4), "8", False),                     # a pod's GPUs cannot span nodes
+    (_nodes(None, 8), "8", True),
+    (_nodes(8, 2, unschedulable={0}), "4", False),  # a cordoned node does not count
+])
+def test_gpu_preflight_counts_the_clusters_gpus(monkeypatch, nodes, gpus, fits):
+    monkeypatch.setattr(k8s, "get_json", lambda *a: nodes)
+    assert (policy.GpuRuntime().preflight(Model(**GPU_MODEL, gpus=gpus), int(gpus)) == []) is fits
+
+
+def test_gpu_preflight_on_a_named_node(monkeypatch):
+    monkeypatch.setattr(k8s, "get_json", lambda *a: _nodes(2)["items"][0] if a == ("node", "w1") else None)
+    m = Model(**GPU_MODEL, gpus="4", node="w1")
+    assert policy.GpuRuntime().preflight(m, 4) == [
+        "No node has 4 allocatable nvidia.com/gpu; the largest offers 2. A pod's GPUs cannot span nodes, so it "
+        "would stay Pending."]
+
+
+def test_declared_gpus_the_cluster_lacks_stop_the_deploy(monkeypatch):
+    # MM_ACCEL_RESOURCE comes from the rack profile's accelerator; the nodes advertise no GPUs.
+    monkeypatch.setenv("MM_ACCEL_RESOURCE", "nvidia.com/gpu")
+    for var in ("MM_SKIP_PREFLIGHT", "MM_PREFLIGHT", "MM_NRI_PREFLIGHT"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(k8s, "get_json", lambda *a: _nodes(None, None))
+    with pytest.raises(SystemExit):
+        policy.preflight_gate(policy.GpuRuntime(), Model(**GPU_MODEL, gpus="1"), 1)
+
+
+def test_gpu_preflight_skips_when_nodes_cannot_be_listed(monkeypatch):
+    monkeypatch.setattr(k8s, "get_json", lambda *a: None)
+    assert policy.GpuRuntime().preflight(Model(**GPU_MODEL, gpus="1"), 1) == []
+
+
 def test_gpu_resolution_precedence(monkeypatch):
     monkeypatch.setenv("MM_CONFIG", str(cli.MM_DIR / "models.yaml"))
     catalog = Catalog.load()
@@ -151,6 +201,19 @@ def test_gpu_resolution_precedence(monkeypatch):
     assert resolve("llama-3-1-70b-instruct-cuda", gpus="2").gpus == "2"  # --gpus wins
     assert resolve("qwen3-0-6b", gpus="2").gpus == ""                    # CPU runtime: never set
     assert resolve("", id="org/m", server="vllm-cuda", category="llm").gpus == "1"  # category default
+
+
+@pytest.mark.parametrize("name, gpus", [("nemotron-3-5-lightning-30b-a3b-cuda", 1),
+                                        ("nemotron-3-super-120b-a12b-cuda", 4),
+                                        ("nemotron-3-ultra-550b-a55b-cuda", 8)])
+def test_nemotron_entries(monkeypatch, name, gpus):
+    monkeypatch.setenv("MM_CONFIG", str(cli.MM_DIR / "models.yaml"))
+    m = config.resolve(Catalog.load(), name, cli.Options())
+    assert m.gpu and m.gpus == str(gpus) and m.model_id.startswith("nvidia/")
+    args, tp = cli._engine_cli_args(cli.Options(), gpus, tuple(renderer.engine_args(m)))
+    assert tp == gpus and (args == ["--tensor-parallel-size", str(gpus)] if gpus > 1 else args == [])
+    assert {"--reasoning-parser", "nemotron_v3", "--tool-call-parser", "qwen3_coder"} <= set(renderer.engine_args(m))
+    assert not renderer.trust_remote_code(m, args)
 
 
 if __name__ == "__main__":
