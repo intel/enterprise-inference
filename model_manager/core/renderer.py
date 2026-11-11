@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 from . import platform
-from .config import DNS_LABEL, Catalog, Model, gateway_ref, mm_path, pick, text
+from .config import Catalog, Model, gateway_ref, mm_path, pick, text
 from .ui import abort
 
 CHAT_TEMPLATE_DIR = "/etc/chat-template"
@@ -116,9 +116,7 @@ PROMETHEUS_URL = "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster
 
 
 def _trigger(m: Model) -> tuple[str, str]:
-    """The Prometheus server and the runtime's signal query for m (names are DNS labels, safe in PromQL)."""
-    if not DNS_LABEL.fullmatch(m.namespace):
-        abort(f"Invalid namespace '{m.namespace}' for '{m.name}': use a Kubernetes namespace name.")
+    """The Prometheus server and the runtime's signal query for m (Model.check made both names DNS labels)."""
     return (os.environ.get("MM_PROMETHEUS_URL") or PROMETHEUS_URL,
             m.scale_query.replace("$namespace", m.namespace).replace("$model", m.name))
 

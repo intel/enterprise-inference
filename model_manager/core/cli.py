@@ -341,14 +341,27 @@ def _require_autoscaling(m: Model) -> None:
 def _drop_stale_autoscaler(m: Model) -> None:
     """KServe keeps the predictor's autoscaler of the previous class when the class changes, and KEDA
     rejects a ScaledObject for a Deployment an HPA manages (kserve#5196). Remove the one this
-    InferenceService owns. Order matters: KServe does not watch HPAs, so the HPA goes before the
-    apply (whose reconcile then finds none); it does watch ScaledObjects, so one goes after the apply."""
+    InferenceService owns (see _apply_manifest for when)."""
     kind = "hpa" if m.autoscaled else "scaledobject.keda.sh"
     stale = k8s.get_json(kind, f"{m.name}-predictor", "-n", m.namespace) or {}
     owners = (stale.get("metadata") or {}).get("ownerReferences") or []
     if any(o.get("kind") == "InferenceService" and o.get("name") == m.name for o in owners):
         info(f"Removing the previous autoscaler {kind}/{m.name}-predictor")
         k8s.delete(kind, f"{m.name}-predictor", m.namespace, quiet=True)
+
+
+def _apply_manifest(m: Model, manifest: str, changed: bool) -> None:
+    """Apply a changed manifest, handing over from the previous autoscaler class. KServe does not watch
+    HPAs, so the HPA goes before the apply (whose reconcile then finds none); it does watch ScaledObjects,
+    so one goes after it. An unchanged spec still cleans up: that repairs a model already stuck."""
+    isvc = m.kind == "InferenceService"
+    if changed:
+        if isvc and m.autoscaled:
+            _drop_stale_autoscaler(m)
+        k8s.apply(manifest, ssa=True)
+        ok(f"Manifest applied: {m.kind}/{m.name} in {m.namespace}")
+    if isvc and (not m.autoscaled or not changed):
+        _drop_stale_autoscaler(m)
 
 
 def deploy(o: Options, target: str) -> None:
@@ -399,12 +412,7 @@ def deploy(o: Options, target: str) -> None:
         k8s.ensure_storage(m.namespace, catalog.pvc)
         download_weights(m, catalog, cli_args)
         _install_runtime(m)
-        if m.kind == "InferenceService" and m.autoscaled:
-            _drop_stale_autoscaler(m)
-        k8s.apply(manifest, ssa=True)
-        ok(f"Manifest applied: {m.kind}/{m.name} in {m.namespace}")
-    if m.kind == "InferenceService" and (not m.autoscaled or action == "skip"):
-        _drop_stale_autoscaler(m)  # skip: repairs a model stuck on kserve#5196 (KServe's next retry succeeds)
+    _apply_manifest(m, manifest, action == "apply")
     routing.register(m)
 
     timeout = int(o.wait_timeout or 900)  # model load + warmup is slow

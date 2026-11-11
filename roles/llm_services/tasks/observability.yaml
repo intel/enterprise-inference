@@ -7,37 +7,37 @@
 #   2. Grafana dashboard ConfigMap → files/dashboards/<engine>.json (auto-loaded by Grafana sidecar)
 #
 # HOW TO ADD A NEW ENGINE (e.g. triton):
-#   1. Create files/servicemonitors/triton.yaml  (ServiceMonitor pointing at :metrics)
+#   1. Create files/servicemonitors/triton.yaml  (ServiceMonitor or PodMonitor on :metrics)
 #   2. Create files/dashboards/triton.json       (Grafana dashboard JSON)
 #   3. Add 'triton' to llm_services_engines in defaults/main.yaml
 #   That's it — this task iterates the list and deploys both automatically.
 #
 # HOW TO DISABLE AN ENGINE:
 #   Remove it from llm_services_engines — nothing is deleted from the cluster
-#   (ServiceMonitor and ConfigMap are left in place until teardown).
+#   (the monitor and ConfigMap are left in place until teardown).
 # =============================================================================
 
-- name: "llm_services | observability | Check for ServiceMonitor file"
+- name: "llm_services | observability | Check for monitor file"
   ansible.builtin.stat:
     path: "{{ role_path }}/files/servicemonitors/{{ item }}.yaml"
   loop: "{{ llm_services_engines }}"
   register: _llm_sm_files
 
 # On OpenShift:
-#   - user-workload monitoring scrapes only the ServiceMonitor's own namespace
+#   - user-workload monitoring scrapes only the monitor's own namespace
 #     (namespaceSelector is ignored): put it next to the models;
 #   - OpenShift AI serves the vLLM models over HTTPS with a self-signed certificate.
 #     Its own PodMonitor renames the metrics (kserve_vllm:…), so the dashboards
-#     need this one.
+#     need this one. Other monitors (e.g. the ovms PodMonitor) are left as they are.
 - name: "llm_services | observability | Deploy ServiceMonitors / PodMonitors"
   vars:
     _llm_sm_openshift: "{{ cluster_distribution | default('kubernetes') == 'openshift' }}"
-    _llm_sm_tls: "{{ _llm_sm_openshift | bool and item.item is match('vllm') }}"
     _llm_sm: "{{ lookup('file', role_path + '/files/servicemonitors/' + item.item + '.yaml') | from_yaml }}"
-    _llm_sm_openshift_spec:
-      endpoints: >-
-        {{ _llm_sm.spec.endpoints | map('combine', {'scheme': 'https', 'tlsConfig': {'insecureSkipVerify': true}}) | list
-           if _llm_sm_tls | bool else _llm_sm.spec.endpoints }}
+    _llm_sm_tls: "{{ _llm_sm.kind == 'ServiceMonitor' and item.item is match('vllm') }}"
+    _llm_sm_openshift_spec: >-
+      {{ {'endpoints': _llm_sm.spec.endpoints
+                       | map('combine', {'scheme': 'https', 'tlsConfig': {'insecureSkipVerify': true}}) | list}
+         if _llm_sm_tls | bool else {} }}
   kubernetes.core.k8s:
     state: present
     namespace: "{{ llm_services_namespace if _llm_sm_openshift | bool else observability_namespace | default('monitoring') }}"
@@ -47,7 +47,7 @@
          if _llm_sm_openshift | bool else _llm_sm }}
   loop: "{{ _llm_sm_files.results }}"
   loop_control:
-    label: "ServiceMonitor/{{ item.item }}"
+    label: "{{ item.item }}"
   when: item.stat.exists
 
 - name: "llm_services | observability | Check for dashboard file"

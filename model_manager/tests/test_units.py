@@ -687,7 +687,7 @@ def test_ovms_autoscaling_renders_keda_on_the_predictor(monkeypatch):
     m, doc = _render(monkeypatch, "qwen3-5-2b-ovms", "--max-replicas", "3")
     assert doc["kind"] == "InferenceService" and m.scale_target == "4"  # the runtime's default
     assert doc["metadata"]["annotations"] == {"serving.kserve.io/autoscalerClass": "keda"}
-    assert doc["metadata"]["labels"]["inference-engine"] == "ovms"  # the ovms ServiceMonitor selects it
+    assert doc["metadata"]["labels"]["inference-engine"] == "ovms"  # the ovms PodMonitor selects it
     predictor = doc["spec"]["predictor"]
     assert (predictor["minReplicas"], predictor["maxReplicas"]) == (1, 3)
     assert predictor["autoScaling"] == {"metrics": [{"type": "External", "external": {
@@ -719,8 +719,10 @@ def test_namespace_must_be_a_dns_label(monkeypatch, tmp_path):
     catalog = tmp_path / "models.yaml"
     catalog.write_text((cli.MM_DIR / "models.yaml").read_text().replace(
         "  namespace: llm-inference ", '  namespace: \'x"}) or vector(1\' ', 1))
+    monkeypatch.setenv("MM_PLATFORM", "kubernetes")
+    m = config.resolve(Catalog(catalog), "qwen3-0-6b", cli.parse_args(["deploy", "qwen3-0-6b", "--max-replicas", "3"]))
     with pytest.raises(SystemExit):  # it goes into PromQL
-        _render(monkeypatch, "qwen3-0-6b", "--max-replicas", "3", catalog=catalog)
+        m.check()
 
 
 def test_autoscaling_not_on_openshift(monkeypatch):
@@ -831,3 +833,39 @@ def test_stale_autoscaler_of_the_other_class_removed(monkeypatch, autoscaled, ki
     cli._drop_stale_autoscaler(m)
     assert calls[0][:3] == ("get", kind, "m-predictor")
     assert (("delete", kind, "m-predictor", "-n", "ns", "--ignore-not-found") in calls) == removed
+
+
+@pytest.mark.parametrize("kind, autoscaled, changed, want", [
+    # To KEDA: the HPA goes first; KServe does not watch HPAs, so the apply's reconcile finds none.
+    ("InferenceService", True, True, ["get hpa", "delete hpa", "apply"]),
+    # To fixed: the ScaledObject goes after; KServe watches them and would recreate one under class keda.
+    ("InferenceService", False, True, ["apply", "get scaledobject.keda.sh", "delete scaledobject.keda.sh"]),
+    # Unchanged spec: no apply, the cleanup still repairs a model already stuck.
+    ("InferenceService", True, False, ["get hpa", "delete hpa"]),
+    ("InferenceService", False, False, ["get scaledobject.keda.sh", "delete scaledobject.keda.sh"]),
+    ("LLMInferenceService", True, True, ["apply"]),  # KServe hands over by itself
+])
+def test_autoscaler_handover_order(monkeypatch, kind, autoscaled, changed, want):
+    calls = []
+
+    def run(*args, stdin=None):
+        calls.append(" ".join(args[:2]))
+        owned = {"metadata": {"ownerReferences": [{"kind": "InferenceService", "name": "m"}]}}
+        return subprocess.CompletedProcess(args, 0, json.dumps(owned) if args[0] == "get" else "", "")
+    monkeypatch.setattr(k8s, "run", run)
+    m = Model(name="m", namespace="ns", kind=kind, **({"min_replicas": "1", "max_replicas": "3"} if autoscaled else {}))
+    cli._apply_manifest(m, "manifest", changed)
+    assert [c.replace("apply --server-side", "apply") for c in calls] == want
+
+
+def test_dry_run_changes_no_autoscaler(deploy_env, capsys):
+    cli.deploy(cli.parse_args(["deploy", "qwen3-5-2b-ovms", "--max-replicas", "3", "--dry-run"]), "qwen3-5-2b-ovms")
+    assert "autoScaling:" in capsys.readouterr().out
+    assert not any(a[0] in ("apply", "delete") for a in deploy_env)
+
+
+@pytest.mark.parametrize("model", ["qwen3-0-6b", "qwen3-5-2b-ovms"])
+def test_runtime_default_target_needs_no_max(monkeypatch, model):
+    # The runtime's default scale_target applies only once autoscaling is on; a plain deploy stays fixed.
+    m, _ = _render(monkeypatch, model)
+    assert not m.autoscaled and m.replicas == "1" and m.scale_target == ""

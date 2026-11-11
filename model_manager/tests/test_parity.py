@@ -80,7 +80,7 @@ HELP_SCALING = [
 ]
 # A kubelet-static pod requests cpu CPUs; tensor parallelism splits them, it does not multiply them.
 KUBELET_PER_POD = (r"allocatable CPUs \(cpu=(\d+) x tp=\d+\)", r"allocatable CPUs (cpu=\1)")
-# OVMS InferenceServices carry inference-engine: ovms, which the ovms ServiceMonitor selects.
+# OVMS InferenceServices carry inference-engine: ovms, which the ovms PodMonitor selects.
 OVMS_LABEL = (r"^(kind: InferenceService\nmetadata:\n(?:  .*\n){3}    app\.kubernetes\.io/name: .*\n)",
               r"\1    inference-engine: ovms\n")
 HELP_HFID = [

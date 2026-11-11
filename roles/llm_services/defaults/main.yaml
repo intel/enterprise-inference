@@ -133,7 +133,7 @@ llm_services_mm_job_timeout: 3600     # seconds; weights download + model load
 # =============================================================================
 # Inference engine observability
 # =============================================================================
-# Each engine listed here gets a ServiceMonitor (Prometheus scraping) and a
+# Each engine listed here gets a ServiceMonitor or PodMonitor (Prometheus scraping) and a
 # Grafana dashboard auto-deployed from files/servicemonitors/ and files/dashboards/.
 #
 # To add a new engine (e.g. triton):
@@ -150,7 +150,7 @@ llm_services_engines:
   - "vllm-{{ kubernetes_accelerator | default('cpu') }}"
   - ovms                              # OpenVINO Model Server (InferenceService predictors)
 
-# Skip ServiceMonitor + dashboard deployment if observability stack is absent.
+# Skip monitor + dashboard deployment if observability stack is absent.
 llm_services_observability_enabled: "{{ observability_enabled | default(true) | bool }}"
 # Enable ambient mode label on namespace if Istio is enabled in the cluster
 istio_enabled: false

@@ -185,6 +185,8 @@ class Model:
         """Reject names/ids that are not safe to embed in manifests and the download script."""
         if not DNS_LABEL.fullmatch(self.name):
             abort(f"Invalid model name '{self.name}': use lowercase letters, digits and '-' (max 63 characters).")
+        if not DNS_LABEL.fullmatch(self.namespace):  # also goes into the autoscaling PromQL
+            abort(f"Invalid namespace '{self.namespace}' for '{self.name}': use a Kubernetes namespace name.")
         if not HF_REPO.fullmatch(self.model_id):
             abort(f"Invalid model_id '{self.model_id}' for '{self.name}': expected a HuggingFace repo id "
                   "such as org/name.")
