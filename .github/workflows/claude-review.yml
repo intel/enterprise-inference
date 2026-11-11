@@ -6,7 +6,8 @@
 # so members show as CONTRIBUTOR). The agent has no shell or file-write tools, so diff content cannot
 # run commands, push, or edit files. Review only - no approval is granted.
 # Diffs the API refuses (HTTP 406, too large) fail the run instead of being reviewed.
-# Runs when a PR opens or is ready, and on demand: add the claude-review label (removed again after the run).
+# Runs when a PR opens or is ready, and on demand: add the claude-review label. A separate job removes it
+# again, also when the review is skipped (draft, bot), so adding it always triggers a run.
 # The PR author's own comments go in as notes, so replies to earlier reviews count; they are no more trusted
 # than the diff the same author already controls, and the prompt treats them as context, not instructions.
 # AI_SYS_BOT_GH_TOKEN (required) posts reviews as sys-aibot.
@@ -36,6 +37,7 @@ jobs:
         with:
           persist-credentials: false
       - name: fetch PR diff, the author's notes and the base review rules
+        shell: bash  # adds -o pipefail: a failed comments request stops the run
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
@@ -45,7 +47,7 @@ jobs:
           curl -sSf -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.diff" \
             "$api/pulls/$PR" > "$RUNNER_TEMP/pr.diff"
           for kind in issues/$PR/comments pulls/$PR/comments; do
-            curl -sSf -H "Authorization: Bearer $GH_TOKEN" "$api/$kind?per_page=100"
+            gh api --paginate "repos/$GITHUB_REPOSITORY/$kind?per_page=100"
           done | jq -rs --arg author "$AUTHOR" '[.[][] | select(.user.login == $author)] | sort_by(.created_at)
             | .[] | "### \(.created_at) \(.path // "conversation")\n\(.body)\n"' \
             | tail -c 30000 > "$RUNNER_TEMP/author-notes.md"
@@ -71,16 +73,21 @@ jobs:
           claude_args: >-
             --model us.anthropic.claude-opus-5-5 --fallback-model us.anthropic.claude-opus-5
             --max-turns 30 --disallowedTools Bash,Edit,Write,MultiEdit,NotebookEdit
-      - name: remove the claude-review label, so adding it again re-runs the review
-        if: always() && github.event.action == 'labeled'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
-        run: |
-          curl -sS -o /dev/null -X DELETE -H "Authorization: Bearer $GH_TOKEN" \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/issues/$PR/labels/claude-review"
       - name: show Claude error
         if: failure() && steps.claude.outcome == 'failure'
         run: |
           f="$RUNNER_TEMP/claude-execution-output.json"
           [ ! -f "$f" ] || jq -r '.. | objects | select(.type? == "result") | .result // .error // empty' "$f" | head -c 3000
+  unlabel:
+    needs: review
+    if: always() && github.event.action == 'labeled' && github.event.label.name == 'claude-review'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+      - name: remove the claude-review label, so adding it again re-runs the review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$PR/labels/claude-review" --silent
