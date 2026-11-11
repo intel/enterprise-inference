@@ -419,7 +419,7 @@ def deploy(o: Options, target: str) -> None:
         _apply_chat_template(m)
     if action == "apply":
         if m.gpu and not truthy(os.environ.get("MM_SKIP_PREFLIGHT", "")):
-            policy.rolls = _rolls_pods(m, catalog, o, annotations, cpu, cli_args)
+            policy.rolls, policy.pvc = _rolls_pods(m, catalog, o, annotations, cpu, cli_args), catalog.pvc
         preflight_gate(policy, m, tp)
         k8s.ensure_storage(m.namespace, catalog.pvc)
         download_weights(m, catalog, cli_args, policy.download_nodes)

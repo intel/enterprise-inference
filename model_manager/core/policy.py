@@ -180,6 +180,7 @@ class GpuRuntime(BestEffort):
     name = "n/a (GPU runtime — no CPU pinning)"
     label = "GPU"
     rolls = True  # deploy sets False when only spec.replicas changes: the running pods stay
+    pvc = ""  # the model-store PVC, set by deploy
 
     def annotations(self, m: Model, tp: int) -> tuple[dict, str]:
         return {}, m.cpu
@@ -203,7 +204,7 @@ class GpuRuntime(BestEffort):
             return [f"No Ready, schedulable node advertises allocatable {resource}: no GPU node has joined the "
                     "cluster, or its device plugin is not ready yet."]
         free = {name: count - used.get(name, 0) - own.get(name, 0) for name, count in alloc.items() if count}
-        pvc, terms, unbound = _model_store(m)
+        terms, unbound = _model_store(m.namespace, self.pvc)
         if terms:
             free = {name: f for name, f in free.items() if _node_matches(ready[name], terms)}
         per_node = [max(f, 0) // need for f in free.values()]
@@ -215,7 +216,7 @@ class GpuRuntime(BestEffort):
                     f"first (./model-manager undeploy {m.name}), or use MM_PREFLIGHT=warn to apply anyway (e.g. a "
                     "label-only change)."]
         if not fit and terms:
-            return [f"The model store {pvc} is node-local storage on nodes without {need} free {resource}, so the "
+            return [f"The model store {self.pvc} is node-local storage on nodes without {need} free {resource}, so the "
                     "GPU pod could not mount it. GPU models need shared (ReadWriteMany) storage, or the model store "
                     "on a GPU node."]
         if not fit:
@@ -225,7 +226,7 @@ class GpuRuntime(BestEffort):
             warn(f"GPU: only {fit} of {new} new replicas fit on the free {resource} — the rest will stay Pending.")
         if unbound:
             self.download_nodes = tuple(name for name, f in free.items() if f >= need)
-            warn(f"The model store {pvc} binds on first use, so it is created on one of {', '.join(self.download_nodes)}"
+            warn(f"The model store {self.pvc} binds on first use, so it is created on one of {', '.join(self.download_nodes)}"
                  " where the download runs. On node-local storage, every model using it, CPU ones included, must then "
                  "run on that node.")
         return []
@@ -268,20 +269,19 @@ def _pod_request(pod: dict, resource: str) -> int:
     return max(sum(request(c) for c in pick(spec, "containers", [])) + sidecars, peak)
 
 
-def _model_store(m: Model) -> tuple[str, list, bool]:
-    """The model-store PVC, its PV's required node terms (node-local storage), and whether it is unbound and
-    binds on first use, so the download Job's node decides where it lands."""
-    pvc = m.uri.split("://", 1)[1].split("/", 1)[0] if m.uri.startswith("pvc://") else ""
-    claim = k8s.get_json("pvc", pvc, "-n", m.namespace) if pvc else None
+def _model_store(namespace: str, pvc: str) -> tuple[list, bool]:
+    """The model-store PV's required node terms (node-local storage), and whether the PVC is unbound and binds
+    on first use, so the download Job's node decides where it lands."""
+    claim = k8s.get_json("pvc", pvc, "-n", namespace)
     if not claim:
-        return pvc, [], False
+        return [], False
     volume = text(pick(claim.get("spec"), "volumeName"))
     if volume:
         affinity = pick(pick(k8s.get_json("pv", volume), "spec", {}), "nodeAffinity", {})
-        return pvc, pick(pick(affinity, "required", {}), "nodeSelectorTerms", []), False
+        return pick(pick(affinity, "required", {}), "nodeSelectorTerms", []), False
     mode = k8s.out("get", "storageclass", text(pick(claim.get("spec"), "storageClassName")), "-o",
                    "jsonpath={.volumeBindingMode}")
-    return pvc, [], mode == "WaitForFirstConsumer"
+    return [], mode == "WaitForFirstConsumer"
 
 
 def _node_matches(node: dict, terms: list) -> bool:
@@ -289,13 +289,20 @@ def _node_matches(node: dict, terms: list) -> bool:
     labels, name = pick(node.get("metadata"), "labels", {}), text(pick(node.get("metadata"), "name"))
 
     def holds(e: dict, value: Any) -> bool:
-        values = e.get("values") or []
+        op, values = e.get("operator"), e.get("values") or []
+        if op in ("Gt", "Lt"):  # one integer value; a label that is missing or not an integer does not match
+            label, bound = _int(value), _int(values[0]) if len(values) == 1 else None
+            return label is not None and bound is not None and (label > bound if op == "Gt" else label < bound)
         return {"In": value in values, "NotIn": value not in values, "Exists": value is not None,
-                "DoesNotExist": value is None}.get(e.get("operator"), False)
+                "DoesNotExist": value is None}.get(op, False)
     return any((pick(t, "matchExpressions", []) or pick(t, "matchFields", []))  # an empty term matches no node
                and all(holds(e, labels.get(e.get("key"))) for e in pick(t, "matchExpressions", []))
                and all(holds(f, name if f.get("key") == "metadata.name" else None) for f in pick(t, "matchFields", []))
                for t in terms)
+
+
+def _int(value: Any) -> int | None:
+    return int(value) if isinstance(value, str) and re.fullmatch(r"[+-]?[0-9]+", value) else None
 
 
 def _quantity(value: Any) -> int:

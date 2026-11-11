@@ -188,8 +188,8 @@ def preflight(monkeypatch, nodes, pods=None, pvc=None, pv=None, binding="", roll
     monkeypatch.setattr(k8s, "get_json", lambda *a: objects[a[0]])
     monkeypatch.setattr(k8s, "out", lambda *a: binding if a[:2] == ("get", "storageclass") else "")
     runtime = runtime or policy.GpuRuntime()
-    runtime.rolls = rolls
-    return runtime.preflight(Model(**{**GPU_MODEL, "uri": "pvc://model-store/m", "gpus": "8", **model}), 1)
+    runtime.rolls, runtime.pvc = rolls, "model-store"
+    return runtime.preflight(Model(**{**GPU_MODEL, "gpus": "8", **model}), 1)
 
 
 BOUND = {"spec": {"volumeName": "pv-1", "storageClassName": "local-path"}}
@@ -324,6 +324,23 @@ def test_node_matches_required_terms():
     assert policy._node_matches(node, term(fields=[{"key": "metadata.name", "operator": "In", "values": ["n0"]}]))
     assert policy._node_matches(node, term({"key": "zone", "operator": "In", "values": ["a"]}) + term())
     assert not policy._node_matches(node, [{}])  # an empty term matches no node, as in Kubernetes
+
+
+@pytest.mark.parametrize("op, bound, label, matches", [
+    ("Gt", "4", "8", True), ("Gt", "8", "8", False), ("Lt", "16", "8", True), ("Lt", "8", "8", False),
+    ("Gt", "4", "eight", False), ("Gt", "4", None, False), ("Lt", "x", "8", False),
+])
+def test_node_matches_numeric_operators(op, bound, label, matches):
+    node = {"metadata": {"name": "n0", "labels": {} if label is None else {"gpus": label}}}
+    terms = [{"matchExpressions": [{"key": "gpus", "operator": op, "values": [bound]}]}]
+    assert policy._node_matches(node, terms) is matches
+
+
+def test_model_store_reads_the_pvc_deploy_names(monkeypatch):
+    calls = []
+    monkeypatch.setattr(k8s, "get_json", lambda *a: calls.append(a) or None)
+    assert policy._model_store("llm-inference", "model-store") == ([], False)
+    assert calls == [("pvc", "model-store", "-n", "llm-inference")]
 
 
 def test_the_download_job_is_pinned_to_the_fitting_nodes():
