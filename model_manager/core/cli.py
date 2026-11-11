@@ -68,7 +68,7 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
 
 {BOLD}{CYAN}For status / scale / logs, use kubectl:{RESET}
   kubectl get llminferenceservices,inferenceservices -n llm-inference
-  kubectl patch llminferenceservice <name> -n llm-inference -p '{{"spec":{{"replicas":N}}}}'
+  kubectl patch llminferenceservice <name> -n llm-inference -p '{{"spec":{{"replicas":N}}}}'  # fixed count only
   kubectl get scaledobject,hpa -n llm-inference          # autoscaled models
   kubectl logs -n llm-inference -l app.kubernetes.io/name=<name> -f
 
@@ -326,12 +326,13 @@ def _spawn_reconciler(m: Model, timeout: int) -> tuple[Path, bool]:
 
 
 def _require_autoscaling(m: Model) -> None:
-    """KEDA installed, and a KServe that renders KEDA scaling for this kind (checked before weights download)."""
+    """KEDA installed, and a KServe whose LLMInferenceService has KEDA scaling (checked before the download)."""
     if not k8s.succeeds("get", "crd", "scaledobjects.keda.sh"):
         abort("Autoscaling needs KEDA, which is not installed: set keda_enabled: true in global_config.yaml and "
               "install the platform layer, or deploy with a fixed --replicas.")
     # kubectl explain reads the API schema through discovery, which needs no RBAC on CRDs.
-    if m.kind == "LLMInferenceService" and not k8s.succeeds("explain", "llminferenceservices.spec.scaling.keda"):
+    version = f"serving.kserve.io/{os.environ.get('MM_LLMISVC_API_VERSION') or 'v1alpha2'}"
+    if not k8s.succeeds("explain", "--api-version", version, "llminferenceservices.spec.scaling.keda"):
         abort("This cluster's KServe has no KEDA scaling for LLMInferenceService (KServe 0.21+, installed with "
               f"envoy_gateway_upgrade: true); deploy {m.name} with a fixed --replicas.")
 

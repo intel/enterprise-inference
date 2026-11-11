@@ -750,16 +750,17 @@ def test_max_replicas_only_warns(capsys, fits_max, warned):
     assert ("do not all fit" in capsys.readouterr().err) == warned
 
 
-@pytest.mark.parametrize("node_cpus, warned", [
-    ([8, 8], True),     # 24 CPUs needed, 16 allocatable
-    ([12, 12], True),   # 24 = 24 in total, but each node fits one 8-CPU replica
-    ([16, 8], False),   # 2 + 1 slots
+@pytest.mark.parametrize("node_cpus, tp, warned", [
+    ([8, 8], 1, True),     # 24 CPUs needed, 16 allocatable
+    ([12, 12], 1, True),   # 24 = 24 in total, but each node fits one 8-CPU replica
+    ([16, 8], 1, False),   # 2 + 1 slots
+    ([24], 2, False),      # TP splits the 8 CPUs a pod requests, it does not multiply them
 ])
-def test_kubelet_static_max_shortfall_counts_slots_per_node(monkeypatch, capsys, node_cpus, warned):
+def test_kubelet_static_max_shortfall_counts_slots_per_node(monkeypatch, capsys, node_cpus, tp, warned):
     nodes = {"items": [{"status": {"allocatable": {"cpu": str(c)}}, "spec": {}} for c in node_cpus]}
     monkeypatch.setattr(k8s, "get_json", lambda *args: nodes)
     m = Model(name="m", namespace="n", cpu="8", replicas="1", min_replicas="1", max_replicas="3")
-    policy.warn_max_unplaceable(policy.KubeletStatic(), m, 1)
+    policy.warn_max_unplaceable(policy.KubeletStatic(), m, tp)
     assert ("3 replicas x 8 CPUs: the schedulable nodes fit" in capsys.readouterr().err) == warned
 
 

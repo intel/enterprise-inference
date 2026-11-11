@@ -187,17 +187,17 @@ class KubeletStatic(BestEffort):
         if alloc is None:
             warn("Could not list nodes to verify CPU capacity — skipping the kubelet-static capacity check.")
             return []
-        per_pod, largest = int(m.cpu) * tp, max(alloc, default=0)
+        per_pod, largest = int(m.cpu), max(alloc, default=0)  # the pod requests m.cpu; TP splits it
         shortfall = _replica_shortfall(alloc, per_pod, int(m.replicas))
         if shortfall:
             warn(f"kubelet-static: {shortfall} — some replicas will stay Pending.")
         if largest and per_pod > largest:
-            return [f"No schedulable node has {per_pod} allocatable CPUs (cpu={m.cpu} x tp={tp}); the largest offers "
+            return [f"No schedulable node has {per_pod} allocatable CPUs (cpu={m.cpu}); the largest offers "
                     f"{largest}. Exclusive CPUs cannot span nodes, so the pod would stay Pending."]
         return []
 
     def replica_shortfall(self, m: Model, tp: int) -> str:
-        return _replica_shortfall(_allocatable(m), int(m.cpu) * tp, int(m.replicas))
+        return _replica_shortfall(_allocatable(m), int(m.cpu), int(m.replicas))
 
     def failure(self, m: Model, tp: int) -> str:
         return (f"kubelet-static pre-flight failed: cannot place {m.name} (cpu={m.cpu} tp={tp} replicas={m.replicas}) "
