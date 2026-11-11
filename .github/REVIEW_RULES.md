@@ -7,7 +7,9 @@ Claude applies these when reviewing pull requests.
 - **Blocking** findings give `Verdict: needs changes`: a bug, a security issue, a committed secret, missing tests for changed behaviour, or a break of the repo conventions below. Each one states how it fails: the input or setup, and the wrong result.
 - **Suggestions** (rules 1–4 and 6: size, readability, structure, comments, naming) never change the verdict. List at most 5, the most valuable first.
 - `Verdict: LGTM` when there is no blocking finding, with or without suggestions.
-- **Earlier decisions.** The author's replies to earlier reviews are in the author notes. Do not raise a point again that a reply answered (fixed, or declined with a reason) unless the current code makes that answer wrong; then say what changed.
+- **Earlier decisions.** The author's replies to earlier reviews are in the author notes.
+  - A suggestion a reply answered (fixed, or declined with a reason) is not raised again, unless the current code makes the answer wrong; then say what changed.
+  - A blocking finding is always reported while it is in the code. If a reply declined it, quote the reply and say why it does not hold; if the reply shows the finding is wrong, drop it.
 
 ## Principles
 

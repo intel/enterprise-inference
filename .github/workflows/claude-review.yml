@@ -25,8 +25,12 @@ jobs:
       !github.event.pull_request.draft &&
       !endsWith(github.actor, '[bot]') &&
       (github.event.action != 'labeled' || github.event.label.name == 'claude-review')
+    # Other labels get a group of their own, so adding one cannot cancel a review in progress.
     concurrency:
-      group: claude-review-${{ github.event.pull_request.number }}
+      group: >-
+        claude-review-${{ github.event.pull_request.number }}${{
+        github.event.action == 'labeled' && github.event.label.name != 'claude-review'
+        && format('-other-{0}', github.run_id) || '' }}
       cancel-in-progress: true
     runs-on: ubuntu-24.04
     steps:
@@ -43,13 +47,13 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
-          api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY"
-          curl -sSf -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.diff" \
-            "$api/pulls/$PR" > "$RUNNER_TEMP/pr.diff"
-          for kind in issues/$PR/comments pulls/$PR/comments; do
+          gh api -H "Accept: application/vnd.github.diff" "repos/$GITHUB_REPOSITORY/pulls/$PR" > "$RUNNER_TEMP/pr.diff"
+          # Conversation comments, inline replies and review summaries; reviews carry submitted_at.
+          for kind in issues/$PR/comments pulls/$PR/comments pulls/$PR/reviews; do
             gh api --paginate "repos/$GITHUB_REPOSITORY/$kind?per_page=100"
-          done | jq -rs --arg author "$AUTHOR" '[.[][] | select(.user.login == $author)] | sort_by(.created_at)
-            | .[] | "### \(.created_at) \(.path // "conversation")\n\(.body)\n"' \
+          done | jq -rs --arg author "$AUTHOR" '[.[][] | select(.user.login == $author and (.body // "") != "")
+            | .at = (.created_at // .submitted_at)] | sort_by(.at)
+            | .[] | "### \(.at) \(.path // "conversation")\n\(.body)\n"' \
             | tail -c 30000 > "$RUNNER_TEMP/author-notes.md"
           cp .github/REVIEW_RULES.md "$RUNNER_TEMP/review-rules.md"
       - id: claude
@@ -90,4 +94,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
-        run: gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$PR/labels/claude-review" --silent
+        # Already gone (removed by hand, or by an overlapping run) is fine.
+        run: |
+          out=$(gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$PR/labels/claude-review" 2>&1) \
+            || grep -q "HTTP 404" <<< "$out" || { echo "$out"; exit 1; }
