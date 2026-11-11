@@ -202,17 +202,17 @@ def _tp_in(args: list[str]) -> int | None:
     return found
 
 
-def _engine_cli_args(o: Options, gpus: int = 1, catalog_args: tuple[str, ...] = ()) -> tuple[list[str], int]:
+def _engine_cli_args(o: Options, gpus: int, catalog_args: list[str]) -> tuple[list[str], int]:
     """--arg list (with --tp injected unless it already sets the flag) and the tensor-parallel size.
     A multi-GPU pod defaults to tensor parallelism across all its GPUs, unless the catalog's args
     (category, version, model) already set it: the CLI args render last and would override them."""
     args = list(o.arg)
-    if o.tp:  # appended last, so it wins over any --arg --tensor-parallel-size (vLLM is last-wins)
+    if o.tp:
         return args + ["--tensor-parallel-size", o.tp], int(o.tp)
     tp = _tp_in(args)
     if tp is not None:
         return args, tp
-    tp = _tp_in(list(catalog_args))
+    tp = _tp_in(catalog_args)
     if tp is not None:
         return args, tp
     if gpus > 1:
@@ -361,7 +361,7 @@ def _gpu_gate(m: Model, dry_run: bool) -> None:
     abort(f"Runtime '{m.runtime}' targets a GPU (device: gpu) but no accelerator resource is enabled "
           "(MM_ACCEL_RESOURCE is empty). In Intel Enterprise AI Solutions this is set automatically when "
           "rack_scale_enabled=true and rack-profile.yaml declares an accelerator: on at least one node. To deploy "
-          f"manually on a cluster you trust: MM_ACCEL_RESOURCE=nvidia.com/gpu ./model-manager deploy {m.name}")
+          f"manually on a cluster you trust: MM_ACCEL_RESOURCE={want or '<resource>'} ./model-manager deploy {m.name}")
 
 
 def deploy(o: Options, target: str) -> None:
@@ -379,9 +379,11 @@ def deploy(o: Options, target: str) -> None:
         info(f"  Node: {m.node}")
     policy = GpuRuntime() if m.gpu else resolve_policy(o.cpu_policy, m.node)
     info(f"  CPU policy: {policy.name}")
-    cli_args, tp = _engine_cli_args(o, int(m.gpus) if m.gpu else 1, tuple(renderer.engine_args(m)) if m.gpu else ())
+    cli_args, tp = _engine_cli_args(o, int(m.gpus) if m.gpu else 1, renderer.engine_args(m) if m.gpu else [])
     if m.gpu and tp > int(m.gpus):
         abort(f"Tensor parallel size {tp} needs {tp} GPUs, but {m.name} requests {m.gpus}. Pass --gpus {tp}.")
+    if m.gpu and tp < int(m.gpus):
+        warn(f"{int(m.gpus) - tp} of {m.gpus} GPUs unused (tensor parallel size {tp}); pass --gpus {tp}.")
     resolve_auto_cpu(policy, m, tp)
     policy.prepare(m)
     annotations, cpu = policy.annotations(m, tp)

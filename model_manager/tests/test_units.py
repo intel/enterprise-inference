@@ -37,11 +37,11 @@ def test_arg_values_taken_verbatim():
 
 @pytest.mark.parametrize("args, tp", [(["--tensor-parallel-size", "2"], 2), (["--tensor-parallel-size=4"], 4), ([], 1)])
 def test_tp_from_engine_args(args, tp):
-    assert cli._engine_cli_args(cli.Options(arg=args)) == (args, tp)
+    assert cli._engine_cli_args(cli.Options(arg=args), 1, []) == (args, tp)
 
 
 def test_tp_flag_is_injected_once():
-    assert cli._engine_cli_args(cli.Options(tp="2")) == (["--tensor-parallel-size", "2"], 2)
+    assert cli._engine_cli_args(cli.Options(tp="2"), 1, []) == (["--tensor-parallel-size", "2"], 2)
 
 
 def test_dedupe_keeps_last_occurrence():

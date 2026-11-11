@@ -161,7 +161,7 @@ class Model:
     cpu: str = ""
     memory: str = ""
     replicas: str = "1"
-    gpus: str = ""                            # per-pod GPU count; "" for CPU runtimes
+    gpus: str = ""
     node: str = ""
     chat_template: str = ""
     args: list = field(default_factory=list)
@@ -225,8 +225,8 @@ def resolve(catalog: Catalog, target: str, o: Any) -> Model:
     m.cpu = o.cpu or m.cpu or text(pick(defaults, "cpu", 8))
     m.memory = o.memory or m.memory or text(pick(defaults, "memory", "16Gi"))
     m.replicas = o.replicas or m.replicas
-    if m.gpu:  # --gpus > models.yaml gpus > category defaults.gpus > 1
-        m.gpus = o.gpus or m.gpus or text(pick(defaults, "gpus", 1))
+    if m.gpu:
+        m.gpus = o.gpus or o.tp or m.gpus or text(pick(defaults, "gpus", 1))
     m.node = o.node or m.node
     if o.routing:
         m.routing = o.routing

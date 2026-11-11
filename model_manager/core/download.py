@@ -102,9 +102,7 @@ def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
                          "                  name: hf-token\n                  key: token")
     env_items += [f"            - name: {k}\n              value: {quote(v)}" for k, v in proxy_env(catalog)]
     uid = "5000" if m.runtime == "openvino" else "1000"  # the serving image's user, so it can read the files
-    # Where GPU nodes are tainted they can be the only nodes the Job may use (no untainted
-    # worker, or a node-local PVC bound to one), so a GPU model's Job tolerates the serving
-    # pod's taint too. It requests no GPU.
+    # Tainted GPU nodes may be the only ones the Job can use (e.g. a node-local PVC), so it tolerates the taint.
     toleration = gpu_toleration(m, 6)
     job = f"download-{m.name}"
     manifest = render(

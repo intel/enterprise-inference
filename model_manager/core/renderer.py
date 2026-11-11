@@ -12,7 +12,7 @@ from .ui import abort
 
 CHAT_TEMPLATE_DIR = "/etc/chat-template"
 # Value of the gpu-vendor node label the rack-scale installer applies, by accelerator resource prefix.
-GPU_VENDORS = {"nvidia.com/": "nvidia", "gpu.intel.com/": "intel", "habana.ai/": "intel", "amd.com/": "amd"}
+GPU_VENDORS = {"nvidia.com/": "nvidia"}
 
 
 def render(path: Path, **values: str) -> str:
@@ -109,7 +109,7 @@ def _affinity(node: str, require_amx: bool, vendor: str = "") -> str:
                   "            preference:", "              matchExpressions:",
                   "                - key: node-role.kubernetes.io/control-plane",
                   "                  operator: DoesNotExist"]
-    if vendor:  # soft: on a cluster without the label the resource request alone decides placement
+    if vendor:
         lines += ["          - weight: 100", "            preference:", "              matchExpressions:",
                   "                - key: gpu-vendor", "                  operator: In", "                  values:",
                   f"                    - {vendor}"]
@@ -168,7 +168,6 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
         "REPLICAS": m.replicas, "ARGS": _list([f"        - {quote(a)}" for a in dedupe_args(args + cli_args)]),
         "ENV": _env(m, catalog, cli_args, o.env),
         "NRI_ANNOTATIONS": _annotations(annotations, m.kind) if annotations else "",
-        # GPU pods skip the AMX requirement (a Xeon placement control) and prefer the vendor's nodes.
         "AFFINITY": _affinity(m.node, catalog.require_amx and not m.gpu,
                               gpu_vendor(m.accel_resource) if m.gpu else ""),
         "EXTRA_LABELS": "".join(f"\n    {p.split('=', 1)[0]}: {quote(p.split('=', 1)[1])}" for p in o.label),

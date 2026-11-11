@@ -38,6 +38,8 @@ UNGATED_VENDOR_PREFERENCE = (r"^(    tolerations:\n)",
                              r"          - weight: 100\n            preference:\n              matchExpressions:\n"
                              r"                - key: gpu-vendor\n                  operator: In\n"
                              r"                  values:\n                    - nvidia\n\1")
+# --tp without --gpus sets the GPU count too, so a TP 4 pod no longer holds 8 GPUs.
+TP_SETS_GPUS = [(r"^(\[INFO \]    GPUs: )8( x nvidia\.com/gpu)$", r"\g<1>4\2"), (r'^( +nvidia\.com/gpu: )"8"$', r'\1"4"')]
 LLAMA_GPU_READY = [[r"get LLMInferenceService llama-3-1-70b-instruct-cuda -n llm-inference -o json$", 0,
                     _ready("MainWorkloadReady")]]
 
@@ -52,8 +54,8 @@ def _nodes(*gpus, unschedulable=(), not_ready=(), taints=None):
 
 
 def _pods(*held):
-    """`kubectl get pods -A -o json`: (node, model name, GPUs requested) per pod."""
-    return {"items": [{"metadata": {"labels": {"app.kubernetes.io/name": name}},
+    """`kubectl get pods -A -o json`: (node, model name, GPUs requested) per pod, in namespace n."""
+    return {"items": [{"metadata": {"namespace": "n", "labels": {"app.kubernetes.io/name": name}},
                        "spec": {"nodeName": node, "containers": [{"resources": {"requests": {"nvidia.com/gpu": str(n)}}}]}}
                       for node, name, n in held]}
 
@@ -69,7 +71,7 @@ GPU_CASES = [
     case("gpu-count-node", "deploy", "qwen3-0-6b-cuda", "--gpus", "2", "--node", "w1", "--dry-run", env={**GPU, **NRI},
          deviations=[BURSTABLE_GPU]),
     case("gpu-explicit-tp", "deploy", "llama-3-1-70b-instruct-cuda", "--tp", "4", "--dry-run", env=GPU,
-         deviations=[BURSTABLE_GPU]),
+         deviations=[BURSTABLE_GPU, *TP_SETS_GPUS]),
     case("gpu-flag-ignored-on-cpu", "deploy", "qwen3-0-6b", "--gpus", "2", "--dry-run", env=BE),
     case("gpu-gate-refuses", "deploy", "qwen3-0-6b-cuda"),
     case("gpu-bad-count", "deploy", "qwen3-0-6b-cuda", "--gpus", "x", env=GPU),
@@ -94,24 +96,24 @@ def test_zero_gpus_rejected():
 
 
 def test_gpu_tp_defaults_to_gpu_count():
-    assert cli._engine_cli_args(cli.Options(), 8) == (["--tensor-parallel-size", "8"], 8)
-    assert cli._engine_cli_args(cli.Options(), 1) == ([], 1)
-    assert cli._engine_cli_args(cli.Options(tp="4"), 8) == (["--tensor-parallel-size", "4"], 4)
+    assert cli._engine_cli_args(cli.Options(), 8, []) == (["--tensor-parallel-size", "8"], 8)
+    assert cli._engine_cli_args(cli.Options(), 1, []) == ([], 1)
+    assert cli._engine_cli_args(cli.Options(tp="4"), 8, []) == (["--tensor-parallel-size", "4"], 4)
 
 
 def test_catalog_tp_is_not_overridden():
     # A tensor-parallel size in the catalog (category, version or model args) stands; the GPU-count
     # default would render after it and win, since dedupe_args keeps the last occurrence.
-    assert cli._engine_cli_args(cli.Options(), 8, ("--tensor-parallel-size", "4")) == ([], 4)
-    assert cli._engine_cli_args(cli.Options(), 8, ("--max-model-len", "8192", "--tensor-parallel-size=2")) == ([], 2)
-    assert cli._engine_cli_args(cli.Options(), 8, ("--max-model-len", "8192")) == (["--tensor-parallel-size", "8"], 8)
+    assert cli._engine_cli_args(cli.Options(), 8, ["--tensor-parallel-size", "4"]) == ([], 4)
+    assert cli._engine_cli_args(cli.Options(), 8, ["--max-model-len", "8192", "--tensor-parallel-size=2"]) == ([], 2)
+    assert cli._engine_cli_args(cli.Options(), 8, ["--max-model-len", "8192"]) == (["--tensor-parallel-size", "8"], 8)
     # --tp on the command line still overrides the catalog.
-    assert cli._engine_cli_args(cli.Options(tp="8"), 8, ("--tensor-parallel-size", "4")) == (
+    assert cli._engine_cli_args(cli.Options(tp="8"), 8, ["--tensor-parallel-size", "4"]) == (
         ["--tensor-parallel-size", "8"], 8)
-    args, _ = cli._engine_cli_args(cli.Options(), 8, ("--tensor-parallel-size", "4"))
+    args, _ = cli._engine_cli_args(cli.Options(), 8, ["--tensor-parallel-size", "4"])
     assert renderer.dedupe_args(["--tensor-parallel-size", "4", *args]) == ["--tensor-parallel-size", "4"]
     with pytest.raises(SystemExit):
-        cli._engine_cli_args(cli.Options(), 8, ("--tensor-parallel-size", "x"))
+        cli._engine_cli_args(cli.Options(), 8, ["--tensor-parallel-size", "x"])
 
 
 @pytest.mark.parametrize("cluster", ["gpu.intel.com/xe", "amd.com/gpu", "habana.ai/gaudi"])
@@ -129,15 +131,10 @@ def test_gate_accepts_the_runtimes_vendor(monkeypatch):
     monkeypatch.setenv("MM_ACCEL_RESOURCE", "nvidia.com/gpu")
     cli._gpu_gate(Model(name="m", namespace="n", runtime="vllm-cuda", gpus="1",
                         rt={"device": "gpu", "accelerator_resource": "nvidia.com/gpu"}), dry_run=False)
-    # Another vendor's GPU runtime is gated on its own resource.
-    monkeypatch.setenv("MM_ACCEL_RESOURCE", "gpu.intel.com/xe")
-    cli._gpu_gate(Model(name="m", namespace="n", runtime="vllm-xpu", gpus="1",
-                        rt={"device": "gpu", "accelerator_resource": "gpu.intel.com/xe"}), dry_run=False)
 
 
-@pytest.mark.parametrize("resource, vendor", [("nvidia.com/gpu", "nvidia"), ("gpu.intel.com/xe", "intel"),
-                                              ("habana.ai/gaudi", "intel"), ("amd.com/gpu", "amd"), ("", ""),
-                                              ("example.com/fpga", ""), ("nvidia.com", "")])
+@pytest.mark.parametrize("resource, vendor", [("nvidia.com/gpu", "nvidia"), ("nvidia.com/mig-1g.10gb", "nvidia"),
+                                              ("gpu.intel.com/xe", ""), ("", ""), ("nvidia.com", "")])
 def test_gpu_vendor_label(resource, vendor):
     assert gpu_vendor(resource) == vendor
 
@@ -196,8 +193,18 @@ def test_gpu_preflight_messages(monkeypatch):
         "No Ready, schedulable node advertises allocatable nvidia.com/gpu: no GPU node has joined the cluster, "
         "or its device plugin is not ready yet."]
     assert preflight(monkeypatch, _nodes(4, 2)) == [
-        "No node has 8 free nvidia.com/gpu; the most on one node is 4. A pod's GPUs cannot span nodes, so it "
-        "would stay Pending."]
+        "No node has 8 free nvidia.com/gpu; the most on one node is 4. A pod's GPUs cannot span nodes: lower "
+        "--gpus, or free GPUs on a node."]
+
+
+def test_own_running_pods_name_the_remedy(monkeypatch):
+    assert preflight(monkeypatch, _nodes(8), _pods(("n0", "m", 8))) == [
+        "m's own running pods hold the nvidia.com/gpu it needs: a changed re-deploy starts its new pod next to the "
+        "running one. Undeploy it first (./model-manager undeploy m), or set MM_PREFLIGHT=warn to apply anyway (the "
+        "new pod then waits for GPUs)."]
+    # Same name in another namespace is another model.
+    other_ns = {"items": [{**p, "metadata": {**p["metadata"], "namespace": "x"}} for p in _pods(("n0", "m", 8))["items"]]}
+    assert preflight(monkeypatch, _nodes(8), other_ns)[0].startswith("No node has 8 free")
 
 
 def test_gpu_preflight_ignores_the_preferred_node(monkeypatch):
@@ -225,20 +232,39 @@ def test_gpu_preflight_skips_when_the_cluster_cannot_be_read(monkeypatch):
 
 
 def test_cli_tp_wins_over_an_arg_tp():
-    assert cli._engine_cli_args(cli.Options(tp="2", arg=["--tensor-parallel-size", "8"]), 2) == (
+    assert cli._engine_cli_args(cli.Options(tp="2", arg=["--tensor-parallel-size", "8"]), 2, []) == (
         ["--tensor-parallel-size", "8", "--tensor-parallel-size", "2"], 2)
 
 
 def test_catalog_tensor_parallel_is_read_on_one_gpu_and_the_last_wins():
-    assert cli._engine_cli_args(cli.Options(), 1, ("--tensor-parallel-size", "2")) == ([], 2)
-    assert cli._engine_cli_args(cli.Options(), 4, ("--tensor-parallel-size", "2", "--tensor-parallel-size=8")) == ([], 8)
+    assert cli._engine_cli_args(cli.Options(), 1, ["--tensor-parallel-size", "2"]) == ([], 2)
+    assert cli._engine_cli_args(cli.Options(), 4, ["--tensor-parallel-size", "2", "--tensor-parallel-size=8"]) == ([], 8)
+
+
+def test_tp_sets_the_gpu_count_unless_gpus_is_given(monkeypatch, capsys):
+    monkeypatch.setenv("MM_CONFIG", str(cli.MM_DIR / "models.yaml"))
+    monkeypatch.setenv("MM_ACCEL_RESOURCE", "nvidia.com/gpu")
+    catalog = Catalog.load()
+    assert config.resolve(catalog, "llama-3-1-70b-instruct-cuda", cli.Options(tp="4")).gpus == "4"
+    assert config.resolve(catalog, "llama-3-1-70b-instruct-cuda", cli.Options(tp="4", gpus="8")).gpus == "8"
+    cli.deploy(cli.Options(tp="4", gpus="8", dry_run=True), "llama-3-1-70b-instruct-cuda")
+    assert "4 of 8 GPUs unused (tensor parallel size 4); pass --gpus 4." in capsys.readouterr().err
+
+
+def test_manual_deploy_hint_names_the_runtimes_resource(monkeypatch, capsys):
+    monkeypatch.delenv("MM_ACCEL_RESOURCE", raising=False)
+    m = Model(name="m", namespace="n", runtime="vllm-cuda", gpus="1",
+              rt={"device": "gpu", "accelerator_resource": "nvidia.com/mig-1g.10gb"})
+    with pytest.raises(SystemExit):
+        cli._gpu_gate(m, dry_run=False)
+    assert "MM_ACCEL_RESOURCE=nvidia.com/mig-1g.10gb ./model-manager deploy m" in capsys.readouterr().err
 
 
 def test_tensor_parallel_larger_than_the_gpu_count_is_refused(monkeypatch, capsys):
     monkeypatch.setenv("MM_CONFIG", str(cli.MM_DIR / "models.yaml"))
     monkeypatch.setenv("MM_ACCEL_RESOURCE", "nvidia.com/gpu")
     with pytest.raises(SystemExit):
-        cli.deploy(cli.Options(tp="4", dry_run=True), "qwen3-0-6b-cuda")
+        cli.deploy(cli.Options(tp="4", gpus="1", dry_run=True), "qwen3-0-6b-cuda")
     assert "Tensor parallel size 4 needs 4 GPUs, but qwen3-0-6b-cuda requests 1" in capsys.readouterr().err
 
 
@@ -259,7 +285,7 @@ def test_nemotron_entries(monkeypatch, name, gpus):
     monkeypatch.setenv("MM_CONFIG", str(cli.MM_DIR / "models.yaml"))
     m = config.resolve(Catalog.load(), name, cli.Options())
     assert m.gpu and m.gpus == str(gpus) and m.model_id.startswith("nvidia/")
-    args, tp = cli._engine_cli_args(cli.Options(), gpus, tuple(renderer.engine_args(m)))
+    args, tp = cli._engine_cli_args(cli.Options(), gpus, renderer.engine_args(m))
     assert tp == gpus and (args == ["--tensor-parallel-size", str(gpus)] if gpus > 1 else args == [])
     assert {"--reasoning-parser", "nemotron_v3", "--tool-call-parser", "qwen3_coder"} <= set(renderer.engine_args(m))
     assert not renderer.trust_remote_code(m, args)

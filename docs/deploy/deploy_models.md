@@ -131,13 +131,19 @@ accident.
 
 A deploy then checks the cluster itself: a Ready node, not cordoned or tainted
 against the pod, must have at least `gpus` free `nvidia.com/gpu`, counting what
-running pods already hold (a pod's GPUs cannot span nodes, and a changed
-re-deploy needs room for its new pod next to the running one). Otherwise it stops
+running pods already hold (a pod's GPUs cannot span nodes). Otherwise it stops
 before downloading weights, for example when the profile declares a GPU node
 that has not joined the cluster or whose device plugin is not ready yet.
-`MM_PREFLIGHT=warn` proceeds anyway; `MM_SKIP_PREFLIGHT=1` skips the check. A
-tensor parallel size larger than the GPU count is refused. For a manual CLI
-deploy on a GPU cluster you already trust:
+`MM_PREFLIGHT=warn` proceeds anyway; `MM_SKIP_PREFLIGHT=1` skips the check.
+
+A changed re-deploy (or `MM_FORCE_REDEPLOY=1`) starts the new pod next to the
+running one. When the model already fills its node, run
+`./model-manager undeploy <name>` first, or set `MM_PREFLIGHT=warn` to apply
+anyway; the new pod then waits for GPUs.
+
+`--tp N` without `--gpus` also sets the GPU count to N. A tensor parallel size
+larger than the GPU count is refused; a smaller one warns about the unused GPUs.
+For a manual CLI deploy on a GPU cluster you already trust:
 
 ```bash
 MM_ACCEL_RESOURCE=nvidia.com/gpu ./model-manager deploy llama-3-1-70b-instruct-cuda --wait

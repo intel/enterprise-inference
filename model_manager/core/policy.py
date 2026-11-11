@@ -192,31 +192,36 @@ class GpuRuntime(BestEffort):
             return []
         resource, tolerated = m.accel_resource, text(pick(m.rt, "accelerator_toleration_key"))
         used: dict = {}
+        own: dict = {}
         for pod in pods.get("items", []):
-            node = text(pick(pod.get("spec"), "nodeName"))
-            used[node] = used.get(node, 0) + sum(_quantity(pick(pick(c.get("resources"), "requests", {}), resource))
+            meta, node = pod.get("metadata") or {}, text(pick(pod.get("spec"), "nodeName"))
+            name = pick(pick(meta, "labels", {}), "app.kubernetes.io/name")
+            held = own if (pick(meta, "namespace"), name) == (m.namespace, m.name) else used
+            held[node] = held.get(node, 0) + sum(_quantity(pick(pick(c.get("resources"), "requests", {}), resource))
                                                  for c in pick(pod.get("spec"), "containers", []))
         ready = [n for n in nodes.get("items", []) if _schedulable(n, tolerated)]
         alloc = {text(pick(n.get("metadata"), "name")): _quantity(pick(pick(n.get("status"), "allocatable", {}), resource))
                  for n in ready}
-        free = [count - used.get(name, 0) for name, count in alloc.items() if count]
         need, replicas = int(m.gpus), int(m.replicas)
-        if not free:
+        if not any(alloc.values()):
             return [f"No Ready, schedulable node advertises allocatable {resource}: no GPU node has joined the "
                     "cluster, or its device plugin is not ready yet."]
+        free = [count - used.get(name, 0) - own.get(name, 0) for name, count in alloc.items() if count]
         fit = sum(max(f, 0) // need for f in free)
+        if not fit and any(count - used.get(name, 0) >= need for name, count in alloc.items()):
+            return [f"{m.name}'s own running pods hold the {resource} it needs: a changed re-deploy starts its new "
+                    f"pod next to the running one. Undeploy it first (./model-manager undeploy {m.name}), or set "
+                    "MM_PREFLIGHT=warn to apply anyway (the new pod then waits for GPUs)."]
         if not fit:
             return [f"No node has {need} free {resource}; the most on one node is {max(free)}. A pod's GPUs cannot "
-                    "span nodes, so it would stay Pending."]
+                    "span nodes: lower --gpus, or free GPUs on a node."]
         if fit < replicas:
             warn(f"GPU: only {fit} of {replicas} replicas fit on the free {resource} — the rest will stay Pending.")
         return []
 
     def failure(self, m: Model, tp: int) -> str:
-        return (f"GPU pre-flight failed: cannot place {m.name} ({m.gpus} x {m.accel_resource}) on any node. Lower "
-                "--gpus, free GPUs (a changed re-deploy needs room for its new pod next to the running one), or wait "
-                "until the GPU node is Ready with its device plugin. Override with MM_PREFLIGHT=warn (proceed anyway) or "
-                "MM_SKIP_PREFLIGHT=1 (skip check).")
+        return (f"GPU pre-flight failed: cannot place {m.name} ({m.gpus} x {m.accel_resource}) on any node. Override "
+                "with MM_PREFLIGHT=warn (proceed anyway) or MM_SKIP_PREFLIGHT=1 (skip check).")
 
 
 POLICIES = {p.name: p for p in (NriBalloons, KubeletStatic, BestEffort)}
