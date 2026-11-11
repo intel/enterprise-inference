@@ -84,7 +84,8 @@ HELP_GPU = [(r"^(  --tp N .*\n)",
              r"                            Required to deploy a device: gpu runtime (vllm-cuda); ai-solutions sets\n"
              r"                            it in rack-scale mode only\n")]
 # The catalog's GPU examples, its last entries, are undeployed too; the legacy catalog had none.
-GPU_MODELS = ("qwen3-0-6b-cuda", "llama-3-1-70b-instruct-cuda")
+GPU_MODELS = ("qwen3-0-6b-cuda", "llama-3-1-70b-instruct-cuda", "nemotron-3-5-lightning-30b-a3b-cuda",
+              "nemotron-3-super-120b-a12b-cuda", "nemotron-3-ultra-550b-a55b-cuda")
 UNDEPLOY_GPU_MODELS = [
     (r"^(?=--- stderr\n)", "".join(
         f"[INFO ]  Undeploying {n}\n[INFO ]  Waiting for {n} pods to terminate (timeout: 180s)...\n"

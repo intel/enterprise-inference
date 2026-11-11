@@ -114,7 +114,8 @@ What `vllm-cuda` changes in the rendered manifest, relative to CPU `vllm`:
   was given.
 - **No CPU pinning.** NRI balloon / kubelet-static annotations, their
   pre-flight checks, and the AMX node requirement are all skipped: they are
-  Xeon placement controls and do not apply to a GPU pod.
+  Xeon placement controls and do not apply to a GPU pod. A GPU pre-flight
+  runs instead (see [The gate](#the-gate)).
 - A *preferred* (not required) node affinity for `gpu-vendor=<vendor>`, the
   label the rack-scale installer applies. On clusters without that label the
   resource request alone decides placement.
@@ -126,13 +127,48 @@ extended resource the cluster advertises (e.g. `nvidia.com/gpu`). Intel
 Enterprise AI Solutions sets it automatically when
 `rack_scale_enabled: true` and the rack-profile declares an `accelerator:`;
 on a standard CPU install it is empty and GPU models cannot be deployed by
-accident. For a manual CLI deploy on a GPU cluster you already trust:
+accident.
+
+A deploy then checks the cluster itself: some schedulable node must advertise
+at least `gpus` allocatable `nvidia.com/gpu` (a pod's GPUs cannot span nodes).
+Otherwise it stops before downloading weights, for example when the profile
+declares a GPU node that has not joined the cluster or whose device plugin is
+not ready yet. `MM_PREFLIGHT=warn` proceeds anyway; `MM_SKIP_PREFLIGHT=1` skips
+the check. For a manual CLI deploy on a GPU cluster you already trust:
 
 ```bash
 MM_ACCEL_RESOURCE=nvidia.com/gpu ./model-manager deploy llama-3-1-70b-instruct-cuda --wait
 ./model-manager deploy qwen3-0-6b-cuda --dry-run        # previews are not gated
 ./model-manager deploy qwen3-0-6b-cuda --gpus 2         # override the catalog count
 ```
+
+### GPU models in the catalog
+
+None deploys at install time (`autodeploy: false`). Like CPU models, they are
+routed through the AI Gateway, and registered with LiteLLM when `auth_type` is
+`litellm_vkey`.
+
+| Name | Model | GPUs | Notes |
+|---|---|---|---|
+| `qwen3-0-6b-cuda` | Qwen/Qwen3-0.6B | 1 | Smoke test |
+| `llama-3-1-70b-instruct-cuda` | meta-llama/Llama-3.1-70B-Instruct | 8 | Gated: needs `HF_TOKEN` |
+| `nemotron-3-5-lightning-30b-a3b-cuda` | nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 | 1 | |
+| `nemotron-3-super-120b-a12b-cuda` | nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8 | 4 | Hopper or Blackwell. On B200/B300 the model card fits it on one GPU: `--gpus 1` |
+| `nemotron-3-ultra-550b-a55b-cuda` | nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4 | 8 | NVFP4: Blackwell only (B200, B300) |
+
+The Nemotron models are reasoning models (`--reasoning-parser nemotron_v3`) with
+tool calling (`--tool-call-parser qwen3_coder`), using the flags from their model
+cards.
+
+### Model store size
+
+All downloaded weights share one PVC, `model-store`, sized by
+`llm_services_model_store_size` (default `100Gi`). That holds the smaller
+models, but not Llama 3.1 70B (~140 GB), Nemotron 3 Super FP8 (~128 GB) or
+Nemotron 3 Ultra NVFP4 (~352 GB). Set it before the first inference install,
+in `global_config.yaml`, for example `llm_services_model_store_size: 1Ti` for
+all of them. Growing an existing PVC works only if its StorageClass allows
+volume expansion.
 
 Pod security is unchanged: the upstream `vllm/vllm-openai` image runs under the
 same `runAsNonRoot` / `drop: ALL` context as the CPU image, with its caches
