@@ -10,8 +10,8 @@
 #   device                      gpu — selects the GPU render path (accelerator
 #                               limits, /dev/shm, toleration, no CPU pinning)
 #                               and arms the MM_ACCEL_RESOURCE deploy gate
-#   accelerator_resource        default extended resource for --dry-run previews;
-#                               a real deploy uses MM_ACCEL_RESOURCE (cluster truth)
+#   accelerator_resource        the runtime's resource: the vendor gate, the manual-deploy
+#                               hint and --dry-run; a real deploy requests MM_ACCEL_RESOURCE
 #   accelerator_toleration_key  taint key GPU nodes commonly carry (NoSchedule)
 #   shm_size                    /dev/shm emptyDir size — NCCL needs it for TP>1
 # =============================================================================

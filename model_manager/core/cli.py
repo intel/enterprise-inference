@@ -34,13 +34,13 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
 {BOLD}{CYAN}Deploy Options:{RESET}
   {GREEN}--hfid{RESET} <hf/repo>     Ad-hoc deploy any HuggingFace model (--id still works, deprecated)
   {GREEN}--name{RESET} <name>        Override generated name (with --hfid)
-  {GREEN}--server{RESET} <name>      Model server/engine: vllm (default) | openvino  (alias: --runtime)
+  {GREEN}--server{RESET} <name>      Model server/engine: vllm (default) | openvino | vllm-cuda  (alias: --runtime)
   {GREEN}--server-version{RESET} V   Server version (must be declared for the model if it uses servers:)
   {GREEN}--as{RESET} <name>          Deploy under a distinct name (run multiple server/version variants at once)
   {GREEN}--cpu{RESET} N              CPU cores
   {GREEN}--memory{RESET} NGi         Memory (e.g. 32Gi)
   {GREEN}--replicas{RESET} N         Replica count (default: 1)
-  {GREEN}--tp{RESET} N               Tensor-parallel size (splits across N NUMA nodes)
+  {GREEN}--tp{RESET} N               Tensor-parallel size (splits across N NUMA nodes; on a GPU runtime, also N GPUs)
   {GREEN}--gpus{RESET} N             GPUs per pod (device: gpu runtimes, e.g. vllm-cuda); also the default --tp
   {GREEN}--cpu-policy{RESET} <p>     CPU pinning: nri-balloons | kubelet-static | best-effort
                             (default: MM_CPU_POLICY, else auto-detected)
@@ -73,8 +73,8 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
   {GREEN}HF_TOKEN{RESET}              HuggingFace token for gated models
   {GREEN}MM_CONFIG{RESET}             Path to models.yaml
   {GREEN}MM_ACCEL_RESOURCE{RESET}     Accelerator extended resource the cluster advertises (e.g. nvidia.com/gpu).
-                            Required to deploy a device: gpu runtime (vllm-cuda); ai-solutions sets
-                            it in rack-scale mode only
+                        Required to deploy a device: gpu runtime (vllm-cuda); ai-solutions sets
+                        it in rack-scale mode only
   {GREEN}MM_CPU_POLICY{RESET}         Cluster CPU policy: nri-balloons (default) |
                         kubelet-static | best-effort. Set by the Ansible
                         install from kubernetes_cpu_policy; --cpu-policy wins.
@@ -347,7 +347,7 @@ def _gpu_gate(m: Model, dry_run: bool) -> None:
               "the model, defaults.gpus on its category, or pass --gpus N.")
     have = os.environ.get("MM_ACCEL_RESOURCE", "")
     want = text(pick(m.rt, "accelerator_resource"))
-    if have and want and renderer.gpu_vendor(have) != renderer.gpu_vendor(want):
+    if have and want and have.split("/")[0] != want.split("/")[0]:
         msg = (f"Runtime '{m.runtime}' is built for {renderer.gpu_vendor(want) or want} GPUs ({want}), but the cluster's "
                f"accelerator is {have} (MM_ACCEL_RESOURCE). Use a runtime for that accelerator, or unset "
                "MM_ACCEL_RESOURCE on a cluster without it.")
@@ -379,11 +379,12 @@ def deploy(o: Options, target: str) -> None:
         info(f"  Node: {m.node}")
     policy = GpuRuntime() if m.gpu else resolve_policy(o.cpu_policy, m.node)
     info(f"  CPU policy: {policy.name}")
-    cli_args, tp = _engine_cli_args(o, int(m.gpus) if m.gpu else 1, renderer.engine_args(m) if m.gpu else [])
-    if m.gpu and tp > int(m.gpus):
-        abort(f"Tensor parallel size {tp} needs {tp} GPUs, but {m.name} requests {m.gpus}. Pass --gpus {tp}.")
-    if m.gpu and tp < int(m.gpus):
-        warn(f"{int(m.gpus) - tp} of {m.gpus} GPUs unused (tensor parallel size {tp}); pass --gpus {tp}.")
+    gpus = int(m.gpus) if m.gpu else 1
+    cli_args, tp = _engine_cli_args(o, gpus, renderer.engine_args(m) if m.gpu else [])
+    if m.gpu and tp > gpus:
+        abort(f"Tensor parallel size {tp} needs {tp} GPUs, but {m.name} requests {gpus}. Pass --gpus {tp}.")
+    if m.gpu and tp < gpus:
+        warn(f"{gpus - tp} of {gpus} GPUs unused (tensor parallel size {tp}); pass --gpus {tp}.")
     resolve_auto_cpu(policy, m, tp)
     policy.prepare(m)
     annotations, cpu = policy.annotations(m, tp)

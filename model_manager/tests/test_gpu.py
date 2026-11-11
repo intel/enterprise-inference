@@ -199,9 +199,9 @@ def test_gpu_preflight_messages(monkeypatch):
 
 def test_own_running_pods_name_the_remedy(monkeypatch):
     assert preflight(monkeypatch, _nodes(8), _pods(("n0", "m", 8))) == [
-        "m's own running pods hold the nvidia.com/gpu it needs: a changed re-deploy starts its new pod next to the "
-        "running one. Undeploy it first (./model-manager undeploy m), or set MM_PREFLIGHT=warn to apply anyway (the "
-        "new pod then waits for GPUs)."]
+        "m's own running pods hold the nvidia.com/gpu it needs: if this change restarts the pod, the rollout "
+        "starts the new one next to the running one. Undeploy it first (./model-manager undeploy m), or use "
+        "MM_PREFLIGHT=warn to apply anyway (e.g. a scale-down or a label change, which starts no new pod)."]
     # Same name in another namespace is another model.
     other_ns = {"items": [{**p, "metadata": {**p["metadata"], "namespace": "x"}} for p in _pods(("n0", "m", 8))["items"]]}
     assert preflight(monkeypatch, _nodes(8), other_ns)[0].startswith("No node has 8 free")
@@ -213,7 +213,23 @@ def test_gpu_preflight_ignores_the_preferred_node(monkeypatch):
 
 def test_gpu_preflight_warns_when_not_every_replica_fits(monkeypatch, capsys):
     assert preflight(monkeypatch, _nodes(8), replicas="2") == []
-    assert "only 1 of 2 replicas fit" in capsys.readouterr().err
+    assert "only 1 of 2 new replicas fit" in capsys.readouterr().err
+    # A scale-up only needs room for the new replica; the running one keeps its GPUs.
+    assert preflight(monkeypatch, _nodes(8, 8), _pods(("n0", "m", 8)), replicas="2") == []
+    assert "replicas fit" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("have, want, refused", [("gpu.intel.com/xe", "amd.com/gpu", True),
+                                                ("amd.com/gpu", "amd.com/gpu", False),
+                                                ("nvidia.com/mig-1g.10gb", "nvidia.com/gpu", False)])
+def test_gate_compares_the_resource_domain(monkeypatch, have, want, refused):
+    monkeypatch.setenv("MM_ACCEL_RESOURCE", have)
+    m = Model(name="m", namespace="n", runtime="x", gpus="1", rt={"device": "gpu", "accelerator_resource": want})
+    if refused:
+        with pytest.raises(SystemExit):
+            cli._gpu_gate(m, dry_run=False)
+    else:
+        cli._gpu_gate(m, dry_run=False)
 
 
 def test_declared_gpus_the_cluster_lacks_stop_the_deploy(monkeypatch):

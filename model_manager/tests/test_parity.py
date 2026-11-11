@@ -77,12 +77,14 @@ HELP_HFID = [
     (r"deploy --id meta-llama", "deploy --hfid meta-llama"),
 ]
 # --help documents --gpus and MM_ACCEL_RESOURCE (GPU runtimes), which are new.
-HELP_GPU = [(r"^(  --tp N .*\n)",
-             r"\1  --gpus N             GPUs per pod (device: gpu runtimes, e.g. vllm-cuda); also the default --tp\n"),
+HELP_GPU = [(r"^  --tp N .*\n",
+             r"  --tp N               Tensor-parallel size (splits across N NUMA nodes; on a GPU runtime, also N GPUs)\n"
+             r"  --gpus N             GPUs per pod (device: gpu runtimes, e.g. vllm-cuda); also the default --tp\n"),
+            (r"vllm \(default\) \| openvino  \(alias: --runtime\)$", "vllm (default) | openvino | vllm-cuda  (alias: --runtime)"),
             (r"^(  MM_CONFIG .*\n)",
              r"\1  MM_ACCEL_RESOURCE     Accelerator extended resource the cluster advertises (e.g. nvidia.com/gpu).\n"
-             r"                            Required to deploy a device: gpu runtime (vllm-cuda); ai-solutions sets\n"
-             r"                            it in rack-scale mode only\n")]
+             r"                        Required to deploy a device: gpu runtime (vllm-cuda); ai-solutions sets\n"
+             r"                        it in rack-scale mode only\n")]
 # The catalog's GPU examples, its last entries, are undeployed too; the legacy catalog had none.
 GPU_MODELS = ("qwen3-0-6b-cuda", "llama-3-1-70b-instruct-cuda", "nemotron-3-5-lightning-30b-a3b-cuda",
               "nemotron-3-super-120b-a12b-cuda", "nemotron-3-ultra-550b-a55b-cuda")

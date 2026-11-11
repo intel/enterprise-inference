@@ -530,7 +530,7 @@ models:
 
   # ── GPU examples (runtime: vllm-cuda) ───────────────────────────────────────
   # Deployable only when MM_ACCEL_RESOURCE is set — in ai-solutions that means
-  # rack_scale_enabled=true with an accelerator: in rack-profile.yaml. Neither
+  # rack_scale_enabled=true with an accelerator: in rack-profile.yaml. None
   # autodeploys; opt in per model.
 
   # LLM — small Qwen3 on 1 NVIDIA GPU. Smoke test for the GPU path.

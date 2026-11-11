@@ -97,7 +97,7 @@ The GPU engine is configured the same way under `runtimes.vllm-cuda` (per-catego
 device: gpu                                 # accelerator limits, /dev/shm, toleration, no CPU pinning
 kind: LLMInferenceService
 routing: epp
-accelerator_resource: nvidia.com/gpu        # --dry-run preview only; a deploy uses MM_ACCEL_RESOURCE
+accelerator_resource: nvidia.com/gpu        # the vendor gate and --dry-run; a deploy requests MM_ACCEL_RESOURCE
 accelerator_toleration_key: nvidia.com/gpu  # taint GPU nodes commonly carry (NoSchedule)
 shm_size: 10Gi                              # /dev/shm for NCCL tensor parallelism
 ```

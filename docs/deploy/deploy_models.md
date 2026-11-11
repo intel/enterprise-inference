@@ -136,10 +136,12 @@ before downloading weights, for example when the profile declares a GPU node
 that has not joined the cluster or whose device plugin is not ready yet.
 `MM_PREFLIGHT=warn` proceeds anyway; `MM_SKIP_PREFLIGHT=1` skips the check.
 
-A changed re-deploy (or `MM_FORCE_REDEPLOY=1`) starts the new pod next to the
+A re-deploy of a running model counts its own pods as holding their GPUs: if
+the change restarts the pod, the rolling update starts the new one next to the
 running one. When the model already fills its node, run
 `./model-manager undeploy <name>` first, or set `MM_PREFLIGHT=warn` to apply
-anyway; the new pod then waits for GPUs.
+anyway, for example for a scale-down or a label change, which starts no new
+pod.
 
 `--tp N` without `--gpus` also sets the GPU count to N. A tensor parallel size
 larger than the GPU count is refused; a smaller one warns about the unused GPUs.

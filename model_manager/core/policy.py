@@ -193,12 +193,16 @@ class GpuRuntime(BestEffort):
         resource, tolerated = m.accel_resource, text(pick(m.rt, "accelerator_toleration_key"))
         used: dict = {}
         own: dict = {}
+        own_pods = 0
         for pod in pods.get("items", []):
             meta, node = pod.get("metadata") or {}, text(pick(pod.get("spec"), "nodeName"))
             name = pick(pick(meta, "labels", {}), "app.kubernetes.io/name")
-            held = own if (pick(meta, "namespace"), name) == (m.namespace, m.name) else used
-            held[node] = held.get(node, 0) + sum(_quantity(pick(pick(c.get("resources"), "requests", {}), resource))
-                                                 for c in pick(pod.get("spec"), "containers", []))
+            mine = (pick(meta, "namespace"), name) == (m.namespace, m.name)
+            gpus = sum(_quantity(pick(pick(c.get("resources"), "requests", {}), resource))
+                       for c in pick(pod.get("spec"), "containers", []))
+            held = own if mine else used
+            held[node] = held.get(node, 0) + gpus
+            own_pods += bool(mine and gpus)
         ready = [n for n in nodes.get("items", []) if _schedulable(n, tolerated)]
         alloc = {text(pick(n.get("metadata"), "name")): _quantity(pick(pick(n.get("status"), "allocatable", {}), resource))
                  for n in ready}
@@ -209,14 +213,16 @@ class GpuRuntime(BestEffort):
         free = [count - used.get(name, 0) - own.get(name, 0) for name, count in alloc.items() if count]
         fit = sum(max(f, 0) // need for f in free)
         if not fit and any(count - used.get(name, 0) >= need for name, count in alloc.items()):
-            return [f"{m.name}'s own running pods hold the {resource} it needs: a changed re-deploy starts its new "
-                    f"pod next to the running one. Undeploy it first (./model-manager undeploy {m.name}), or set "
-                    "MM_PREFLIGHT=warn to apply anyway (the new pod then waits for GPUs)."]
+            return [f"{m.name}'s own running pods hold the {resource} it needs: if this change restarts the pod, the "
+                    f"rollout starts the new one next to the running one. Undeploy it first (./model-manager "
+                    f"undeploy {m.name}), or use MM_PREFLIGHT=warn to apply anyway (e.g. a scale-down or a label "
+                    "change, which starts no new pod)."]
         if not fit:
             return [f"No node has {need} free {resource}; the most on one node is {max(free)}. A pod's GPUs cannot "
                     "span nodes: lower --gpus, or free GPUs on a node."]
-        if fit < replicas:
-            warn(f"GPU: only {fit} of {replicas} replicas fit on the free {resource} — the rest will stay Pending.")
+        if fit < replicas - own_pods:
+            warn(f"GPU: only {fit} of {replicas - own_pods} new replicas fit on the free {resource} — the rest will "
+                 "stay Pending.")
         return []
 
     def failure(self, m: Model, tp: int) -> str:
