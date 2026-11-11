@@ -250,6 +250,7 @@ def test_own_running_pods_name_the_remedy(monkeypatch):
     (PENDING, None, "WaitForFirstConsumer", True, ("n0",)),    # binds where the download Job runs: pin the Job
     (BOUND, _pv(), "", True, ()),                              # shared storage, no node affinity
     (PENDING, None, "Immediate", True, ()),
+    ({"spec": {**PENDING["spec"], "accessModes": ["ReadWriteMany"]}}, None, "WaitForFirstConsumer", True, ()),  # shared
 ])
 def test_gpu_preflight_and_the_model_store(monkeypatch, pvc, pv, binding, fits, download):
     nodes = _labelled({"items": _nodes(8)["items"] + _nodes(None)["items"]})
@@ -259,6 +260,11 @@ def test_gpu_preflight_and_the_model_store(monkeypatch, pvc, pv, binding, fits, 
     assert (errors == []) is fits and runtime.download_nodes == download
     if not fits:
         assert "GPU models need shared (ReadWriteMany) storage, or the model store on a GPU node." in errors[0]
+
+
+def test_an_unreadable_store_volume_is_warned_about(monkeypatch, capsys):
+    assert preflight(monkeypatch, _labelled(_nodes(8)), pvc=BOUND, pv=None) == []
+    assert "Could not read PersistentVolume pv-1 — skipping the model-store node check." in capsys.readouterr().err
 
 
 def test_own_pods_on_the_stores_node_say_undeploy_not_storage(monkeypatch):
@@ -301,6 +307,13 @@ def test_a_pending_replica_still_needs_room(monkeypatch, capsys):
     # One replica runs on n0, one is Pending: a scale-up to 3 needs room for two pods, and only one fits on n1.
     assert preflight(monkeypatch, _nodes(8, 8), _pods(("n0", "m", 8), ("", "m", 8)), rolls=False, replicas="3") == []
     assert "only 1 of 2 new replicas fit" in capsys.readouterr().err
+
+
+def test_a_terminating_pod_holds_gpus_but_is_not_a_replica(monkeypatch):
+    # Right after a rollout the old pod shuts down on n0 and the new one runs on n1: a scale-up to 2 needs a free node.
+    pods = _pods(("n0", "m", 8), ("n1", "m", 8))
+    pods["items"][0]["metadata"]["deletionTimestamp"] = "2026-01-01T00:00:00Z"
+    assert preflight(monkeypatch, _nodes(8, 8), pods, rolls=False, replicas="2")[0].startswith("No node has 8 free")
 
 
 @pytest.mark.parametrize("live, diff_rc, rolls", [("2", 0, False), ("2", 1, True), ("", 0, True), ("1", 0, False)])

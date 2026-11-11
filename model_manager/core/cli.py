@@ -204,7 +204,7 @@ def _tp_in(args: list[str]) -> int | None:
 
 
 def _engine_cli_args(o: Options, gpus: int, catalog_args: list[str]) -> tuple[list[str], int]:
-    """--arg list (with --tp injected unless it already sets the flag) and the tensor-parallel size.
+    """--arg list (with --tp appended: it renders last, so it wins over an --arg one) and the tensor-parallel size.
     A multi-GPU pod defaults to tensor parallelism across all its GPUs, unless the catalog's args
     (category, version, model) already set it: the CLI args render last and would override them."""
     args = list(o.arg)
@@ -386,7 +386,7 @@ def deploy(o: Options, target: str) -> None:
         info(f"  GPUs: {m.gpus} x {m.accel_resource}")
     if m.node:
         info(f"  Node: {m.node}")
-    policy = GpuRuntime(catalog.pvc, True) if m.gpu else resolve_policy(o.cpu_policy, m.node)
+    policy = GpuRuntime(catalog.pvc) if m.gpu else resolve_policy(o.cpu_policy, m.node)
     info(f"  CPU policy: {policy.name}")
     gpus = int(m.gpus) if m.gpu else 1
     cli_args, tp = _engine_cli_args(o, gpus, renderer.engine_args(m) if m.gpu else [])
@@ -419,7 +419,7 @@ def deploy(o: Options, target: str) -> None:
         _apply_chat_template(m)
     if action == "apply":
         if m.gpu and not truthy(os.environ.get("MM_SKIP_PREFLIGHT", "")):
-            policy = GpuRuntime(catalog.pvc, _rolls_pods(m, catalog, o, annotations, cpu, cli_args))
+            policy.rolls = _rolls_pods(m, catalog, o, annotations, cpu, cli_args)
         preflight_gate(policy, m, tp)
         k8s.ensure_storage(m.namespace, catalog.pvc)
         download_weights(m, catalog, cli_args, policy.download_nodes if m.gpu else ())

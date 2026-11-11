@@ -149,10 +149,10 @@ for the added replicas.
 The model store must be mountable on a GPU node. On node-local storage
 (`local-path`), a store already bound to a node without the GPUs stops the
 deploy: GPU models need shared (ReadWriteMany) storage, or the store on a GPU
-node. A store that binds on first use is created where the download Job runs,
-so the pre-flight pins the Job to the GPU nodes that fit (not when it is
-skipped), and warns: on node-local storage every model, CPU ones included, must
-then run on that node.
+node. A store that binds on first use (and is not ReadWriteMany) is created
+where the download Job runs, so the pre-flight pins the Job to the GPU nodes
+that fit (not when it is skipped), and warns: on node-local storage every model,
+CPU ones included, must then run on that node.
 
 `--tp N` without `--gpus` also sets the GPU count to N. A tensor parallel size
 larger than the GPU count is refused; a smaller one warns about the unused GPUs.

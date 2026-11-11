@@ -179,7 +179,7 @@ class GpuRuntime(BestEffort):
     name = "n/a (GPU runtime — no CPU pinning)"
     label = "GPU"
 
-    def __init__(self, pvc: str, rolls: bool) -> None:
+    def __init__(self, pvc: str, rolls: bool = True) -> None:
         """pvc: the model-store claim. rolls: False when only spec.replicas changes, so the running pods stay."""
         self.pvc, self.rolls, self.download_nodes = pvc, rolls, ()
 
@@ -241,7 +241,8 @@ POLICIES = {p.name: p for p in (NriBalloons, KubeletStatic, BestEffort)}
 
 
 def _gpu_usage(pods: list, m: Model, resource: str) -> tuple[dict, dict, int]:
-    """GPUs held per node by other pods and by m's own pods, and how many of m's scheduled pods hold GPUs."""
+    """GPUs held per node by other pods and by m's own pods, and how many of m's scheduled pods hold GPUs
+    (a terminating pod still holds its GPUs, but is no longer a replica)."""
     used: dict = {}
     own: dict = {}
     own_pods = 0
@@ -251,7 +252,7 @@ def _gpu_usage(pods: list, m: Model, resource: str) -> tuple[dict, dict, int]:
         gpus = _pod_request(pod, resource)
         held = own if mine else used
         held[node] = held.get(node, 0) + gpus
-        own_pods += bool(mine and gpus and node)
+        own_pods += bool(mine and gpus and node and not meta.get("deletionTimestamp"))
     return used, own, own_pods
 
 
@@ -271,18 +272,21 @@ def _pod_request(pod: dict, resource: str) -> int:
 
 
 def _model_store(namespace: str, pvc: str) -> tuple[list, bool]:
-    """The model-store PV's required node terms (node-local storage), and whether the PVC is unbound and binds
-    on first use, so the download Job's node decides where it lands."""
+    """The model-store PV's required node terms (node-local storage), and whether the PVC is unbound, not
+    ReadWriteMany and binds on first use, so the download Job's node decides where it lands."""
     claim = k8s.get_json("pvc", pvc, "-n", namespace)
     if not claim:
         return [], False
-    volume = text(pick(claim.get("spec"), "volumeName"))
+    spec = claim.get("spec") or {}
+    volume = text(pick(spec, "volumeName"))
     if volume:
-        affinity = pick(pick(k8s.get_json("pv", volume), "spec", {}), "nodeAffinity", {})
+        pv = k8s.get_json("pv", volume)
+        if not pv:
+            warn(f"Could not read PersistentVolume {volume} — skipping the model-store node check.")
+        affinity = pick(pick(pv, "spec", {}), "nodeAffinity", {})
         return pick(pick(affinity, "required", {}), "nodeSelectorTerms", []), False
-    mode = k8s.out("get", "storageclass", text(pick(claim.get("spec"), "storageClassName")), "-o",
-                   "jsonpath={.volumeBindingMode}")
-    return [], mode == "WaitForFirstConsumer"
+    mode = k8s.out("get", "storageclass", text(pick(spec, "storageClassName")), "-o", "jsonpath={.volumeBindingMode}")
+    return [], mode == "WaitForFirstConsumer" and "ReadWriteMany" not in pick(spec, "accessModes", [])
 
 
 def _node_matches(node: dict, terms: list) -> bool:
