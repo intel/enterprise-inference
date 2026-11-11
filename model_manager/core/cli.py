@@ -347,7 +347,11 @@ def _drop_stale_autoscaler(m: Model) -> None:
     owners = (stale.get("metadata") or {}).get("ownerReferences") or []
     if any(o.get("kind") == "InferenceService" and o.get("name") == m.name for o in owners):
         info(f"Removing the previous autoscaler {kind}/{m.name}-predictor")
-        k8s.delete(kind, f"{m.name}-predictor", m.namespace, quiet=True)
+        r = k8s.run("delete", kind, f"{m.name}-predictor", "-n", m.namespace, "--ignore-not-found")
+        if r.returncode:
+            warn(f"Could not remove {kind}/{m.name}-predictor ({r.stderr.strip()}): KServe cannot switch "
+                 f"{m.name} to the new autoscaler until it is gone. Run: kubectl delete {kind} "
+                 f"{m.name}-predictor -n {m.namespace}")
 
 
 def _apply_manifest(m: Model, manifest: str, changed: bool) -> None:

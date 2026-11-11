@@ -869,3 +869,17 @@ def test_runtime_default_target_needs_no_max(monkeypatch, model):
     # The runtime's default scale_target applies only once autoscaling is on; a plain deploy stays fixed.
     m, _ = _render(monkeypatch, model)
     assert not m.autoscaled and m.replicas == "1" and m.scale_target == ""
+
+
+def test_failed_autoscaler_removal_is_reported(monkeypatch, capsys):
+    # A failed delete (e.g. RBAC) leaves the model stuck on kserve#5196: say so, with the manual command.
+    def run(*args, stdin=None):
+        if args[0] == "get":
+            owned = {"metadata": {"ownerReferences": [{"kind": "InferenceService", "name": "m"}]}}
+            return subprocess.CompletedProcess(args, 0, json.dumps(owned), "")
+        return subprocess.CompletedProcess(args, 1, "", "forbidden")
+    monkeypatch.setattr(k8s, "run", run)
+    cli._drop_stale_autoscaler(Model(name="m", namespace="ns", kind="InferenceService",
+                                     min_replicas="1", max_replicas="3"))
+    err = capsys.readouterr().err
+    assert "Could not remove hpa/m-predictor (forbidden)" in err and "kubectl delete hpa m-predictor -n ns" in err

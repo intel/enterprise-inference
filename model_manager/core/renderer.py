@@ -133,13 +133,13 @@ def _llmisvc_replicas(m: Model) -> str:
         f"            threshold: {quote(m.scale_target)}"])
 
 
-def _isvc_replicas(m: Model) -> str:
-    """predictor min/max replicas, plus the KEDA trigger when autoscaled (KServe makes the ScaledObject
-    and its threshold applies per replica)."""
+def _isvc_scaling(m: Model) -> tuple[str, str]:
+    """(metadata annotations, predictor replica lines): fixed min = max, or the KEDA class plus its
+    trigger (KServe makes the ScaledObject; the threshold applies per replica)."""
     if not m.autoscaled:
-        return f"    minReplicas: {m.replicas}\n    maxReplicas: {m.replicas}\n"
+        return "", f"    minReplicas: {m.replicas}\n    maxReplicas: {m.replicas}\n"
     server, query = _trigger(m)
-    return "\n".join([
+    return "  annotations:\n    serving.kserve.io/autoscalerClass: keda\n", "\n".join([
         f"    minReplicas: {m.min_replicas}", f"    maxReplicas: {m.max_replicas}", "    autoScaling:",
         "      metrics:", "        - type: External", "          external:", "            metric:",
         "              backend: prometheus", f"              serverAddress: {quote(server)}",
@@ -173,11 +173,10 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
             CHAT_TEMPLATE_VOLUME=(f"    volumes:\n      - name: chat-template\n        configMap:\n"
                                   f"          name: {m.name}-chat-template\n") if inline else ""))
     if m.kind == "InferenceService":
+        scaling_annotations, scaling = _isvc_scaling(m)
         name = "inference-service-ovms.yaml" if m.runtime == "openvino" else "inference-service.yaml"
         return render(template(name), **common, MODEL_ID=m.model_id, PVC_NAME=catalog.pvc,
-                      SCALING=_isvc_replicas(m),
-                      SCALING_ANNOTATIONS="  annotations:\n    serving.kserve.io/autoscalerClass: keda\n"
-                      if m.autoscaled else "",
+                      SCALING_ANNOTATIONS=scaling_annotations, SCALING=scaling,
                       MODEL_FORMAT=text(pick(m.rt, "format")) or "openvino",
                       RUNTIME_NAME=text(pick(m.rt, "runtime_name")) or f"{m.runtime}-runtime")
     abort(f"Unknown model kind: {m.kind}")
