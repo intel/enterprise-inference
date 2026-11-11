@@ -163,7 +163,6 @@
          else (inference_extension_dir ~ '/model_manager/models.yaml') }}
     _llm_catalog_fields: [name, model_id, category, servers, default_server, runtime, cpu, memory]
 
-# MM_ACCEL_RESOURCE for every deploy below, install-time and Headlamp alike.
 - name: "llm_services | Resolve the accelerator resource for GPU runtimes"
   ansible.builtin.include_tasks: accel_resource.yaml
 

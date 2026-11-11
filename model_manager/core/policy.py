@@ -182,22 +182,35 @@ class GpuRuntime(BestEffort):
         return {}, m.cpu
 
     def preflight(self, m: Model, tp: int) -> list[str]:
-        """The cluster's allocatable GPUs decide, not the declared accelerator: a node in the rack profile
-        that never joined, or whose device plugin is not up, advertises none."""
-        nodes = k8s.get_json("node", m.node) if m.node else k8s.get_json("nodes")
-        if not nodes:
-            warn(f"Could not list nodes to verify {m.accel_resource} capacity — skipping the GPU capacity check.")
+        """The cluster's free GPUs decide, not the declared accelerator: a node in the rack profile that never
+        joined, or whose device plugin is not up, advertises none. --node is only a preference, so every node counts."""
+        nodes = k8s.get_json("nodes")
+        pods = k8s.get_json("pods", "-A", "--field-selector", "status.phase!=Succeeded,status.phase!=Failed")
+        if not nodes or not pods:
+            warn(f"Could not list nodes and pods to verify free {m.accel_resource} — skipping the GPU capacity check.")
             return []
-        alloc = [_allocatable(n, m.accel_resource) for n in ([nodes] if m.node else nodes.get("items", []))
-                 if not pick(n.get("spec"), "unschedulable", False)]
-        largest, need = max(alloc, default=0), int(m.gpus)
-        if largest >= need:
-            return []
-        if not largest:
-            return [f"No schedulable node advertises allocatable {m.accel_resource}: no GPU node has joined the "
+        resource, tolerated = m.accel_resource, text(pick(m.rt, "accelerator_toleration_key"))
+        used: dict = {}
+        for pod in pods.get("items", []):
+            node = text(pick(pod.get("spec"), "nodeName"))
+            if node and pick(pick(pod.get("metadata"), "labels", {}), "app.kubernetes.io/name") != m.name:
+                used[node] = used.get(node, 0) + sum(_quantity(pick(pick(c.get("resources"), "requests", {}), resource))
+                                                     for c in pick(pod.get("spec"), "containers", []))
+        ready = [n for n in nodes.get("items", []) if _schedulable(n, tolerated)]
+        alloc = {text(pick(n.get("metadata"), "name")): _quantity(pick(pick(n.get("status"), "allocatable", {}), resource))
+                 for n in ready}
+        free = [count - used.get(name, 0) for name, count in alloc.items() if count]
+        need, replicas = int(m.gpus), int(m.replicas)
+        if not free:
+            return [f"No Ready, schedulable node advertises allocatable {resource}: no GPU node has joined the "
                     "cluster, or its device plugin is not ready yet."]
-        return [f"No node has {need} allocatable {m.accel_resource}; the largest offers {largest}. A pod's GPUs "
-                "cannot span nodes, so it would stay Pending."]
+        fit = sum(max(f, 0) // need for f in free)
+        if not fit:
+            return [f"No node has {need} free {resource}; the most on one node is {max(free)}. A pod's GPUs cannot "
+                    "span nodes, so it would stay Pending."]
+        if fit < replicas:
+            warn(f"GPU: only {fit} of {replicas} replicas fit on the free {resource} — the rest will stay Pending.")
+        return []
 
     def failure(self, m: Model, tp: int) -> str:
         return (f"GPU pre-flight failed: cannot place {m.name} ({m.gpus} x {m.accel_resource}) on any node. Lower "
@@ -208,9 +221,19 @@ class GpuRuntime(BestEffort):
 POLICIES = {p.name: p for p in (NriBalloons, KubeletStatic, BestEffort)}
 
 
-def _allocatable(node: dict, resource: str) -> int:
-    value = text(pick(pick(node.get("status"), "allocatable", {}), resource, "0"))
-    return int(value) if is_uint(value) else 0
+def _quantity(value) -> int:
+    """A whole-number extended-resource quantity (GPUs); 0 when absent or unparseable."""
+    return int(text(value)) if is_uint(text(value)) else 0
+
+
+def _schedulable(node: dict, tolerated: str) -> bool:
+    """Ready, not cordoned, and no NoSchedule/NoExecute taint other than the accelerator's own, which GPU pods
+    tolerate."""
+    ready = any(c.get("type") == "Ready" and c.get("status") == "True"
+                for c in pick(node.get("status"), "conditions", []))
+    blocking = [t for t in pick(node.get("spec"), "taints", []) if t.get("effect") in ("NoSchedule", "NoExecute")
+                and not (t.get("key") == tolerated and t.get("effect") == "NoSchedule")]
+    return ready and not pick(node.get("spec"), "unschedulable", False) and not blocking
 
 
 def _whole_cpus(cpu: str, floor: bool = False) -> int:

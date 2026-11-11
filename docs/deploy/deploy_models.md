@@ -129,12 +129,14 @@ Enterprise AI Solutions sets it automatically when
 on a standard CPU install it is empty and GPU models cannot be deployed by
 accident.
 
-A deploy then checks the cluster itself: some schedulable node must advertise
-at least `gpus` allocatable `nvidia.com/gpu` (a pod's GPUs cannot span nodes).
-Otherwise it stops before downloading weights, for example when the profile
-declares a GPU node that has not joined the cluster or whose device plugin is
-not ready yet. `MM_PREFLIGHT=warn` proceeds anyway; `MM_SKIP_PREFLIGHT=1` skips
-the check. For a manual CLI deploy on a GPU cluster you already trust:
+A deploy then checks the cluster itself: a Ready node, not cordoned or tainted
+against the pod, must have at least `gpus` free `nvidia.com/gpu`, counting what
+other pods already hold (a pod's GPUs cannot span nodes). Otherwise it stops
+before downloading weights, for example when the profile declares a GPU node
+that has not joined the cluster or whose device plugin is not ready yet.
+`MM_PREFLIGHT=warn` proceeds anyway; `MM_SKIP_PREFLIGHT=1` skips the check. A
+tensor parallel size larger than the GPU count is refused. For a manual CLI
+deploy on a GPU cluster you already trust:
 
 ```bash
 MM_ACCEL_RESOURCE=nvidia.com/gpu ./model-manager deploy llama-3-1-70b-instruct-cuda --wait

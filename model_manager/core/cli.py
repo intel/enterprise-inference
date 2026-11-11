@@ -357,7 +357,7 @@ def _gpu_gate(m: Model, dry_run: bool) -> None:
         return
     if dry_run:
         return warn(f"MM_ACCEL_RESOURCE is not set — previewing anyway (--dry-run) with "
-                    f"'{text(pick(m.rt, 'accelerator_resource')) or '?'}'. A real deploy of '{m.runtime}' would be "
+                    f"'{want or '?'}'. A real deploy of '{m.runtime}' would be "
                     "refused.")
     abort(f"Runtime '{m.runtime}' targets a GPU (device: gpu) but no accelerator resource is enabled "
           "(MM_ACCEL_RESOURCE is empty). In Intel Enterprise AI Solutions this is set automatically when "
@@ -381,6 +381,8 @@ def deploy(o: Options, target: str) -> None:
     policy = GpuRuntime() if m.gpu else resolve_policy(o.cpu_policy, m.node)
     info(f"  CPU policy: {policy.name}")
     cli_args, tp = _engine_cli_args(o, int(m.gpus) if m.gpu else 1, tuple(renderer.engine_args(m)) if m.gpu else ())
+    if m.gpu and tp > int(m.gpus):
+        abort(f"Tensor parallel size {tp} needs {tp} GPUs, but {m.name} requests {m.gpus}. Pass --gpus {tp}.")
     resolve_auto_cpu(policy, m, tp)
     policy.prepare(m)
     annotations, cpu = policy.annotations(m, tp)

@@ -1,18 +1,21 @@
 ---
 # MM_ACCEL_RESOURCE, model-manager's GPU deploy gate, used by the install-time
 # deploys (deploy_models.yaml) and the Headlamp deploy Jobs (ui_deploy.yaml)
-# through __llm_mm_env: the extended resource of the GPU vendor the rack-profile
-# parser wrote to the flags file. Empty unless the solutions layer is in
-# rack-scale mode, so device: gpu runtimes are refused and the CPU path is
-# unaffected. A deploy still checks the cluster's allocatable GPUs, so a GPU node
-# declared in the profile but not in the cluster cannot take a GPU model.
+# through __llm_mm_env: the extended resource of the rack profile's GPU vendor,
+# from the solutions layer's rack_scale_gpu_vendor or else the flags file its
+# parser wrote. Empty unless the solutions layer is in rack-scale mode, so
+# device: gpu runtimes are refused and the CPU path is unaffected. A deploy still
+# checks the cluster's free GPUs, so a GPU node declared in the profile but not
+# in the cluster cannot take a GPU model.
 
 - name: "llm_services | Map the rack-scale GPU vendor to the accelerator resource"
   vars:
     _flags: >-
       {{ lookup('ansible.builtin.file', env_dir ~ '/inventory/metadata/rack-scale-flags.env', errors='ignore')
          | default('', true) }}
-    _vendor: "{{ _flags | regex_search('(?m)^rack_scale_gpu_vendor=(\\S*)', '\\1') | default([''], true) | first }}"
+    _vendor: >-
+      {{ rack_scale_gpu_vendor
+         | default(_flags | regex_search('(?m)^rack_scale_gpu_vendor=(\S*)', '\1') | default([''], true) | first) }}
   ansible.builtin.set_fact:
     _mm_accel_resource: >-
       {{ {'nvidia': 'nvidia.com/gpu', 'intel': 'gpu.intel.com/xe', 'amd': 'amd.com/gpu'}.get(_vendor, '')

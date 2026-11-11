@@ -42,14 +42,24 @@ LLAMA_GPU_READY = [[r"get LLMInferenceService llama-3-1-70b-instruct-cuda -n llm
                     _ready("MainWorkloadReady")]]
 
 
-def _nodes(*gpus, unschedulable=()):
-    """`kubectl get nodes -o json`: one node per entry, with that many allocatable GPUs (None: no GPUs)."""
-    return {"items": [{"metadata": {"name": f"n{i}"}, "spec": {"unschedulable": i in unschedulable},
-                       "status": {"allocatable": {"cpu": "64", **({} if g is None else {"nvidia.com/gpu": str(g)})}}}
+def _nodes(*gpus, unschedulable=(), not_ready=(), taints=None):
+    """`kubectl get nodes -o json`: node n<i> with that many allocatable GPUs (None: no GPUs)."""
+    return {"items": [{"metadata": {"name": f"n{i}"},
+                       "spec": {"unschedulable": i in unschedulable, "taints": (taints or {}).get(i, [])},
+                       "status": {"allocatable": {"cpu": "64", **({} if g is None else {"nvidia.com/gpu": str(g)})},
+                                  "conditions": [{"type": "Ready", "status": "False" if i in not_ready else "True"}]}}
                       for i, g in enumerate(gpus)]}
 
 
-GPU_NODES = [[r"get nodes -o json$", 0, json.dumps(_nodes(8))]]
+def _pods(*held):
+    """`kubectl get pods -A -o json`: (node, model name, GPUs requested) per pod."""
+    return {"items": [{"metadata": {"labels": {"app.kubernetes.io/name": name}},
+                       "spec": {"nodeName": node, "containers": [{"resources": {"requests": {"nvidia.com/gpu": str(n)}}}]}}
+                      for node, name, n in held]}
+
+
+GPU_NODES = [[r"get nodes -o json$", 0, json.dumps(_nodes(8))],
+             [r"get pods -A --field-selector \S+ -o json$", 0, json.dumps(_pods())]]
 
 GPU_CASES = [
     # gpu-llama-70b is the manifest that served on B300.
@@ -156,26 +166,46 @@ def test_gpu_gate_is_inert_on_cpu(monkeypatch):
 
 
 GPU_MODEL = {"name": "m", "namespace": "n", "runtime": "vllm-cuda",
-             "rt": {"device": "gpu", "accelerator_resource": "nvidia.com/gpu"}}
+             "rt": {"device": "gpu", "accelerator_resource": "nvidia.com/gpu", "accelerator_toleration_key": "nvidia.com/gpu"}}
+GPU_TAINT = {"key": "nvidia.com/gpu", "effect": "NoSchedule"}
 
 
-@pytest.mark.parametrize("nodes, gpus, fits", [
-    (_nodes(None, None), "1", False),               # no GPU node has joined
-    (_nodes(4, 4), "8", False),                     # a pod's GPUs cannot span nodes
-    (_nodes(None, 8), "8", True),
-    (_nodes(8, 2, unschedulable={0}), "4", False),  # a cordoned node does not count
+def preflight(monkeypatch, nodes, pods=None, **model):
+    monkeypatch.setattr(k8s, "get_json", lambda *a: nodes if a == ("nodes",) else pods or _pods())
+    return policy.GpuRuntime().preflight(Model(**{**GPU_MODEL, "gpus": "8", **model}), 1)
+
+
+@pytest.mark.parametrize("nodes, pods, gpus, fits", [
+    (_nodes(None, None), None, "1", False),                       # no GPU node has joined
+    (_nodes(4, 4), None, "8", False),                             # a pod's GPUs cannot span nodes
+    (_nodes(None, 8), None, "8", True),
+    (_nodes(8, 2, unschedulable={0}), None, "4", False),          # cordoned
+    (_nodes(8, not_ready={0}), None, "1", False),                 # NotReady, though allocatable is still reported
+    (_nodes(8, taints={0: [{"key": "maintenance", "effect": "NoSchedule"}]}), None, "1", False),
+    (_nodes(8, taints={0: [GPU_TAINT]}), None, "8", True),        # the GPU taint is tolerated
+    (_nodes(8), _pods(("n0", "other", 8)), "1", False),           # all held by another model
+    (_nodes(8), _pods(("n0", "m", 8)), "8", True),                # its own pods: a re-deploy
 ])
-def test_gpu_preflight_counts_the_clusters_gpus(monkeypatch, nodes, gpus, fits):
-    monkeypatch.setattr(k8s, "get_json", lambda *a: nodes)
-    assert (policy.GpuRuntime().preflight(Model(**GPU_MODEL, gpus=gpus), int(gpus)) == []) is fits
+def test_gpu_preflight_counts_free_gpus(monkeypatch, nodes, pods, gpus, fits):
+    assert (preflight(monkeypatch, nodes, pods, gpus=gpus) == []) is fits
 
 
-def test_gpu_preflight_on_a_named_node(monkeypatch):
-    monkeypatch.setattr(k8s, "get_json", lambda *a: _nodes(2)["items"][0] if a == ("node", "w1") else None)
-    m = Model(**GPU_MODEL, gpus="4", node="w1")
-    assert policy.GpuRuntime().preflight(m, 4) == [
-        "No node has 4 allocatable nvidia.com/gpu; the largest offers 2. A pod's GPUs cannot span nodes, so it "
+def test_gpu_preflight_messages(monkeypatch):
+    assert preflight(monkeypatch, _nodes(None)) == [
+        "No Ready, schedulable node advertises allocatable nvidia.com/gpu: no GPU node has joined the cluster, "
+        "or its device plugin is not ready yet."]
+    assert preflight(monkeypatch, _nodes(4, 2)) == [
+        "No node has 8 free nvidia.com/gpu; the most on one node is 4. A pod's GPUs cannot span nodes, so it "
         "would stay Pending."]
+
+
+def test_gpu_preflight_ignores_the_preferred_node(monkeypatch):
+    assert preflight(monkeypatch, _nodes(None, 8), node="n0") == []
+
+
+def test_gpu_preflight_warns_when_not_every_replica_fits(monkeypatch, capsys):
+    assert preflight(monkeypatch, _nodes(8), replicas="2") == []
+    assert "only 1 of 2 replicas fit" in capsys.readouterr().err
 
 
 def test_declared_gpus_the_cluster_lacks_stop_the_deploy(monkeypatch):
@@ -183,14 +213,22 @@ def test_declared_gpus_the_cluster_lacks_stop_the_deploy(monkeypatch):
     monkeypatch.setenv("MM_ACCEL_RESOURCE", "nvidia.com/gpu")
     for var in ("MM_SKIP_PREFLIGHT", "MM_PREFLIGHT", "MM_NRI_PREFLIGHT"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setattr(k8s, "get_json", lambda *a: _nodes(None, None))
+    monkeypatch.setattr(k8s, "get_json", lambda *a: _nodes(None, None) if a == ("nodes",) else _pods())
     with pytest.raises(SystemExit):
         policy.preflight_gate(policy.GpuRuntime(), Model(**GPU_MODEL, gpus="1"), 1)
 
 
-def test_gpu_preflight_skips_when_nodes_cannot_be_listed(monkeypatch):
+def test_gpu_preflight_skips_when_the_cluster_cannot_be_read(monkeypatch):
     monkeypatch.setattr(k8s, "get_json", lambda *a: None)
     assert policy.GpuRuntime().preflight(Model(**GPU_MODEL, gpus="1"), 1) == []
+
+
+def test_tensor_parallel_larger_than_the_gpu_count_is_refused(monkeypatch, capsys):
+    monkeypatch.setenv("MM_CONFIG", str(cli.MM_DIR / "models.yaml"))
+    monkeypatch.setenv("MM_ACCEL_RESOURCE", "nvidia.com/gpu")
+    with pytest.raises(SystemExit):
+        cli.deploy(cli.Options(tp="4", dry_run=True), "qwen3-0-6b-cuda")
+    assert "Tensor parallel size 4 needs 4 GPUs, but qwen3-0-6b-cuda requests 1" in capsys.readouterr().err
 
 
 def test_gpu_resolution_precedence(monkeypatch):
