@@ -111,6 +111,7 @@ def _annotations(annotations: dict, kind: str) -> str:
         f"{pad}  {k}: {quote(v) if v.isdigit() or v in ('true', 'false') else v}\n" for k, v in annotations.items())
 
 
+# Standalone default; the install always sets MM_PROMETHEUS_URL from observability_namespace.
 PROMETHEUS_URL = "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
 
 

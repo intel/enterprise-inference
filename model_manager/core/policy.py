@@ -61,6 +61,10 @@ class BestEffort:
         """Reasons the model cannot be placed (empty when it fits)."""
         return []
 
+    def replica_shortfall(self, m: Model, tp: int) -> str:
+        """Why m.replicas copies do not all fit right now, without printing ('' when they fit or it is unknown)."""
+        return ""
+
     def failure(self, m: Model, tp: int) -> str:
         return ""
 
@@ -91,11 +95,32 @@ class NriBalloons(BestEffort):
             result = nri_policy.preflight(int(m.cpu), tp, node=m.node, replicas=int(m.replicas))
         return [] if result["ok"] else result["errors"]
 
+    def replica_shortfall(self, m: Model, tp: int) -> str:
+        return "; ".join(self.preflight(m, tp))
+
     def failure(self, m: Model, tp: int) -> str:
         return (f"NRI pre-flight failed: not enough physical cores to place {m.name} (cpu={m.cpu} tp={tp} "
                 f"replicas={m.replicas}) without spilling onto reserved hyperthread-sibling cores. Lower "
                 "--cpu/--replicas, raise --tp, undeploy a model, or add a node. Override with MM_NRI_PREFLIGHT=warn "
                 "(proceed anyway) or MM_NRI_SKIP_PREFLIGHT=1 (skip check).")
+
+
+def _allocatable(m: Model) -> list[int] | None:
+    """Whole allocatable CPUs of each schedulable node (m.node only, when pinned); None when nodes can't be read.
+    Allocatable already excludes kube/system-reserved; exclusive CPUs cannot span nodes."""
+    nodes = k8s.get_json("node", m.node) if m.node else k8s.get_json("nodes")
+    if not nodes:
+        return None
+    return [_whole_cpus(text(pick(pick(n.get("status"), "allocatable", {}), "cpu", "0")), floor=True)
+            for n in ([nodes] if m.node else nodes.get("items", []))
+            if not any(t.get("effect") == "NoSchedule" for t in pick(n.get("spec"), "taints", []))]
+
+
+def _replica_shortfall(alloc: list[int], per_pod: int, replicas: int) -> str:
+    if replicas > 1 and alloc and per_pod * replicas > sum(alloc):
+        return (f"{replicas} replicas x {per_pod} CPUs = {per_pod * replicas} exceeds the cluster's "
+                f"{sum(alloc)} allocatable CPUs")
+    return ""
 
 
 class KubeletStatic(BestEffort):
@@ -148,22 +173,22 @@ class KubeletStatic(BestEffort):
                 warn(f"Node '{node}' has cpuManagerPolicy={text(pick(cfg, 'cpuManagerPolicy', 'none'))} — not "
                      f"'static'. {m.name} will run WITHOUT exclusive CPUs. Re-run the solutions install with "
                      "kubernetes_cpu_policy=kubelet-static to reconfigure kubelet.")
-        nodes = k8s.get_json("node", m.node) if m.node else k8s.get_json("nodes")
-        if not nodes:
+        alloc = _allocatable(m)
+        if alloc is None:
             warn("Could not list nodes to verify CPU capacity — skipping the kubelet-static capacity check.")
             return []
-        # Allocatable already excludes kube/system-reserved; exclusive CPUs cannot span nodes.
-        alloc = [_whole_cpus(text(pick(pick(n.get("status"), "allocatable", {}), "cpu", "0")), floor=True)
-                 for n in ([nodes] if m.node else nodes.get("items", []))
-                 if not any(t.get("effect") == "NoSchedule" for t in pick(n.get("spec"), "taints", []))]
-        per_pod, replicas, largest = int(m.cpu) * tp, int(m.replicas), max(alloc, default=0)
-        if replicas > 1 and largest and per_pod * replicas > sum(alloc):
-            warn(f"kubelet-static: {replicas} replicas x {per_pod} CPUs = {per_pod * replicas} exceeds the cluster's "
-                 f"{sum(alloc)} allocatable CPUs — some replicas will stay Pending.")
+        per_pod, largest = int(m.cpu) * tp, max(alloc, default=0)
+        shortfall = _replica_shortfall(alloc, per_pod, int(m.replicas))
+        if shortfall:
+            warn(f"kubelet-static: {shortfall} — some replicas will stay Pending.")
         if largest and per_pod > largest:
             return [f"No schedulable node has {per_pod} allocatable CPUs (cpu={m.cpu} x tp={tp}); the largest offers "
                     f"{largest}. Exclusive CPUs cannot span nodes, so the pod would stay Pending."]
         return []
+
+    def replica_shortfall(self, m: Model, tp: int) -> str:
+        alloc = _allocatable(m)
+        return _replica_shortfall(alloc, int(m.cpu) * tp, int(m.replicas)) if alloc else ""
 
     def failure(self, m: Model, tp: int) -> str:
         return (f"kubelet-static pre-flight failed: cannot place {m.name} (cpu={m.cpu} tp={tp} replicas={m.replicas}) "

@@ -654,7 +654,7 @@ def test_autoscaling_renders_keda_scaling_instead_of_replicas(monkeypatch):
 def test_autoscaling_from_catalog_and_fixed_replicas_override(monkeypatch, tmp_path):
     catalog = tmp_path / "models.yaml"
     catalog.write_text((cli.MM_DIR / "models.yaml").read_text().replace(
-        "  - name: qwen3-0-6b ", "  - name: qwen3-0-6b\n    autoscaling: {min_replicas: 2, max_replicas: 4, target: 5}\n"
+        "  - name: qwen3-0-6b ", "  - name: qwen3-0-6b\n    autoscaling: {min_replicas: 2, max_replicas: 4, scale_target: 5}\n"
         "    x: ", 1))
     m, doc = _render(monkeypatch, "qwen3-0-6b", catalog=catalog)
     assert (doc["spec"]["scaling"]["minReplicas"], doc["spec"]["scaling"]["maxReplicas"]) == (2, 4)
@@ -672,6 +672,7 @@ def test_equal_min_and_max_is_a_fixed_count(monkeypatch):
     ["--replicas", "2", "--max-replicas", "3"],
     ["--min-replicas", "4", "--max-replicas", "3"],
     ["--min-replicas", "2"],
+    ["--scale-target", "4"],  # a threshold without a maximum would be ignored
     ["--max-replicas", "0"],
 ])
 def test_bad_autoscaling_rejected(monkeypatch, argv):
@@ -727,13 +728,19 @@ def test_missing_keda_aborts_before_any_change(deploy_env):
 
 
 @pytest.mark.parametrize("fits_max, warned", [(True, False), (False, True)])
-def test_max_replicas_only_warns(monkeypatch, capsys, fits_max, warned):
+def test_max_replicas_only_warns(capsys, fits_max, warned):
     class Policy:
-        def preflight(self, m, tp):
-            print("policy note")  # its notes were printed by the first pass already
-            return [] if fits_max or m.replicas != "3" else ["too big"]
+        def replica_shortfall(self, m, tp):
+            return "" if fits_max or m.replicas != "3" else "too big"
     m = Model(name="m", namespace="n", replicas="1", min_replicas="1", max_replicas="3")
     cli._warn_max_unplaceable(Policy(), m, 1)
-    out = capsys.readouterr()
-    assert m.replicas == "1" and "policy note" not in out.out + out.err
-    assert ("do not all fit" in out.err) == warned
+    assert m.replicas == "1"  # checked on a copy
+    assert ("do not all fit" in capsys.readouterr().err) == warned
+
+
+def test_kubelet_static_max_shortfall_is_reported(monkeypatch, capsys):
+    nodes = {"items": [{"status": {"allocatable": {"cpu": "8"}}, "spec": {}} for _ in range(2)]}
+    monkeypatch.setattr(k8s, "get_json", lambda *args: nodes)
+    m = Model(name="m", namespace="n", cpu="8", replicas="1", min_replicas="1", max_replicas="3")
+    cli._warn_max_unplaceable(policy.KubeletStatic(), m, 1)
+    assert "3 replicas x 8 CPUs = 24 exceeds the cluster's 16 allocatable CPUs" in capsys.readouterr().err
