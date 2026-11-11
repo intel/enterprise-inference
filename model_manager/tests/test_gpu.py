@@ -298,7 +298,13 @@ def test_a_replica_only_change_needs_no_room_for_the_running_pods(monkeypatch, n
     assert (preflight(monkeypatch, nodes, pods, rolls=False, replicas=replicas) == []) is fits
 
 
-@pytest.mark.parametrize("live, diff_rc, rolls", [("2", 0, False), ("2", 1, True), ("", 0, True)])
+def test_a_pending_replica_still_needs_room(monkeypatch, capsys):
+    # One replica runs on n0, one is Pending: a scale-up to 3 needs room for two pods, and only one fits on n1.
+    assert preflight(monkeypatch, _nodes(8, 8), _pods(("n0", "m", 8), ("", "m", 8)), rolls=False, replicas="3") == []
+    assert "only 1 of 2 new replicas fit" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("live, diff_rc, rolls", [("2", 0, False), ("2", 1, True), ("", 0, True), ("1", 0, True)])
 def test_rolls_pods_when_more_than_the_replicas_changes(monkeypatch, live, diff_rc, rolls):
     monkeypatch.setenv("MM_CONFIG", str(cli.MM_DIR / "models.yaml"))
     monkeypatch.setenv("MM_ACCEL_RESOURCE", "nvidia.com/gpu")
@@ -316,7 +322,8 @@ def test_node_matches_required_terms():
     assert policy._node_matches(node, term({"key": "zone", "operator": "Exists"}))
     assert not policy._node_matches(node, term({"key": "gpu", "operator": "Exists"}))
     assert policy._node_matches(node, term(fields=[{"key": "metadata.name", "operator": "In", "values": ["n0"]}]))
-    assert policy._node_matches(node, term({"key": "x", "operator": "In", "values": ["y"]}) + term())
+    assert policy._node_matches(node, term({"key": "zone", "operator": "In", "values": ["a"]}) + term())
+    assert not policy._node_matches(node, [{}])  # an empty term matches no node, as in Kubernetes
 
 
 def test_the_download_job_is_pinned_to_the_fitting_nodes():

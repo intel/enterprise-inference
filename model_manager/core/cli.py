@@ -367,7 +367,7 @@ def _gpu_gate(m: Model, dry_run: bool) -> None:
 def _rolls_pods(m: Model, catalog: Catalog, o: Options, annotations: dict, cpu: str, cli_args: list[str]) -> bool:
     """Whether applying m starts new pods: anything but spec.replicas differs from the live object."""
     live = k8s.out("get", m.kind, m.name, "-n", m.namespace, "-o", "jsonpath={.spec.replicas}")
-    if not live:
+    if live in ("", m.replicas):  # new, or the replicas match and deploy's own diff already found a change
         return True
     same = renderer.manifest(dataclasses.replace(m, replicas=live), catalog, o, annotations, cpu, cli_args)
     return k8s.run("diff", *k8s.SSA, "-f", "-", stdin=same).returncode != 0

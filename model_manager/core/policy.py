@@ -239,7 +239,7 @@ POLICIES = {p.name: p for p in (NriBalloons, KubeletStatic, BestEffort)}
 
 
 def _gpu_usage(pods: list, m: Model, resource: str) -> tuple[dict, dict, int]:
-    """GPUs held per node by other pods and by m's own pods, and how many of m's pods hold GPUs."""
+    """GPUs held per node by other pods and by m's own pods, and how many of m's scheduled pods hold GPUs."""
     used: dict = {}
     own: dict = {}
     own_pods = 0
@@ -249,7 +249,7 @@ def _gpu_usage(pods: list, m: Model, resource: str) -> tuple[dict, dict, int]:
         gpus = _pod_request(pod, resource)
         held = own if mine else used
         held[node] = held.get(node, 0) + gpus
-        own_pods += bool(mine and gpus)
+        own_pods += bool(mine and gpus and node)
     return used, own, own_pods
 
 
@@ -292,7 +292,8 @@ def _node_matches(node: dict, terms: list) -> bool:
         values = e.get("values") or []
         return {"In": value in values, "NotIn": value not in values, "Exists": value is not None,
                 "DoesNotExist": value is None}.get(e.get("operator"), False)
-    return any(all(holds(e, labels.get(e.get("key"))) for e in pick(t, "matchExpressions", []))
+    return any((pick(t, "matchExpressions", []) or pick(t, "matchFields", []))  # an empty term matches no node
+               and all(holds(e, labels.get(e.get("key"))) for e in pick(t, "matchExpressions", []))
                and all(holds(f, name if f.get("key") == "metadata.name" else None) for f in pick(t, "matchFields", []))
                for t in terms)
 
