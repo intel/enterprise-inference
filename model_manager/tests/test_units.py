@@ -733,14 +733,28 @@ def test_max_replicas_only_warns(capsys, fits_max, warned):
         def replica_shortfall(self, m, tp):
             return "" if fits_max or m.replicas != "3" else "too big"
     m = Model(name="m", namespace="n", replicas="1", min_replicas="1", max_replicas="3")
-    cli._warn_max_unplaceable(Policy(), m, 1)
+    policy.warn_max_unplaceable(Policy(), m, 1)
     assert m.replicas == "1"  # checked on a copy
     assert ("do not all fit" in capsys.readouterr().err) == warned
 
 
-def test_kubelet_static_max_shortfall_is_reported(monkeypatch, capsys):
-    nodes = {"items": [{"status": {"allocatable": {"cpu": "8"}}, "spec": {}} for _ in range(2)]}
+@pytest.mark.parametrize("node_cpus, warned", [
+    ([8, 8], True),     # 24 CPUs needed, 16 allocatable
+    ([12, 12], True),   # 24 = 24 in total, but each node fits one 8-CPU replica
+    ([16, 8], False),   # 2 + 1 slots
+])
+def test_kubelet_static_max_shortfall_counts_slots_per_node(monkeypatch, capsys, node_cpus, warned):
+    nodes = {"items": [{"status": {"allocatable": {"cpu": str(c)}}, "spec": {}} for c in node_cpus]}
     monkeypatch.setattr(k8s, "get_json", lambda *args: nodes)
     m = Model(name="m", namespace="n", cpu="8", replicas="1", min_replicas="1", max_replicas="3")
-    cli._warn_max_unplaceable(policy.KubeletStatic(), m, 1)
-    assert "3 replicas x 8 CPUs = 24 exceeds the cluster's 16 allocatable CPUs" in capsys.readouterr().err
+    policy.warn_max_unplaceable(policy.KubeletStatic(), m, 1)
+    assert ("3 replicas x 8 CPUs: the schedulable nodes fit" in capsys.readouterr().err) == warned
+
+
+def test_nri_max_shortfall_reported_in_warn_mode(monkeypatch, capsys):
+    # MM_NRI_PREFLIGHT=warn makes the gate pass; the max check still reports the errors.
+    monkeypatch.setattr(nri_policy, "preflight", lambda *a, **k: {"ok": True, "errors": ["no room"]})
+    m = Model(name="m", namespace="n", cpu="8", replicas="1", min_replicas="1", max_replicas="3")
+    assert policy.NriBalloons().preflight(m, 1) == []
+    policy.warn_max_unplaceable(policy.NriBalloons(), m, 1)
+    assert "do not all fit now (no room)" in capsys.readouterr().err

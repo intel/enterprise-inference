@@ -1,7 +1,6 @@
 """model-manager CLI: deploy, undeploy, list and cpu-collisions-check."""
 from __future__ import annotations
 
-import dataclasses
 import fcntl
 import json
 import os
@@ -17,7 +16,7 @@ from pathlib import Path
 from . import __version__, k8s, platform, renderer, routing
 from .config import MM_DIR, Catalog, Model, is_uint, mm_path, pick, resolve, text, truthy
 from .download import download_weights
-from .policy import preflight_gate, resolve_auto_cpu, resolve_policy
+from .policy import preflight_gate, resolve_auto_cpu, resolve_policy, warn_max_unplaceable
 from .ui import BOLD, CYAN, DIM, GREEN, RESET, YELLOW, abort, fmt_duration, info, ok, warn
 
 USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubernetes
@@ -137,9 +136,9 @@ class Options:
 FLAGS = {"--dry-run": "dry_run", "--wait": "wait", "--catalog": "catalog_only", "--deployed": "deployed_only"}
 VALUES = {"--wait-timeout": "wait_timeout", "--hfid": "id", "--id": "id", "--name": "name", "--server": "server",
           "--runtime": "server", "--server-version": "server_version", "--as": "alias", "--cpu": "cpu",
-          "--memory": "memory", "--replicas": "replicas", "--tp": "tp",
-          "--min-replicas": "min_replicas", "--max-replicas": "max_replicas", "--scale-target": "scale_target", "--cpu-policy": "cpu_policy",
-          "--category": "category", "--routing": "routing", "--node": "node"}
+          "--memory": "memory", "--replicas": "replicas", "--tp": "tp", "--cpu-policy": "cpu_policy",
+          "--category": "category", "--routing": "routing", "--node": "node",
+          "--min-replicas": "min_replicas", "--max-replicas": "max_replicas", "--scale-target": "scale_target"}
 LISTS = {"--env": "env", "--arg": "arg", "--label": "label"}
 
 
@@ -332,16 +331,6 @@ def _require_keda() -> None:
               "install the platform layer, or deploy with a fixed --replicas.")
 
 
-def _warn_max_unplaceable(policy, m: Model, tp: int) -> None:
-    """Pre-flight gates the minimum; a maximum that does not fit only leaves the extra replicas Pending."""
-    if truthy(os.environ.get("MM_SKIP_PREFLIGHT", "")):
-        return
-    shortfall = policy.replica_shortfall(dataclasses.replace(m, replicas=m.max_replicas), tp)
-    if shortfall:
-        warn(f"{m.name}: {m.max_replicas} replicas do not all fit now ({shortfall}); "
-             "scale-ups past capacity stay Pending.")
-
-
 def deploy(o: Options, target: str) -> None:
     catalog = Catalog.load()
     m = resolve(catalog, target, o)
@@ -385,7 +374,7 @@ def deploy(o: Options, target: str) -> None:
     if action == "apply":
         preflight_gate(policy, m, tp)
         if m.autoscaled:
-            _warn_max_unplaceable(policy, m, tp)
+            warn_max_unplaceable(policy, m, tp)
         k8s.ensure_storage(m.namespace, catalog.pvc)
         download_weights(m, catalog, cli_args)
         _install_runtime(m)

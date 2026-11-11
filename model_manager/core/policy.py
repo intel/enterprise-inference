@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import io
 import json
 import math
@@ -86,17 +87,22 @@ class NriBalloons(BestEffort):
             info(f"NRI: Effective CPU {m.cpu} → {cpu} (hideHyperthreads active)", err=True)
         return anns, str(cpu) if cpu > 0 else m.cpu
 
-    def preflight(self, m: Model, tp: int) -> list[str]:
+    def _errors(self, m: Model, tp: int) -> tuple[bool, list[str]]:
+        """(the gate passes, placement errors); with MM_NRI_PREFLIGHT=warn the gate passes despite errors."""
         if not truthy(os.environ.get("MM_NRI_ENABLED", "true")):
-            return []
+            return True, []
         if not is_uint(m.cpu):
-            return [f"nri-balloons needs a whole number of CPUs, got cpu={m.cpu}"]
-        with contextlib.redirect_stderr(io.StringIO()):  # notes are noise here; errors are reported below
+            return False, [f"nri-balloons needs a whole number of CPUs, got cpu={m.cpu}"]
+        with contextlib.redirect_stderr(io.StringIO()):  # notes are noise here; errors are reported by the caller
             result = nri_policy.preflight(int(m.cpu), tp, node=m.node, replicas=int(m.replicas))
-        return [] if result["ok"] else result["errors"]
+        return result["ok"], result["errors"]
+
+    def preflight(self, m: Model, tp: int) -> list[str]:
+        ok, errors = self._errors(m, tp)
+        return [] if ok else errors
 
     def replica_shortfall(self, m: Model, tp: int) -> str:
-        return "; ".join(self.preflight(m, tp))
+        return "; ".join(self._errors(m, tp)[1])
 
     def failure(self, m: Model, tp: int) -> str:
         return (f"NRI pre-flight failed: not enough physical cores to place {m.name} (cpu={m.cpu} tp={tp} "
@@ -116,10 +122,14 @@ def _allocatable(m: Model) -> list[int] | None:
             if not any(t.get("effect") == "NoSchedule" for t in pick(n.get("spec"), "taints", []))]
 
 
-def _replica_shortfall(alloc: list[int], per_pod: int, replicas: int) -> str:
-    if replicas > 1 and alloc and per_pod * replicas > sum(alloc):
-        return (f"{replicas} replicas x {per_pod} CPUs = {per_pod * replicas} exceeds the cluster's "
-                f"{sum(alloc)} allocatable CPUs")
+def _replica_shortfall(alloc: list[int] | None, per_pod: int, replicas: int) -> str:
+    """Each replica needs per_pod CPUs on one node, so count whole replica slots per node."""
+    if replicas < 2 or not alloc or per_pod < 1:
+        return ""
+    slots = sum(a // per_pod for a in alloc)
+    if replicas > slots:
+        return (f"{replicas} replicas x {per_pod} CPUs: the schedulable nodes fit {slots} "
+                f"({sum(alloc)} allocatable CPUs; a replica cannot span nodes)")
     return ""
 
 
@@ -187,8 +197,7 @@ class KubeletStatic(BestEffort):
         return []
 
     def replica_shortfall(self, m: Model, tp: int) -> str:
-        alloc = _allocatable(m)
-        return _replica_shortfall(alloc, int(m.cpu) * tp, int(m.replicas)) if alloc else ""
+        return _replica_shortfall(_allocatable(m), int(m.cpu) * tp, int(m.replicas))
 
     def failure(self, m: Model, tp: int) -> str:
         return (f"kubelet-static pre-flight failed: cannot place {m.name} (cpu={m.cpu} tp={tp} replicas={m.replicas}) "
@@ -265,9 +274,13 @@ def resolve_auto_cpu(policy: BestEffort, m: Model, tp: int) -> None:
     info(f"  CPU auto: {m.cpu} (tp={tp}, policy {policy.name})")
 
 
+def _preflight_skipped() -> bool:
+    return truthy(os.environ.get("MM_SKIP_PREFLIGHT", ""))
+
+
 def preflight_gate(policy: BestEffort, m: Model, tp: int) -> None:
     """Abort a deploy that cannot be placed, before weights are downloaded."""
-    if truthy(os.environ.get("MM_SKIP_PREFLIGHT", "")):
+    if _preflight_skipped():
         return
     errors = policy.preflight(m, tp)
     if not errors:
@@ -278,3 +291,13 @@ def preflight_gate(policy: BestEffort, m: Model, tp: int) -> None:
     if "warn" in (os.environ.get("MM_PREFLIGHT"), os.environ.get("MM_NRI_PREFLIGHT")):
         return warn(f"{policy.name} pre-flight failed but MM_PREFLIGHT=warn — proceeding anyway.")
     abort(policy.failure(m, tp))
+
+
+def warn_max_unplaceable(policy: BestEffort, m: Model, tp: int) -> None:
+    """preflight_gate gates the minimum; a maximum that does not fit only leaves the extra replicas Pending."""
+    if _preflight_skipped():
+        return
+    shortfall = policy.replica_shortfall(dataclasses.replace(m, replicas=m.max_replicas), tp)
+    if shortfall:
+        warn(f"{m.name}: {m.max_replicas} replicas do not all fit now ({shortfall}); "
+             "scale-ups past capacity stay Pending.")
