@@ -637,6 +637,7 @@ def _render(monkeypatch, *argv, catalog=None):
     o = cli.parse_args(["deploy", *argv])
     cat = Catalog(catalog or cli.MM_DIR / "models.yaml")
     m = config.resolve(cat, o.positional[1] if len(o.positional) > 1 else "", o)
+    config.resolve_autoscaling(m, o)
     return m, yaml.safe_load(renderer.manifest(m, cat, o, {}, m.cpu, []))
 
 
@@ -654,8 +655,8 @@ def test_autoscaling_renders_keda_scaling_instead_of_replicas(monkeypatch):
 def test_autoscaling_from_catalog_and_fixed_replicas_override(monkeypatch, tmp_path):
     catalog = tmp_path / "models.yaml"
     catalog.write_text((cli.MM_DIR / "models.yaml").read_text().replace(
-        "  - name: qwen3-0-6b ", "  - name: qwen3-0-6b\n    autoscaling: {min_replicas: 2, max_replicas: 4, scale_target: 5}\n"
-        "    x: ", 1))
+        "  - name: qwen3-0-6b ",
+        "  - name: qwen3-0-6b\n    autoscaling: {min_replicas: 2, max_replicas: 4, scale_target: 5}\n    x: ", 1))
     m, doc = _render(monkeypatch, "qwen3-0-6b", catalog=catalog)
     assert (doc["spec"]["scaling"]["minReplicas"], doc["spec"]["scaling"]["maxReplicas"]) == (2, 4)
     assert doc["spec"]["scaling"]["keda"]["triggers"][0]["metadata"]["threshold"] == "5"
@@ -670,6 +671,7 @@ def test_equal_min_and_max_is_a_fixed_count(monkeypatch):
 
 @pytest.mark.parametrize("argv", [
     ["--replicas", "2", "--max-replicas", "3"],
+    ["--replicas", "2", "--scale-target", "4"],
     ["--min-replicas", "4", "--max-replicas", "3"],
     ["--min-replicas", "2"],
     ["--scale-target", "4"],  # a threshold without a maximum would be ignored
@@ -684,14 +686,24 @@ def test_bad_autoscaling_rejected(monkeypatch, argv):
 def test_autoscaling_limited_to_vllm_on_kubernetes(monkeypatch, model, env):
     monkeypatch.setenv("MM_PLATFORM", env)
     o = cli.parse_args(["deploy", model, "--max-replicas", "3"])
+    m = config.resolve(Catalog(cli.MM_DIR / "models.yaml"), model, o)  # undeploy resolves too: no checks here
     with pytest.raises(SystemExit):
-        config.resolve(Catalog(cli.MM_DIR / "models.yaml"), model, o)
+        config.resolve_autoscaling(m, o)
 
 
-def test_autoscaling_needs_keda(monkeypatch):
-    monkeypatch.setattr(k8s, "run", lambda *args, stdin=None: subprocess.CompletedProcess(args, 1, "", "NotFound"))
-    with pytest.raises(SystemExit):
-        cli._require_keda()
+@pytest.mark.parametrize("crd, explain, aborts", [(False, True, True), (True, False, True), (True, True, False)])
+def test_autoscaling_needs_keda_and_a_kserve_with_keda_scaling(monkeypatch, crd, explain, aborts):
+    # KServe 0.18's LLMInferenceService has spec.scaling.wva only: the apply would fail on spec.scaling.keda.
+    def run(*args, stdin=None):
+        ok = crd if args[0] == "get" else explain
+        return subprocess.CompletedProcess(args, 0 if ok else 1, "", "" if ok else "error")
+    monkeypatch.setattr(k8s, "run", run)
+    m = Model(name="m", namespace="n", kind="LLMInferenceService")
+    if aborts:
+        with pytest.raises(SystemExit):
+            cli._require_autoscaling(m)
+    else:
+        cli._require_autoscaling(m)
 
 
 def test_list_shows_the_autoscaling_range():

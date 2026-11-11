@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import __version__, k8s, platform, renderer, routing
-from .config import MM_DIR, Catalog, Model, is_uint, mm_path, pick, resolve, text, truthy
+from .config import MM_DIR, Catalog, Model, is_uint, mm_path, pick, resolve, resolve_autoscaling, text, truthy
 from .download import download_weights
 from .policy import preflight_gate, resolve_auto_cpu, resolve_policy, warn_max_unplaceable
 from .ui import BOLD, CYAN, DIM, GREEN, RESET, YELLOW, abort, fmt_duration, info, ok, warn
@@ -325,15 +325,21 @@ def _spawn_reconciler(m: Model, timeout: int) -> tuple[Path, bool]:
     return log, True
 
 
-def _require_keda() -> None:
+def _require_autoscaling(m: Model) -> None:
+    """KEDA installed, and a KServe that renders KEDA scaling for this kind (checked before weights download)."""
     if not k8s.succeeds("get", "crd", "scaledobjects.keda.sh"):
         abort("Autoscaling needs KEDA, which is not installed: set keda_enabled: true in global_config.yaml and "
               "install the platform layer, or deploy with a fixed --replicas.")
+    # kubectl explain reads the API schema through discovery, which needs no RBAC on CRDs.
+    if m.kind == "LLMInferenceService" and not k8s.succeeds("explain", "llminferenceservices.spec.scaling.keda"):
+        abort("This cluster's KServe has no KEDA scaling for LLMInferenceService (KServe 0.21+, installed with "
+              f"envoy_gateway_upgrade: true); deploy {m.name} with a fixed --replicas.")
 
 
 def deploy(o: Options, target: str) -> None:
     catalog = Catalog.load()
     m = resolve(catalog, target, o)
+    resolve_autoscaling(m, o)
     m.check()
     info(f"Deploying {m.name} ({m.kind})")
     info(f"  Runtime: {m.runtime}{f' @ {m.version}' if m.version else ''} | Category: {m.category} | "
@@ -353,7 +359,7 @@ def deploy(o: Options, target: str) -> None:
     if o.dry_run:
         return print(manifest, end="")
     if m.autoscaled:
-        _require_keda()
+        _require_autoscaling(m)
 
     # Unchanged spec: skip pre-flight and apply (the running pods would count against their own cores).
     action = "apply"

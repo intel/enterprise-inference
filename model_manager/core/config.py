@@ -173,7 +173,8 @@ class Model:
 
     @property
     def autoscaled(self) -> bool:
-        return bool(self.max_replicas) and int(self.max_replicas) > int(self.min_replicas or 1)
+        low = int(self.min_replicas) if is_uint(self.min_replicas) else 1
+        return is_uint(self.max_replicas) and int(self.max_replicas) > low
 
     @property
     def cat(self) -> dict:
@@ -221,7 +222,6 @@ def resolve(catalog: Catalog, target: str, o: Any) -> Model:
     m.cpu = o.cpu or m.cpu or text(pick(defaults, "cpu", 8))
     m.memory = o.memory or m.memory or text(pick(defaults, "memory", "16Gi"))
     m.replicas = o.replicas or m.replicas
-    _resolve_autoscaling(m, o)
     m.node = o.node or m.node
     if o.routing:
         m.routing = o.routing
@@ -281,10 +281,11 @@ def _from_catalog(catalog: Catalog, name: str, o: Any) -> Model:
     return m
 
 
-def _resolve_autoscaling(m: Model, o: Any) -> None:
-    """CLI over catalog; --replicas pins a fixed count. Autoscaled, m.replicas is the minimum."""
-    if o.replicas and (o.min_replicas or o.max_replicas):
-        abort("--replicas sets a fixed count: use it, or --min-replicas/--max-replicas, not both.")
+def resolve_autoscaling(m: Model, o: Any) -> None:
+    """Deploy only (undeploy must not trip on these checks). CLI over catalog; --replicas pins a fixed count.
+    Autoscaled, m.replicas is the minimum."""
+    if o.replicas and (o.min_replicas or o.max_replicas or o.scale_target):
+        abort("--replicas sets a fixed count: use it, or --min-replicas/--max-replicas/--scale-target, not both.")
     if o.replicas:
         m.min_replicas = m.max_replicas = m.scale_target = ""
         return
