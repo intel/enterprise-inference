@@ -187,7 +187,8 @@ def preflight(monkeypatch, nodes, pods=None, pvc=None, pv=None, binding="", roll
     objects = {"nodes": nodes, "pods": pods or _pods(), "pvc": pvc, "pv": pv}
     monkeypatch.setattr(k8s, "get_json", lambda *a: objects[a[0]])
     monkeypatch.setattr(k8s, "out", lambda *a: binding if a[:2] == ("get", "storageclass") else "")
-    runtime = runtime or policy.GpuRuntime("model-store", rolls)
+    runtime = runtime or policy.GpuRuntime("model-store")
+    runtime.rolls = rolls
     return runtime.preflight(Model(**{**GPU_MODEL, "gpus": "8", **model}), 1)
 
 
@@ -255,11 +256,19 @@ def test_own_running_pods_name_the_remedy(monkeypatch):
 def test_gpu_preflight_and_the_model_store(monkeypatch, pvc, pv, binding, fits, download):
     nodes = _labelled({"items": _nodes(8)["items"] + _nodes(None)["items"]})
     nodes["items"][1]["metadata"] = {"name": "cpu1", "labels": {"kubernetes.io/hostname": "cpu1"}}
-    runtime = policy.GpuRuntime("model-store", True)
+    runtime = policy.GpuRuntime("model-store")
     errors = preflight(monkeypatch, nodes, pvc=pvc, pv=pv, binding=binding, runtime=runtime)
     assert (errors == []) is fits and runtime.download_nodes == download
     if not fits:
         assert "GPU models need shared (ReadWriteMany) storage, or the model store on a GPU node." in errors[0]
+
+
+def test_a_store_that_binds_on_first_use_is_created_where_the_replicas_fit(monkeypatch):
+    # n1 holds one 4-GPU replica, n0 both: the Job must not land the store on n1.
+    runtime = policy.GpuRuntime("model-store")
+    assert preflight(monkeypatch, _labelled(_nodes(8, 4)), pvc=PENDING, binding="WaitForFirstConsumer",
+                     gpus="4", replicas="2", runtime=runtime) == []
+    assert runtime.download_nodes == ("n0",)
 
 
 def test_an_unreadable_store_volume_is_warned_about(monkeypatch, capsys):
@@ -274,7 +283,7 @@ def test_own_pods_on_the_stores_node_say_undeploy_not_storage(monkeypatch):
 
 
 def test_a_store_that_binds_on_first_use_holds_replicas_on_one_node(monkeypatch, capsys):
-    runtime = policy.GpuRuntime("model-store", True)
+    runtime = policy.GpuRuntime("model-store")
     assert preflight(monkeypatch, _labelled(_nodes(8, 8)), pvc=PENDING, binding="WaitForFirstConsumer",
                      replicas="3", runtime=runtime) == []
     err = capsys.readouterr().err
@@ -397,12 +406,12 @@ def test_declared_gpus_the_cluster_lacks_stop_the_deploy(monkeypatch):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(k8s, "get_json", lambda *a: _nodes(None, None) if a == ("nodes",) else _pods())
     with pytest.raises(SystemExit):
-        policy.preflight_gate(policy.GpuRuntime("model-store", True), Model(**GPU_MODEL, gpus="1"), 1)
+        policy.preflight_gate(policy.GpuRuntime("model-store"), Model(**GPU_MODEL, gpus="1"), 1)
 
 
 def test_gpu_preflight_skips_when_the_cluster_cannot_be_read(monkeypatch):
     monkeypatch.setattr(k8s, "get_json", lambda *a: None)
-    assert policy.GpuRuntime("model-store", True).preflight(Model(**GPU_MODEL, gpus="1"), 1) == []
+    assert policy.GpuRuntime("model-store").preflight(Model(**GPU_MODEL, gpus="1"), 1) == []
 
 
 def test_cli_tp_wins_over_an_arg_tp():

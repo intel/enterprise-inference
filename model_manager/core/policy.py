@@ -179,9 +179,9 @@ class GpuRuntime(BestEffort):
     name = "n/a (GPU runtime — no CPU pinning)"
     label = "GPU"
 
-    def __init__(self, pvc: str, rolls: bool = True) -> None:
-        """pvc: the model-store claim. rolls: False when only spec.replicas changes, so the running pods stay."""
-        self.pvc, self.rolls, self.download_nodes = pvc, rolls, ()
+    def __init__(self, pvc: str) -> None:
+        """pvc: the model-store claim. rolls: deploy clears it when only spec.replicas changes, so the pods stay."""
+        self.pvc, self.rolls, self.download_nodes = pvc, True, ()
 
     def annotations(self, m: Model, tp: int) -> tuple[dict, str]:
         return {}, m.cpu
@@ -226,7 +226,7 @@ class GpuRuntime(BestEffort):
         if fit < new:
             warn(f"GPU: only {fit} of {new} new replicas fit on the free {resource} — the rest will stay Pending.")
         if unbound:
-            self.download_nodes = tuple(name for name, f in free.items() if f >= need)
+            self.download_nodes = tuple(name for name, f in free.items() if max(f, 0) // need >= min(new, fit))
             warn(f"The model store {self.pvc} binds on first use, so it is created on one of {', '.join(self.download_nodes)}"
                  " where the download runs. On node-local storage, every model using it, CPU ones included, must then "
                  "run on that node.")
