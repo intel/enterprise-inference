@@ -218,7 +218,7 @@ class GpuRuntime(BestEffort):
                     f"undeploy {m.name}), or use MM_PREFLIGHT=warn to apply anyway (e.g. a scale-down or a label "
                     "change, which starts no new pod)."]
         if not fit:
-            return [f"No node has {need} free {resource}; the most on one node is {max(free)}. A pod's GPUs cannot "
+            return [f"No node has {need} free {resource}; the most on one node is {max(max(free), 0)}. A pod's GPUs cannot "
                     "span nodes: lower --gpus, or free GPUs on a node."]
         if fit < replicas - own_pods:
             warn(f"GPU: only {fit} of {replicas - own_pods} new replicas fit on the free {resource} — the rest will "

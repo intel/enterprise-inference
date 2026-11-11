@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import __version__, k8s, platform, renderer, routing
-from .config import MM_DIR, Catalog, Model, is_uint, mm_path, pick, resolve, text, truthy
+from .config import MM_DIR, Catalog, Model, env, is_uint, mm_path, pick, resolve, text, truthy
 from .download import download_weights
 from .policy import GpuRuntime, preflight_gate, resolve_auto_cpu, resolve_policy
 from .ui import BOLD, CYAN, DIM, GREEN, RESET, YELLOW, abort, fmt_duration, info, ok, warn
@@ -339,13 +339,15 @@ def _gpu_gate(m: Model, dry_run: bool) -> None:
     """Refuse a device: gpu runtime unless MM_ACCEL_RESOURCE names the extended resource the cluster
     advertises. Intel Enterprise AI Solutions sets it only when rack_scale_enabled=true and the rack
     profile declares an accelerator, so a GPU model cannot be deployed by accident on a CPU install.
-    --dry-run is a preview: it warns and renders with the runtime's default resource name."""
+    --dry-run is a preview: it warns and renders with MM_ACCEL_RESOURCE, or the runtime's resource when unset."""
     if not m.gpu:
         return
+    if m.kind == "InferenceService":
+        abort(f"Runtime '{m.runtime}' is a GPU runtime, which deploys only as an LLMInferenceService, not InferenceService.")
     if not (is_uint(m.gpus) and int(m.gpus) > 0):
         abort(f"Runtime '{m.runtime}' is a GPU runtime but the GPU count is invalid: '{m.gpus}'. Set gpus: N on "
               "the model, defaults.gpus on its category, or pass --gpus N.")
-    have = os.environ.get("MM_ACCEL_RESOURCE", "")
+    have = env("MM_ACCEL_RESOURCE", "")
     want = text(pick(m.rt, "accelerator_resource"))
     if have and want and have.split("/")[0] != want.split("/")[0]:
         msg = (f"Runtime '{m.runtime}' is built for {renderer.gpu_vendor(want) or want} GPUs ({want}), but the cluster's "

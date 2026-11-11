@@ -127,6 +127,18 @@ def test_gate_refuses_another_vendor(monkeypatch, cluster):
     cli._gpu_gate(m, dry_run=True)  # a preview warns and renders
 
 
+def test_gpu_runtime_only_as_llm_inference_service(monkeypatch):
+    monkeypatch.setenv("MM_ACCEL_RESOURCE", "nvidia.com/gpu")
+    m = Model(name="m", namespace="n", runtime="vllm-cuda", gpus="2", kind="InferenceService",
+              rt={"device": "gpu", "accelerator_resource": "nvidia.com/gpu"})
+    with pytest.raises(SystemExit):
+        cli._gpu_gate(m, dry_run=True)
+
+
+def test_free_gpus_are_never_reported_negative(monkeypatch):
+    assert "the most on one node is 0" in preflight(monkeypatch, _nodes(4), _pods(("n0", "other", 8)))[0]
+
+
 def test_gate_accepts_the_runtimes_vendor(monkeypatch):
     monkeypatch.setenv("MM_ACCEL_RESOURCE", "nvidia.com/gpu")
     cli._gpu_gate(Model(name="m", namespace="n", runtime="vllm-cuda", gpus="1",
