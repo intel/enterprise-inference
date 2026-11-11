@@ -237,9 +237,9 @@ def test_gpu_preflight_messages(monkeypatch):
 
 def test_own_running_pods_name_the_remedy(monkeypatch):
     assert preflight(monkeypatch, _nodes(8), _pods(("n0", "m", 8))) == [
-        "m's own running pods hold the nvidia.com/gpu it needs: this change restarts the pod, and the rollout "
-        "starts the new one next to the running one. Undeploy it first (./model-manager undeploy m), or use "
-        "MM_PREFLIGHT=warn to apply anyway (the new pod then waits for GPUs)."]
+        "m's own running pods hold the nvidia.com/gpu it needs: if this change restarts the pod (any change but "
+        "--replicas may), the rollout starts the new one next to the running one. Undeploy it first (./model-manager "
+        "undeploy m), or use MM_PREFLIGHT=warn to apply anyway (e.g. a label-only change)."]
     # Same name in another namespace is another model.
     other_ns = {"items": [{**p, "metadata": {**p["metadata"], "namespace": "x"}} for p in _pods(("n0", "m", 8))["items"]]}
     assert preflight(monkeypatch, _nodes(8), other_ns)[0].startswith("No node has 8 free")
@@ -260,6 +260,21 @@ def test_gpu_preflight_and_the_model_store(monkeypatch, pvc, pv, binding, fits, 
     assert (errors == []) is fits and runtime.download_nodes == download
     if not fits:
         assert "GPU models need shared (ReadWriteMany) storage, or the model store on a GPU node." in errors[0]
+
+
+def test_own_pods_on_the_stores_node_say_undeploy_not_storage(monkeypatch):
+    nodes = _labelled(_nodes(8, 8))
+    errors = preflight(monkeypatch, nodes, _pods(("n0", "m", 8)), pvc=BOUND, pv=_pv("n0"))
+    assert errors[0].startswith("m's own running pods hold")
+
+
+def test_a_store_that_binds_on_first_use_holds_replicas_on_one_node(monkeypatch, capsys):
+    runtime = policy.GpuRuntime()
+    assert preflight(monkeypatch, _labelled(_nodes(8, 8)), pvc=PENDING, binding="WaitForFirstConsumer",
+                     replicas="3", runtime=runtime) == []
+    err = capsys.readouterr().err
+    assert "only 1 of 3 new replicas fit" in err and runtime.download_nodes == ("n0", "n1")
+    assert "every model using it, CPU ones included, must then run on that node" in err
 
 
 @pytest.mark.parametrize("init, sidecars, app, held", [
@@ -309,6 +324,9 @@ def test_the_download_job_is_pinned_to_the_fitting_nodes():
     terms = pod["spec"]["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
     assert terms == [{"matchFields": [{"key": "metadata.name", "operator": "In", "values": ["n0", "n1"]}]}]
     assert download._node_affinity(()) == ""
+    numeric = yaml.safe_load("spec:" + download._node_affinity(("123", "true")).replace("\n      ", "\n  "))
+    values = numeric["spec"]["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
+    assert values["nodeSelectorTerms"][0]["matchFields"][0]["values"] == ["123", "true"]
 
 
 def test_gpu_preflight_ignores_the_preferred_node(monkeypatch):

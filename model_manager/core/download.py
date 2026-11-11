@@ -86,7 +86,7 @@ def _node_affinity(nodes: tuple) -> str:
     return ("\n      affinity:\n        nodeAffinity:\n          requiredDuringSchedulingIgnoredDuringExecution:\n"
             "            nodeSelectorTerms:\n              - matchFields:\n                  - key: metadata.name\n"
             "                    operator: In\n                    values:\n"
-            + "".join(f"                      - {n}\n" for n in nodes).rstrip("\n"))
+            + "".join(f"                      - {quote(n)}\n" for n in nodes).rstrip("\n"))
 
 
 def download_weights(m: Model, catalog: Catalog, cli_args: list[str], nodes: tuple) -> None:

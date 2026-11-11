@@ -206,15 +206,18 @@ class GpuRuntime(BestEffort):
         pvc, terms, unbound = _model_store(m)
         if terms:
             free = {name: f for name, f in free.items() if _node_matches(ready[name], terms)}
-            if not any(f >= need for f in free.values()):
-                return [f"The model store {pvc} is node-local storage on nodes without {need} free {resource}, so the "
-                        "GPU pod could not mount it. GPU models need shared (ReadWriteMany) storage, or the model "
-                        "store on a GPU node."]
-        fit = sum(max(f, 0) // need for f in free.values())
+        per_node = [max(f, 0) // need for f in free.values()]
+        # A store that binds on first use lands on one node, and every replica must mount it there.
+        fit = max(per_node, default=0) if unbound else sum(per_node)
         if not fit and self.rolls and own_pods and any(alloc[name] - used.get(name, 0) >= need for name in free):
-            return [f"{m.name}'s own running pods hold the {resource} it needs: this change restarts the pod, and the "
-                    f"rollout starts the new one next to the running one. Undeploy it first (./model-manager "
-                    f"undeploy {m.name}), or use MM_PREFLIGHT=warn to apply anyway (the new pod then waits for GPUs)."]
+            return [f"{m.name}'s own running pods hold the {resource} it needs: if this change restarts the pod (any "
+                    "change but --replicas may), the rollout starts the new one next to the running one. Undeploy it "
+                    f"first (./model-manager undeploy {m.name}), or use MM_PREFLIGHT=warn to apply anyway (e.g. a "
+                    "label-only change)."]
+        if not fit and terms:
+            return [f"The model store {pvc} is node-local storage on nodes without {need} free {resource}, so the "
+                    "GPU pod could not mount it. GPU models need shared (ReadWriteMany) storage, or the model store "
+                    "on a GPU node."]
         if not fit:
             return [f"No node has {need} free {resource}; the most on one node is {max(max(free.values()), 0)}. A "
                     "pod's GPUs cannot span nodes: lower --gpus, or free GPUs on a node."]
@@ -222,6 +225,9 @@ class GpuRuntime(BestEffort):
             warn(f"GPU: only {fit} of {new} new replicas fit on the free {resource} — the rest will stay Pending.")
         if unbound:
             self.download_nodes = tuple(name for name, f in free.items() if f >= need)
+            warn(f"The model store {pvc} binds on first use, so it is created on one of {', '.join(self.download_nodes)}"
+                 " where the download runs. On node-local storage, every model using it, CPU ones included, must then "
+                 "run on that node.")
         return []
 
     def failure(self, m: Model, tp: int) -> str:
