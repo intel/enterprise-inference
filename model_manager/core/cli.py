@@ -40,9 +40,10 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
   {GREEN}--cpu{RESET} N              CPU cores
   {GREEN}--memory{RESET} NGi         Memory (e.g. 32Gi)
   {GREEN}--replicas{RESET} N         Fixed replica count (default: 1); turns autoscaling off
-  {GREEN}--min-replicas{RESET} N     Autoscaling (KEDA, vLLM): fewest replicas (default: 1)
+  {GREEN}--min-replicas{RESET} N     Autoscaling (KEDA): fewest replicas (default: 1)
   {GREEN}--max-replicas{RESET} N     Autoscaling: most replicas; above --min-replicas turns it on
-  {GREEN}--scale-target{RESET} N     Autoscaling: waiting requests per replica that trigger a scale-up (default: 2)
+  {GREEN}--scale-target{RESET} N     Autoscaling: per-replica load that triggers a scale-up
+                            (vLLM: waiting requests, default 2; OVMS: in-flight requests, default 4)
   {GREEN}--tp{RESET} N               Tensor-parallel size (splits across N NUMA nodes)
   {GREEN}--cpu-policy{RESET} <p>     CPU pinning: nri-balloons | kubelet-static | best-effort
                             (default: MM_CPU_POLICY, else auto-detected)
@@ -337,6 +338,19 @@ def _require_autoscaling(m: Model) -> None:
               f"envoy_gateway_upgrade: true); deploy {m.name} with a fixed --replicas.")
 
 
+def _drop_stale_autoscaler(m: Model) -> None:
+    """KServe keeps the predictor's autoscaler of the previous class when the class changes, and KEDA
+    rejects a ScaledObject for a Deployment an HPA manages (kserve#5196). Remove the one this
+    InferenceService owns. Order matters: KServe does not watch HPAs, so the HPA goes before the
+    apply (whose reconcile then finds none); it does watch ScaledObjects, so one goes after the apply."""
+    kind = "hpa" if m.autoscaled else "scaledobject.keda.sh"
+    stale = k8s.get_json(kind, f"{m.name}-predictor", "-n", m.namespace) or {}
+    owners = (stale.get("metadata") or {}).get("ownerReferences") or []
+    if any(o.get("kind") == "InferenceService" and o.get("name") == m.name for o in owners):
+        info(f"Removing the previous autoscaler {kind}/{m.name}-predictor")
+        k8s.delete(kind, f"{m.name}-predictor", m.namespace, quiet=True)
+
+
 def deploy(o: Options, target: str) -> None:
     catalog = Catalog.load()
     m = resolve(catalog, target, o)
@@ -345,7 +359,7 @@ def deploy(o: Options, target: str) -> None:
     info(f"Deploying {m.name} ({m.kind})")
     info(f"  Runtime: {m.runtime}{f' @ {m.version}' if m.version else ''} | Category: {m.category} | "
          f"Routing: {m.routing or 'default'}")
-    replicas = (f"{m.min_replicas}-{m.max_replicas} (autoscaled on waiting requests > {m.scale_target}/replica)"
+    replicas = (f"{m.min_replicas}-{m.max_replicas} (autoscaled, target {m.scale_target} per replica)"
                 if m.autoscaled else m.replicas)
     info(f"  CPU: {m.cpu} | Memory: {m.memory} | Replicas: {replicas}")
     if m.node:
@@ -385,8 +399,12 @@ def deploy(o: Options, target: str) -> None:
         k8s.ensure_storage(m.namespace, catalog.pvc)
         download_weights(m, catalog, cli_args)
         _install_runtime(m)
+        if m.kind == "InferenceService" and m.autoscaled:
+            _drop_stale_autoscaler(m)
         k8s.apply(manifest, ssa=True)
         ok(f"Manifest applied: {m.kind}/{m.name} in {m.namespace}")
+    if m.kind == "InferenceService" and (not m.autoscaled or action == "skip"):
+        _drop_stale_autoscaler(m)  # skip: repairs a model stuck on kserve#5196 (KServe's next retry succeeds)
     routing.register(m)
 
     timeout = int(o.wait_timeout or 900)  # model load + warmup is slow
@@ -543,10 +561,13 @@ def _deployed(namespace: str) -> tuple[list[dict] | None, set[str]]:
 
 
 def _replicas(spec: dict, predictor: dict) -> str:
-    """Fixed count, or min-max for an autoscaled LLMInferenceService."""
+    """Fixed count, or min-max for an autoscaled model."""
     scaling = spec.get("scaling") or {}
     if scaling:
         return f"{scaling.get('minReplicas', 1)}-{scaling.get('maxReplicas', '?')}"
+    low, high = predictor.get("minReplicas"), predictor.get("maxReplicas")
+    if low is not None and high is not None and low != high:
+        return f"{low}-{high}"
     return str(spec.get("replicas", predictor.get("minReplicas", "")))
 
 

@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 from . import platform
-from .config import Catalog, Model, gateway_ref, mm_path, pick, text
+from .config import DNS_LABEL, Catalog, Model, gateway_ref, mm_path, pick, text
 from .ui import abort
 
 CHAT_TEMPLATE_DIR = "/etc/chat-template"
@@ -115,17 +115,38 @@ def _annotations(annotations: dict, kind: str) -> str:
 PROMETHEUS_URL = "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
 
 
+def _trigger(m: Model) -> tuple[str, str]:
+    """The Prometheus server and the runtime's signal query for m (names are DNS labels, safe in PromQL)."""
+    if not DNS_LABEL.fullmatch(m.namespace):
+        abort(f"Invalid namespace '{m.namespace}' for '{m.name}': use a Kubernetes namespace name.")
+    return (os.environ.get("MM_PROMETHEUS_URL") or PROMETHEUS_URL,
+            m.scale_query.replace("$namespace", m.namespace).replace("$model", m.name))
+
+
 def _llmisvc_replicas(m: Model) -> str:
-    """spec.replicas, or spec.scaling with a KEDA trigger on vLLM's waiting queue (KServe makes the ScaledObject).
-    The CRD rejects both together."""
+    """spec.replicas, or spec.scaling with a KEDA trigger (KServe makes the ScaledObject). The CRD rejects both."""
     if not m.autoscaled:
         return f"  replicas: {m.replicas}"
-    query = f'sum(vllm:num_requests_waiting{{namespace="{m.namespace}",model="{m.name}"}})'
+    server, query = _trigger(m)
     return "\n".join([
         "  scaling:", f"    minReplicas: {m.min_replicas}", f"    maxReplicas: {m.max_replicas}", "    keda:",
         "      pollingInterval: 15", "      triggers:", "        - type: prometheus", "          metadata:",
-        f"            serverAddress: {quote(os.environ.get('MM_PROMETHEUS_URL') or PROMETHEUS_URL)}",
-        f"            query: {quote(query)}", f"            threshold: {quote(m.scale_target)}"])
+        f"            serverAddress: {quote(server)}", f"            query: {quote(query)}",
+        f"            threshold: {quote(m.scale_target)}"])
+
+
+def _isvc_replicas(m: Model) -> str:
+    """predictor min/max replicas, plus the KEDA trigger when autoscaled (KServe makes the ScaledObject
+    and its threshold applies per replica)."""
+    if not m.autoscaled:
+        return f"    minReplicas: {m.replicas}\n    maxReplicas: {m.replicas}\n"
+    server, query = _trigger(m)
+    return "\n".join([
+        f"    minReplicas: {m.min_replicas}", f"    maxReplicas: {m.max_replicas}", "    autoScaling:",
+        "      metrics:", "        - type: External", "          external:", "            metric:",
+        "              backend: prometheus", f"              serverAddress: {quote(server)}",
+        f"              query: {quote(query)}", "            target:", "              type: Value",
+        f"              value: {quote(m.scale_target)}"]) + "\n"
 
 
 def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_args: list[str]) -> str:
@@ -156,6 +177,9 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
     if m.kind == "InferenceService":
         name = "inference-service-ovms.yaml" if m.runtime == "openvino" else "inference-service.yaml"
         return render(template(name), **common, MODEL_ID=m.model_id, PVC_NAME=catalog.pvc,
+                      SCALING=_isvc_replicas(m),
+                      SCALING_ANNOTATIONS="  annotations:\n    serving.kserve.io/autoscalerClass: keda\n"
+                      if m.autoscaled else "",
                       MODEL_FORMAT=text(pick(m.rt, "format")) or "openvino",
                       RUNTIME_NAME=text(pick(m.rt, "runtime_name")) or f"{m.runtime}-runtime")
     abort(f"Unknown model kind: {m.kind}")

@@ -18,3 +18,8 @@ format: openvino
 runtime_name: openvino-runtime                              # ClusterServingRuntime to reference
 routing: aigateway
 serving_runtime_manifest: openvino/serving-runtime.yaml     # raw CR manifest applied on first deploy
+# KEDA autoscaling signal: in-flight requests (OVMS exports no LLM queue metric).
+# PromQL over one model's pods ($namespace, $model filled in); scale_target is per replica.
+autoscaling:
+  query: 'sum(ovms_current_graphs{namespace="$namespace",model="$model"})'
+  scale_target: 4

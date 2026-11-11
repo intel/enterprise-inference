@@ -5,12 +5,11 @@ metadata:
   namespace: {{NAMESPACE}}
   labels:
     app.kubernetes.io/name: {{MODEL_NAME}}
+    inference-engine: ovms
     app.kubernetes.io/managed-by: model-manager{{EXTRA_LABELS}}
-spec:
+{{SCALING_ANNOTATIONS}}spec:
   predictor:
-{{NRI_ANNOTATIONS}}    minReplicas: {{REPLICAS}}
-    maxReplicas: {{REPLICAS}}
-    model:
+{{NRI_ANNOTATIONS}}{{SCALING}}    model:
       modelFormat:
         name: openvino
       runtime: {{RUNTIME_NAME}}

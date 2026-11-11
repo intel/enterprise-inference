@@ -19,3 +19,8 @@
 device: cpu
 kind: LLMInferenceService
 routing: epp
+# KEDA autoscaling signal: requests queued because the replica is saturated.
+# PromQL over one model's pods ($namespace, $model filled in); scale_target is per replica.
+autoscaling:
+  query: 'sum(vllm:num_requests_waiting{namespace="$namespace",model="$model"})'
+  scale_target: 2

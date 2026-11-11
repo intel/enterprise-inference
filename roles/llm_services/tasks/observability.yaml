@@ -3,7 +3,7 @@
 # LLM Services — Observability wiring
 #
 # For each engine in llm_services_engines this task deploys:
-#   1. ServiceMonitor  → files/servicemonitors/<engine>.yaml  (Prometheus scraping)
+#   1. ServiceMonitor or PodMonitor → files/servicemonitors/<engine>.yaml  (Prometheus scraping)
 #   2. Grafana dashboard ConfigMap → files/dashboards/<engine>.json (auto-loaded by Grafana sidecar)
 #
 # HOW TO ADD A NEW ENGINE (e.g. triton):
@@ -26,16 +26,18 @@
 # On OpenShift:
 #   - user-workload monitoring scrapes only the ServiceMonitor's own namespace
 #     (namespaceSelector is ignored): put it next to the models;
-#   - OpenShift AI serves the models over HTTPS with a self-signed certificate.
+#   - OpenShift AI serves the vLLM models over HTTPS with a self-signed certificate.
 #     Its own PodMonitor renames the metrics (kserve_vllm:…), so the dashboards
 #     need this one.
-- name: "llm_services | observability | Deploy ServiceMonitors"
+- name: "llm_services | observability | Deploy ServiceMonitors / PodMonitors"
   vars:
     _llm_sm_openshift: "{{ cluster_distribution | default('kubernetes') == 'openshift' }}"
+    _llm_sm_tls: "{{ _llm_sm_openshift | bool and item.item is match('vllm') }}"
     _llm_sm: "{{ lookup('file', role_path + '/files/servicemonitors/' + item.item + '.yaml') | from_yaml }}"
     _llm_sm_openshift_spec:
       endpoints: >-
-        {{ _llm_sm.spec.endpoints | map('combine', {'scheme': 'https', 'tlsConfig': {'insecureSkipVerify': true}}) | list }}
+        {{ _llm_sm.spec.endpoints | map('combine', {'scheme': 'https', 'tlsConfig': {'insecureSkipVerify': true}}) | list
+           if _llm_sm_tls | bool else _llm_sm.spec.endpoints }}
   kubernetes.core.k8s:
     state: present
     namespace: "{{ llm_services_namespace if _llm_sm_openshift | bool else observability_namespace | default('monitoring') }}"

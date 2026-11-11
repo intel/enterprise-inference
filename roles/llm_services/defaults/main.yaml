@@ -148,6 +148,7 @@ llm_services_mm_job_timeout: 3600     # seconds; weights download + model load
 # automatically. Override here if you need a different combination.
 llm_services_engines:
   - "vllm-{{ kubernetes_accelerator | default('cpu') }}"
+  - ovms                              # OpenVINO Model Server (InferenceService predictors)
 
 # Skip ServiceMonitor + dashboard deployment if observability stack is absent.
 llm_services_observability_enabled: "{{ observability_enabled | default(true) | bool }}"

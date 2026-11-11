@@ -50,9 +50,10 @@ network:
 #                    schedulable node (the category cpu under other policies).
 #                    A deployed model keeps its CPU; --cpu N overrides.
 #   replicas:        replica count                (default: 1)
-#   autoscaling:     vLLM only, needs KEDA (keda_enabled); replaces replicas
-#                    {min_replicas: 1, max_replicas: 3, scale_target: 2}
-#                    scales up when waiting requests per replica exceed scale_target
+#   autoscaling:     KEDA (keda_enabled) between min and max replicas; replaces replicas
+#                    {min_replicas: 1, max_replicas: 3, scale_target: N}
+#                    scales up when the runtime's signal per replica exceeds scale_target
+#                    (signal + default scale_target: runtimes/<name>/values.yaml → autoscaling)
 #   namespace:       target namespace             (default: llm-inference)
 #   node:            pin to a specific node
 #   routing:         epp | direct

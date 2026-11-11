@@ -164,7 +164,8 @@ class Model:
     replicas: str = "1"
     min_replicas: str = ""
     max_replicas: str = ""
-    scale_target: str = ""                    # waiting requests per replica that trigger a scale-up
+    scale_target: str = ""                    # per-replica threshold of the runtime's signal
+    scale_query: str = ""                     # PromQL of that signal ($namespace, $model)
     node: str = ""
     chat_template: str = ""
     args: list = field(default_factory=list)
@@ -282,8 +283,9 @@ def _from_catalog(catalog: Catalog, name: str, o: Any) -> Model:
 
 
 def resolve_autoscaling(m: Model, o: Any) -> None:
-    """Deploy only (undeploy must not trip on these checks). CLI over catalog; --replicas pins a fixed count.
-    Autoscaled, m.replicas is the minimum."""
+    """Deploy only (undeploy must not trip on these checks). CLI over catalog over the runtime's default;
+    --replicas pins a fixed count. Autoscaled, m.replicas is the minimum and m.scale_query the runtime's
+    signal ($namespace/$model are filled in at render time)."""
     if o.replicas and (o.min_replicas or o.max_replicas or o.scale_target):
         abort("--replicas sets a fixed count: use it, or --min-replicas/--max-replicas/--scale-target, not both.")
     if o.replicas:
@@ -301,15 +303,20 @@ def resolve_autoscaling(m: Model, o: Any) -> None:
             abort(f"Model '{m.name}': {what} needs max_replicas (--max-replicas).")
     if m.max_replicas and int(m.min_replicas or 1) > int(m.max_replicas):
         abort(f"Model '{m.name}': min_replicas ({m.min_replicas}) exceeds max_replicas ({m.max_replicas}).")
-    if m.autoscaled:
-        if m.kind != "LLMInferenceService" or platform.is_openshift():
-            abort(f"Autoscaling supports vLLM models (LLMInferenceService) on Kubernetes only; deploy {m.name} "
-                  "with a fixed --replicas.")
-        m.min_replicas = m.min_replicas or "1"
-        m.scale_target = m.scale_target or "2"
-        m.replicas = m.min_replicas
-    elif m.max_replicas:  # max == min: a fixed count
-        m.replicas, m.min_replicas, m.max_replicas, m.scale_target = m.max_replicas, "", "", ""
+    if not m.autoscaled:
+        m.replicas = m.max_replicas or m.replicas  # max == min: a fixed count
+        m.min_replicas = m.max_replicas = m.scale_target = ""
+        return
+    if platform.is_openshift():
+        abort(f"Autoscaling is not supported on OpenShift yet; deploy {m.name} with a fixed --replicas.")
+    signal = pick(m.rt, "autoscaling", {})
+    m.scale_query = text(pick(signal, "query"))
+    m.scale_target = m.scale_target or text(pick(signal, "scale_target"))
+    if not (m.scale_query and is_uint(m.scale_target) and int(m.scale_target) > 0):
+        abort(f"Runtime '{m.runtime}' defines no autoscaling signal (autoscaling.query and .scale_target): "
+              f"deploy {m.name} with a fixed --replicas.")
+    m.min_replicas = m.min_replicas or "1"
+    m.replicas = m.min_replicas
 
 
 def _chat_template_file(name: str, file: str) -> str:

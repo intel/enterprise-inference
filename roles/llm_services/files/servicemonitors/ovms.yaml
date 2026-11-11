@@ -1,0 +1,31 @@
+# A PodMonitor: KServe updates labels on the predictor pods but not on an existing
+# Service, so pods are the only place inference-engine is reliable.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: ovms
+  labels:
+    app.kubernetes.io/component: inference
+    inference-engine: ovms
+spec:
+  # Match all namespaces — KServe deploys inference services in llm-inference
+  namespaceSelector:
+    any: true
+  # Predictor pods of OVMS InferenceServices (model-manager labels them)
+  selector:
+    matchLabels:
+      inference-engine: ovms
+      component: predictor
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      scheme: http
+      relabelings:
+        # Same labels as the vLLM monitor: model, namespace, engine
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+          targetLabel: model
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        - replacement: ovms
+          targetLabel: engine
