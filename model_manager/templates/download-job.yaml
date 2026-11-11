@@ -20,7 +20,7 @@ spec:
         app.kubernetes.io/name: download-{{MODEL_NAME}}
         app.kubernetes.io/managed-by: model-manager
     spec:
-      restartPolicy: Never{{TOLERATIONS}}
+      restartPolicy: Never{{TOLERATIONS}}{{AFFINITY}}
       securityContext:
         runAsNonRoot: true
         # uid/gid match the serving pod for this runtime so prepared files are

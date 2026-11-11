@@ -1,6 +1,7 @@
 """model-manager CLI: deploy, undeploy, list and cpu-collisions-check."""
 from __future__ import annotations
 
+import dataclasses
 import fcntl
 import json
 import os
@@ -363,6 +364,15 @@ def _gpu_gate(m: Model, dry_run: bool) -> None:
           f"manually on a cluster you trust: MM_ACCEL_RESOURCE={want or '<resource>'} ./model-manager deploy {m.name}")
 
 
+def _rolls_pods(m: Model, catalog: Catalog, o: Options, annotations: dict, cpu: str, cli_args: list[str]) -> bool:
+    """Whether applying m starts new pods: anything but spec.replicas differs from the live object."""
+    live = k8s.out("get", m.kind, m.name, "-n", m.namespace, "-o", "jsonpath={.spec.replicas}")
+    if not live:
+        return True
+    same = renderer.manifest(dataclasses.replace(m, replicas=live), catalog, o, annotations, cpu, cli_args)
+    return k8s.run("diff", *k8s.SSA, "-f", "-", stdin=same).returncode != 0
+
+
 def deploy(o: Options, target: str) -> None:
     catalog = Catalog.load()
     m = resolve(catalog, target, o)
@@ -408,9 +418,11 @@ def deploy(o: Options, target: str) -> None:
     if renderer.inline_chat_template(m):
         _apply_chat_template(m)
     if action == "apply":
+        if m.gpu:
+            policy.rolls = _rolls_pods(m, catalog, o, annotations, cpu, cli_args)
         preflight_gate(policy, m, tp)
         k8s.ensure_storage(m.namespace, catalog.pvc)
-        download_weights(m, catalog, cli_args)
+        download_weights(m, catalog, cli_args, policy.download_nodes)
         _install_runtime(m)
         k8s.apply(manifest, ssa=True)
         ok(f"Manifest applied: {m.kind}/{m.name} in {m.namespace}")

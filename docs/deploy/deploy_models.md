@@ -138,12 +138,18 @@ before downloading weights, for example when the profile declares a GPU node
 that has not joined the cluster or whose device plugin is not ready yet.
 `MM_PREFLIGHT=warn` proceeds anyway; `MM_SKIP_PREFLIGHT=1` skips the check.
 
-A re-deploy of a running model counts its own pods as holding their GPUs: if
-the change restarts the pod, the rolling update starts the new one next to the
-running one. When the model already fills its node, run
-`./model-manager undeploy <name>` first, or set `MM_PREFLIGHT=warn` to apply
-anyway, for example for a scale-down or a label change, which starts no new
-pod.
+A re-deploy that changes more than `--replicas` restarts the pod: the rollout
+starts the new one next to the running one, so its GPUs must be free too. When
+the model already fills its node, run `./model-manager undeploy <name>` first,
+or set `MM_PREFLIGHT=warn` to apply anyway (the new pod then waits for GPUs). A
+change of `--replicas` alone keeps the running pods: a scale-down needs no free
+GPUs, and a scale-up needs them only for the added replicas.
+
+The model store must be mountable on a GPU node. On node-local storage
+(`local-path`), a store already bound to a node without the GPUs stops the
+deploy: GPU models need shared (ReadWriteMany) storage, or the store on a GPU
+node. A store that binds on first use is created where the download Job runs,
+so the Job is pinned to the GPU nodes that fit.
 
 `--tp N` without `--gpus` also sets the GPU count to N. A tensor parallel size
 larger than the GPU count is refused; a smaller one warns about the unused GPUs.

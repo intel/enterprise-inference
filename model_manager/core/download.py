@@ -79,7 +79,17 @@ def _script(m: Model, cli_args: list[str]) -> str:
         "@NAME@", m.name).replace("@DIR@", f"/models/{m.name}")
 
 
-def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
+def _node_affinity(nodes: tuple) -> str:
+    """Pin the Job to these nodes, so a volume that binds on first use lands where the GPU pod can mount it."""
+    if not nodes:
+        return ""
+    return ("\n      affinity:\n        nodeAffinity:\n          requiredDuringSchedulingIgnoredDuringExecution:\n"
+            "            nodeSelectorTerms:\n              - matchFields:\n                  - key: metadata.name\n"
+            "                    operator: In\n                    values:\n"
+            + "".join(f"                      - {n}\n" for n in nodes).rstrip("\n"))
+
+
+def download_weights(m: Model, catalog: Catalog, cli_args: list[str], nodes: tuple) -> None:
     if catalog.connectivity_url and not _curl_ok(catalog.connectivity_url, catalog.https_proxy):
         abort(f"Network check failed: cannot reach {catalog.connectivity_url} (proxy: {catalog.https_proxy or 'none'}). "
               "Check network/proxy settings in models.yaml or environment.")
@@ -113,7 +123,7 @@ def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
         # Small requests so the job schedules; limits track the serving envelope (OVMS converts in memory).
         DL_CPU_REQUEST="500m", DL_MEM_REQUEST="2Gi", DL_CPU_LIMIT=m.cpu or "2", DL_MEM_LIMIT=m.memory or "8Gi",
         TTL_SECONDS=os.environ.get("DOWNLOAD_JOB_TTL") or "300", TIMEOUT=str(TIMEOUT),
-        TOLERATIONS="\n" + toleration if toleration else "")
+        TOLERATIONS="\n" + toleration if toleration else "", AFFINITY=_node_affinity(nodes))
 
     k8s.run("delete", "job", job, "-n", m.namespace, "--ignore-not-found")
     k8s.apply(manifest)

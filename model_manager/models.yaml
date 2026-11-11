@@ -528,10 +528,7 @@ models:
       VLLM_CPU_SGL_KERNEL: "1"
       TORCHDYNAMO_DISABLE: "1"
 
-  # ── GPU examples (runtime: vllm-cuda) ───────────────────────────────────────
-  # Deployable only when MM_ACCEL_RESOURCE is set — in ai-solutions that means
-  # rack_scale_enabled=true with an accelerator: in rack-profile.yaml. None
-  # autodeploys; opt in per model.
+  # ── GPU examples (runtime: vllm-cuda): see docs/deploy/deploy_models.md#the-gate ──
 
   # LLM — small Qwen3 on 1 NVIDIA GPU. Smoke test for the GPU path.
   - name: qwen3-0-6b-cuda
@@ -662,15 +659,8 @@ runtimes:
         defaults: { cpu: 16, memory: "48Gi", kv_cache_gb: 8 }
 
   # ── vLLM (NVIDIA GPU / CUDA) ────────────────────────────────────────────────
-  # GPU counterpart of `vllm`. Plumbing (device: gpu, accelerator resource,
-  # toleration, shm) is in runtimes/vllm-cuda/values.yaml. A model opts in with
-  # `runtime: vllm-cuda` (+ optional `gpus: N`; default from its category).
-  #
-  # Deploys are GATED: model-manager refuses a device: gpu runtime unless
-  # MM_ACCEL_RESOURCE is set. In ai-solutions that happens automatically when
-  # rack_scale_enabled=true and the rack-profile declares an accelerator; on a
-  # standard (CPU) install the gate stays closed and nothing here is reachable.
-  # --dry-run previews are not gated.
+  # GPU counterpart of `vllm`; plumbing in runtimes/vllm-cuda/values.yaml, the
+  # deploy gate in docs/deploy/deploy_models.md#the-gate.
   vllm-cuda:
     default_version: "0.28.0"
 

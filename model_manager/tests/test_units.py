@@ -94,7 +94,7 @@ def test_gated_draft_needs_token(kubectl, monkeypatch, capsys):
     m = Model(name="m", namespace="n", model_id="org/m", draft_model_id="org/draft", runtime="vllm",
               runtime_image="img")
     with pytest.raises(SystemExit):
-        download.download_weights(m, Catalog(cli.MM_DIR / "models.yaml"), [])
+        download.download_weights(m, Catalog(cli.MM_DIR / "models.yaml"), [], ())
     assert "Model 'org/draft' is gated" in capsys.readouterr().err and not kubectl
 
 
@@ -103,7 +103,7 @@ def test_hf_token_only_on_stdin(kubectl, monkeypatch):
     monkeypatch.setattr(download, "_curl_ok", lambda *_: True)
     monkeypatch.setattr(download.time, "sleep", lambda _: None)
     m = Model(name="m", namespace="n", model_id="org/m", runtime="vllm", runtime_image="img", cpu="8", memory="8Gi")
-    download.download_weights(m, Catalog(cli.MM_DIR / "models.yaml"), [])
+    download.download_weights(m, Catalog(cli.MM_DIR / "models.yaml"), [], ())
     assert not any("hf_secret" in " ".join(args) for args, _ in kubectl)
     assert any(stdin == "hf_secret" for _, stdin in kubectl)
 
@@ -146,7 +146,7 @@ def test_hf_token_secret_failure_aborts(monkeypatch):
     monkeypatch.setattr(k8s, "run", lambda *args, stdin=None: subprocess.CompletedProcess(args, 1, "", "forbidden"))
     m = Model(name="m", namespace="n", model_id="org/m", runtime="vllm", runtime_image="img")
     with pytest.raises(SystemExit):  # rather than a Job that waits 7200s for a missing Secret
-        download.download_weights(m, Catalog(cli.MM_DIR / "models.yaml"), [])
+        download.download_weights(m, Catalog(cli.MM_DIR / "models.yaml"), [], ())
 
 
 def test_gateway_defaults(monkeypatch):

@@ -16,9 +16,10 @@ import tempfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from core import cli, config, k8s, policy, renderer  # noqa: E402
+from core import cli, config, download, k8s, policy, renderer  # noqa: E402
 from core.config import Catalog, Model  # noqa: E402
 from core.renderer import gpu_vendor  # noqa: E402
 from test_parity import BE, DOWNLOAD, GOLDEN, MM, NO_LITELLM_URL, NRI, POOL, _ready, case, run  # noqa: E402
@@ -181,9 +182,32 @@ GPU_MODEL = {"name": "m", "namespace": "n", "runtime": "vllm-cuda",
 GPU_TAINT = {"key": "nvidia.com/gpu", "effect": "NoSchedule"}
 
 
-def preflight(monkeypatch, nodes, pods=None, **model):
-    monkeypatch.setattr(k8s, "get_json", lambda *a: nodes if a == ("nodes",) else pods or _pods())
-    return policy.GpuRuntime().preflight(Model(**{**GPU_MODEL, "gpus": "8", **model}), 1)
+def preflight(monkeypatch, nodes, pods=None, pvc=None, pv=None, binding="", rolls=True, runtime=None, **model):
+    """GpuRuntime.preflight against a fake cluster: nodes, pods, the model-store PVC and its PV."""
+    objects = {"nodes": nodes, "pods": pods or _pods(), "pvc": pvc, "pv": pv}
+    monkeypatch.setattr(k8s, "get_json", lambda *a: objects[a[0]])
+    monkeypatch.setattr(k8s, "out", lambda *a: binding if a[:2] == ("get", "storageclass") else "")
+    runtime = runtime or policy.GpuRuntime()
+    runtime.rolls = rolls
+    return runtime.preflight(Model(**{**GPU_MODEL, "uri": "pvc://model-store/m", "gpus": "8", **model}), 1)
+
+
+BOUND = {"spec": {"volumeName": "pv-1", "storageClassName": "local-path"}}
+PENDING = {"spec": {"storageClassName": "local-path"}}
+
+
+def _pv(*hosts):
+    """A local-path PV pinned to these node names; none: shared storage."""
+    if not hosts:
+        return {"spec": {}}
+    term = {"matchExpressions": [{"key": "kubernetes.io/hostname", "operator": "In", "values": list(hosts)}]}
+    return {"spec": {"nodeAffinity": {"required": {"nodeSelectorTerms": [term]}}}}
+
+
+def _labelled(nodes):
+    for n in nodes["items"]:
+        n["metadata"]["labels"] = {"kubernetes.io/hostname": n["metadata"]["name"]}
+    return nodes
 
 
 @pytest.mark.parametrize("nodes, pods, gpus, fits", [
@@ -213,12 +237,78 @@ def test_gpu_preflight_messages(monkeypatch):
 
 def test_own_running_pods_name_the_remedy(monkeypatch):
     assert preflight(monkeypatch, _nodes(8), _pods(("n0", "m", 8))) == [
-        "m's own running pods hold the nvidia.com/gpu it needs: if this change restarts the pod, the rollout "
+        "m's own running pods hold the nvidia.com/gpu it needs: this change restarts the pod, and the rollout "
         "starts the new one next to the running one. Undeploy it first (./model-manager undeploy m), or use "
-        "MM_PREFLIGHT=warn to apply anyway (e.g. a scale-down or a label change, which starts no new pod)."]
+        "MM_PREFLIGHT=warn to apply anyway (the new pod then waits for GPUs)."]
     # Same name in another namespace is another model.
     other_ns = {"items": [{**p, "metadata": {**p["metadata"], "namespace": "x"}} for p in _pods(("n0", "m", 8))["items"]]}
     assert preflight(monkeypatch, _nodes(8), other_ns)[0].startswith("No node has 8 free")
+
+
+@pytest.mark.parametrize("pvc, pv, binding, fits, download", [
+    (BOUND, _pv("cpu1"), "", False, ()),                       # pinned to a CPU worker: the GPU pod could never mount it
+    (BOUND, _pv("n0"), "", True, ()),                          # pinned to the GPU node
+    (PENDING, None, "WaitForFirstConsumer", True, ("n0",)),    # binds where the download Job runs: pin the Job
+    (BOUND, _pv(), "", True, ()),                              # shared storage, no node affinity
+    (PENDING, None, "Immediate", True, ()),
+])
+def test_gpu_preflight_and_the_model_store(monkeypatch, pvc, pv, binding, fits, download):
+    nodes = _labelled({"items": _nodes(8)["items"] + _nodes(None)["items"]})
+    nodes["items"][1]["metadata"] = {"name": "cpu1", "labels": {"kubernetes.io/hostname": "cpu1"}}
+    runtime = policy.GpuRuntime()
+    errors = preflight(monkeypatch, nodes, pvc=pvc, pv=pv, binding=binding, runtime=runtime)
+    assert (errors == []) is fits and runtime.download_nodes == download
+    if not fits:
+        assert "GPU models need shared (ReadWriteMany) storage, or the model store on a GPU node." in errors[0]
+
+
+@pytest.mark.parametrize("init, sidecars, app, held", [
+    ([8], [], [0], 8),        # an init container's GPUs are reserved while it runs
+    ([], [2], [4], 6),        # a restartable sidecar runs next to the app containers
+    ([4], [2], [1], 6),       # init peak: the sidecar started before it, plus the init container
+])
+def test_a_pods_effective_gpu_request(init, sidecars, app, held):
+    gpu = lambda n: {"resources": {"requests": {"nvidia.com/gpu": str(n)}}}  # noqa: E731
+    pod = {"spec": {"initContainers": [{**gpu(n), "restartPolicy": "Always"} for n in sidecars] + [gpu(n) for n in init],
+                    "containers": [gpu(n) for n in app]}}
+    assert policy._pod_request(pod, "nvidia.com/gpu") == held
+
+
+@pytest.mark.parametrize("nodes, pods, replicas, fits", [
+    (_nodes(8, 8), _pods(("n0", "m", 8), ("n1", "m", 8)), "1", True),   # a scale-down releases GPUs
+    (_nodes(8, 8, 8), _pods(("n0", "m", 8), ("n1", "m", 8)), "3", True),  # a scale-up needs room for the new replica only
+    (_nodes(8, 8), _pods(("n0", "m", 8), ("n1", "m", 8)), "3", False),  # ... and refuses when there is none
+])
+def test_a_replica_only_change_needs_no_room_for_the_running_pods(monkeypatch, nodes, pods, replicas, fits):
+    assert (preflight(monkeypatch, nodes, pods, rolls=False, replicas=replicas) == []) is fits
+
+
+@pytest.mark.parametrize("live, diff_rc, rolls", [("2", 0, False), ("2", 1, True), ("", 0, True)])
+def test_rolls_pods_when_more_than_the_replicas_changes(monkeypatch, live, diff_rc, rolls):
+    monkeypatch.setenv("MM_CONFIG", str(cli.MM_DIR / "models.yaml"))
+    monkeypatch.setenv("MM_ACCEL_RESOURCE", "nvidia.com/gpu")
+    m = config.resolve(Catalog.load(), "qwen3-0-6b-cuda", cli.Options(replicas="1"))
+    monkeypatch.setattr(k8s, "out", lambda *a: live)
+    monkeypatch.setattr(k8s, "run", lambda *a, **k: type("R", (), {"returncode": diff_rc})())
+    assert cli._rolls_pods(m, Catalog.load(), cli.Options(), {}, "8", []) is rolls
+
+
+def test_node_matches_required_terms():
+    node = {"metadata": {"name": "n0", "labels": {"kubernetes.io/hostname": "n0", "zone": "a"}}}
+    term = lambda *e, fields=(): [{"matchExpressions": list(e), "matchFields": list(fields)}]  # noqa: E731
+    assert policy._node_matches(node, term({"key": "zone", "operator": "In", "values": ["a"]}))
+    assert not policy._node_matches(node, term({"key": "zone", "operator": "NotIn", "values": ["a"]}))
+    assert policy._node_matches(node, term({"key": "zone", "operator": "Exists"}))
+    assert not policy._node_matches(node, term({"key": "gpu", "operator": "Exists"}))
+    assert policy._node_matches(node, term(fields=[{"key": "metadata.name", "operator": "In", "values": ["n0"]}]))
+    assert policy._node_matches(node, term({"key": "x", "operator": "In", "values": ["y"]}) + term())
+
+
+def test_the_download_job_is_pinned_to_the_fitting_nodes():
+    pod = yaml.safe_load("spec:" + download._node_affinity(("n0", "n1")).replace("\n      ", "\n  "))
+    terms = pod["spec"]["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
+    assert terms == [{"matchFields": [{"key": "metadata.name", "operator": "In", "values": ["n0", "n1"]}]}]
+    assert download._node_affinity(()) == ""
 
 
 def test_gpu_preflight_ignores_the_preferred_node(monkeypatch):

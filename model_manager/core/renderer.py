@@ -11,8 +11,6 @@ from .config import Catalog, Model, gateway_ref, mm_path, pick, text
 from .ui import abort
 
 CHAT_TEMPLATE_DIR = "/etc/chat-template"
-# Value of the gpu-vendor node label the rack-scale installer applies, by accelerator resource prefix.
-GPU_VENDORS = {"nvidia.com/": "nvidia"}
 
 
 def render(path: Path, **values: str) -> str:
@@ -91,10 +89,10 @@ def proxy_env(catalog: Catalog) -> list[tuple[str, str]]:
 
 
 def gpu_vendor(resource: str) -> str:
-    return next((v for prefix, v in GPU_VENDORS.items() if resource.startswith(prefix)), "")
+    return "nvidia" if resource.startswith("nvidia.com/") else ""
 
 
-def _affinity(node: str, require_amx: bool, vendor: str = "") -> str:
+def _affinity(node: str, require_amx: bool, vendor: str) -> str:
     lines = ["    affinity:", "      nodeAffinity:"] if node or require_amx or vendor else []
     if require_amx:
         lines += ["        requiredDuringSchedulingIgnoredDuringExecution:", "          nodeSelectorTerms:",
