@@ -367,7 +367,7 @@ def _gpu_gate(m: Model, dry_run: bool) -> None:
 def _rolls_pods(m: Model, catalog: Catalog, o: Options, annotations: dict, cpu: str, cli_args: list[str]) -> bool:
     """Whether applying m starts new pods: anything but spec.replicas differs from the live object."""
     live = k8s.out("get", m.kind, m.name, "-n", m.namespace, "-o", "jsonpath={.spec.replicas}")
-    if live in ("", m.replicas):  # new, or the replicas match and deploy's own diff already found a change
+    if not live:
         return True
     same = renderer.manifest(dataclasses.replace(m, replicas=live), catalog, o, annotations, cpu, cli_args)
     return k8s.run("diff", *k8s.SSA, "-f", "-", stdin=same).returncode != 0
@@ -386,7 +386,7 @@ def deploy(o: Options, target: str) -> None:
         info(f"  GPUs: {m.gpus} x {m.accel_resource}")
     if m.node:
         info(f"  Node: {m.node}")
-    policy = GpuRuntime() if m.gpu else resolve_policy(o.cpu_policy, m.node)
+    policy = GpuRuntime(catalog.pvc, True) if m.gpu else resolve_policy(o.cpu_policy, m.node)
     info(f"  CPU policy: {policy.name}")
     gpus = int(m.gpus) if m.gpu else 1
     cli_args, tp = _engine_cli_args(o, gpus, renderer.engine_args(m) if m.gpu else [])
@@ -419,10 +419,10 @@ def deploy(o: Options, target: str) -> None:
         _apply_chat_template(m)
     if action == "apply":
         if m.gpu and not truthy(os.environ.get("MM_SKIP_PREFLIGHT", "")):
-            policy.rolls, policy.pvc = _rolls_pods(m, catalog, o, annotations, cpu, cli_args), catalog.pvc
+            policy = GpuRuntime(catalog.pvc, _rolls_pods(m, catalog, o, annotations, cpu, cli_args))
         preflight_gate(policy, m, tp)
         k8s.ensure_storage(m.namespace, catalog.pvc)
-        download_weights(m, catalog, cli_args, policy.download_nodes)
+        download_weights(m, catalog, cli_args, policy.download_nodes if m.gpu else ())
         _install_runtime(m)
         k8s.apply(manifest, ssa=True)
         ok(f"Manifest applied: {m.kind}/{m.name} in {m.namespace}")

@@ -187,8 +187,7 @@ def preflight(monkeypatch, nodes, pods=None, pvc=None, pv=None, binding="", roll
     objects = {"nodes": nodes, "pods": pods or _pods(), "pvc": pvc, "pv": pv}
     monkeypatch.setattr(k8s, "get_json", lambda *a: objects[a[0]])
     monkeypatch.setattr(k8s, "out", lambda *a: binding if a[:2] == ("get", "storageclass") else "")
-    runtime = runtime or policy.GpuRuntime()
-    runtime.rolls, runtime.pvc = rolls, "model-store"
+    runtime = runtime or policy.GpuRuntime("model-store", rolls)
     return runtime.preflight(Model(**{**GPU_MODEL, "gpus": "8", **model}), 1)
 
 
@@ -255,7 +254,7 @@ def test_own_running_pods_name_the_remedy(monkeypatch):
 def test_gpu_preflight_and_the_model_store(monkeypatch, pvc, pv, binding, fits, download):
     nodes = _labelled({"items": _nodes(8)["items"] + _nodes(None)["items"]})
     nodes["items"][1]["metadata"] = {"name": "cpu1", "labels": {"kubernetes.io/hostname": "cpu1"}}
-    runtime = policy.GpuRuntime()
+    runtime = policy.GpuRuntime("model-store", True)
     errors = preflight(monkeypatch, nodes, pvc=pvc, pv=pv, binding=binding, runtime=runtime)
     assert (errors == []) is fits and runtime.download_nodes == download
     if not fits:
@@ -269,7 +268,7 @@ def test_own_pods_on_the_stores_node_say_undeploy_not_storage(monkeypatch):
 
 
 def test_a_store_that_binds_on_first_use_holds_replicas_on_one_node(monkeypatch, capsys):
-    runtime = policy.GpuRuntime()
+    runtime = policy.GpuRuntime("model-store", True)
     assert preflight(monkeypatch, _labelled(_nodes(8, 8)), pvc=PENDING, binding="WaitForFirstConsumer",
                      replicas="3", runtime=runtime) == []
     err = capsys.readouterr().err
@@ -304,7 +303,7 @@ def test_a_pending_replica_still_needs_room(monkeypatch, capsys):
     assert "only 1 of 2 new replicas fit" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("live, diff_rc, rolls", [("2", 0, False), ("2", 1, True), ("", 0, True), ("1", 0, True)])
+@pytest.mark.parametrize("live, diff_rc, rolls", [("2", 0, False), ("2", 1, True), ("", 0, True), ("1", 0, False)])
 def test_rolls_pods_when_more_than_the_replicas_changes(monkeypatch, live, diff_rc, rolls):
     monkeypatch.setenv("MM_CONFIG", str(cli.MM_DIR / "models.yaml"))
     monkeypatch.setenv("MM_ACCEL_RESOURCE", "nvidia.com/gpu")
@@ -385,12 +384,12 @@ def test_declared_gpus_the_cluster_lacks_stop_the_deploy(monkeypatch):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(k8s, "get_json", lambda *a: _nodes(None, None) if a == ("nodes",) else _pods())
     with pytest.raises(SystemExit):
-        policy.preflight_gate(policy.GpuRuntime(), Model(**GPU_MODEL, gpus="1"), 1)
+        policy.preflight_gate(policy.GpuRuntime("model-store", True), Model(**GPU_MODEL, gpus="1"), 1)
 
 
 def test_gpu_preflight_skips_when_the_cluster_cannot_be_read(monkeypatch):
     monkeypatch.setattr(k8s, "get_json", lambda *a: None)
-    assert policy.GpuRuntime().preflight(Model(**GPU_MODEL, gpus="1"), 1) == []
+    assert policy.GpuRuntime("model-store", True).preflight(Model(**GPU_MODEL, gpus="1"), 1) == []
 
 
 def test_cli_tp_wins_over_an_arg_tp():

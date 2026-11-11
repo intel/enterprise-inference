@@ -50,7 +50,6 @@ def kubelet_config(node: str) -> dict | None:
 class BestEffort:
     """No pinning; the CFS scheduler places threads."""
     name = "best-effort"
-    download_nodes: tuple = ()  # nodes the weight-download Job must run on; empty: anywhere
 
     def prepare(self, m: Model) -> None:
         """Normalise m.cpu/m.memory for the policy; may abort."""
@@ -179,8 +178,10 @@ class GpuRuntime(BestEffort):
     limit (Burstable), so kubelet's static CPU manager does not pin it either. Never selected by --cpu-policy."""
     name = "n/a (GPU runtime — no CPU pinning)"
     label = "GPU"
-    rolls = True  # deploy sets False when only spec.replicas changes: the running pods stay
-    pvc = ""  # the model-store PVC, set by deploy
+
+    def __init__(self, pvc: str, rolls: bool) -> None:
+        """pvc: the model-store claim. rolls: False when only spec.replicas changes, so the running pods stay."""
+        self.pvc, self.rolls, self.download_nodes = pvc, rolls, ()
 
     def annotations(self, m: Model, tp: int) -> tuple[dict, str]:
         return {}, m.cpu
@@ -302,7 +303,8 @@ def _node_matches(node: dict, terms: list) -> bool:
 
 
 def _int(value: Any) -> int | None:
-    return int(value) if isinstance(value, str) and re.fullmatch(r"[+-]?[0-9]+", value) else None
+    digits = value[1:] if isinstance(value, str) and value[:1] in ("+", "-") else value
+    return int(value) if isinstance(digits, str) and is_uint(digits) else None
 
 
 def _quantity(value: Any) -> int:
