@@ -327,20 +327,22 @@ def _spawn_reconciler(m: Model, timeout: int) -> tuple[Path, bool]:
 
 
 def _require_autoscaling(m: Model) -> None:
-    """KEDA installed, and a KServe whose LLMInferenceService has KEDA scaling (checked before the download)."""
+    """KEDA installed, and a KServe that applies KEDA scaling to this kind (checked before the download)."""
     if not k8s.succeeds("get", "crd", "scaledobjects.keda.sh"):
         abort("Autoscaling needs KEDA, which is not installed: set keda_enabled: true in global_config.yaml and "
               "install the platform layer, or deploy with a fixed --replicas.")
+    if m.kind == "InferenceService":
+        # KServe uses the KEDA class only in Standard mode; under Knative it validates and ignores autoScaling.
+        mode = _kserve_default_mode()
+        if mode not in ("", "Standard", "RawDeployment"):
+            abort(f"KServe deploys InferenceServices in {mode} mode, where KEDA autoscaling does not apply; "
+                  f"deploy {m.name} with a fixed --replicas.")
+        return
     # kubectl explain reads the API schema through discovery, which needs no RBAC on CRDs.
     version = f"serving.kserve.io/{os.environ.get('MM_LLMISVC_API_VERSION') or 'v1alpha2'}"
     if not k8s.succeeds("explain", "--api-version", version, "llminferenceservices.spec.scaling.keda"):
         abort("This cluster's KServe has no KEDA scaling for LLMInferenceService (KServe 0.21+, installed with "
               f"envoy_gateway_upgrade: true); deploy {m.name} with a fixed --replicas.")
-    # KServe uses the KEDA class only in Standard mode; under Knative it validates and ignores autoScaling.
-    mode = _kserve_default_mode() if m.kind == "InferenceService" else ""
-    if mode not in ("", "Standard", "RawDeployment"):
-        abort(f"KServe deploys InferenceServices in {mode} mode, where KEDA autoscaling does not apply; deploy "
-              f"{m.name} with a fixed --replicas.")
 
 
 def _kserve_default_mode() -> str:

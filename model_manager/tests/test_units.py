@@ -931,3 +931,16 @@ def test_missing_previous_autoscaler_is_silent(monkeypatch, capsys):
     monkeypatch.setattr(k8s, "run", run)
     cli._drop_stale_autoscaler(Model(name="m", namespace="ns", kind="InferenceService"))
     assert "--ignore-not-found" in calls[0] and len(calls) == 1 and not capsys.readouterr().err
+
+
+def test_isvc_autoscaling_skips_the_llmisvc_schema_check(monkeypatch):
+    # KServe 0.18 has no spec.scaling.keda on LLMInferenceService, but its InferenceService autoscales with KEDA.
+    calls = []
+
+    def run(*args, stdin=None):
+        calls.append(args[0])
+        return subprocess.CompletedProcess(args, 0 if args[0] == "get" else 1, "", "")
+    monkeypatch.setattr(k8s, "run", run)
+    cli._require_autoscaling(Model(name="m", namespace="n", kind="InferenceService",
+                                   min_replicas="1", max_replicas="3"))
+    assert "explain" not in calls
