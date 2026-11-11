@@ -78,7 +78,7 @@ HELP_HFID = [
 ]
 # --help documents --gpus and MM_ACCEL_RESOURCE (GPU runtimes), which are new.
 HELP_GPU = [(r"^(  --tp N .*\n)",
-             r"\1  --gpus N             GPUs per pod (device: gpu runtimes, e.g. vllm-cuda); default --tensor-parallel-size\n"),
+             r"\1  --gpus N             GPUs per pod (device: gpu runtimes, e.g. vllm-cuda); also the default --tp\n"),
             (r"^(  MM_CONFIG .*\n)",
              r"\1  MM_ACCEL_RESOURCE     Accelerator extended resource the cluster advertises (e.g. nvidia.com/gpu).\n"
              r"                            Required to deploy a device: gpu runtime (vllm-cuda); ai-solutions sets\n"

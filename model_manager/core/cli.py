@@ -41,7 +41,7 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
   {GREEN}--memory{RESET} NGi         Memory (e.g. 32Gi)
   {GREEN}--replicas{RESET} N         Replica count (default: 1)
   {GREEN}--tp{RESET} N               Tensor-parallel size (splits across N NUMA nodes)
-  {GREEN}--gpus{RESET} N             GPUs per pod (device: gpu runtimes, e.g. vllm-cuda); default --tensor-parallel-size
+  {GREEN}--gpus{RESET} N             GPUs per pod (device: gpu runtimes, e.g. vllm-cuda); also the default --tp
   {GREEN}--cpu-policy{RESET} <p>     CPU pinning: nri-balloons | kubelet-static | best-effort
                             (default: MM_CPU_POLICY, else auto-detected)
   {GREEN}--category{RESET} <cat>     Override category: llm | embed | rerank | vlm
@@ -191,14 +191,15 @@ def parse_args(argv: list[str]) -> Options:
 
 
 def _tp_in(args: list[str]) -> int | None:
-    """The --tensor-parallel-size set in args (either form), or None."""
+    """The --tensor-parallel-size set in args (either form; the last wins, as in vLLM), or None."""
+    found = None
     for n, a in enumerate(args):
         if a == "--tensor-parallel-size" or a.startswith("--tensor-parallel-size="):
             tp = a.split("=", 1)[1] if "=" in a else (args[n + 1] if n + 1 < len(args) else "1")
             if not (is_uint(tp) and int(tp) > 0):
                 abort(f"--tensor-parallel-size requires a positive integer, got: {tp}")
-            return int(tp)
-    return None
+            found = int(tp)
+    return found
 
 
 def _engine_cli_args(o: Options, gpus: int = 1, catalog_args: tuple[str, ...] = ()) -> tuple[list[str], int]:
@@ -213,10 +214,10 @@ def _engine_cli_args(o: Options, gpus: int = 1, catalog_args: tuple[str, ...] = 
     tp = _tp_in(args)
     if tp is not None:
         return args, tp
+    tp = _tp_in(list(catalog_args))
+    if tp is not None:
+        return args, tp
     if gpus > 1:
-        tp = _tp_in(list(catalog_args))
-        if tp is not None:
-            return args, tp
         return args + ["--tensor-parallel-size", str(gpus)], gpus
     return args, 1
 
@@ -343,7 +344,7 @@ def _gpu_gate(m: Model, dry_run: bool) -> None:
     --dry-run is a preview: it warns and renders with the runtime's default resource name."""
     if not m.gpu:
         return
-    if not re.fullmatch(r"[1-9][0-9]*", m.gpus):
+    if not (is_uint(m.gpus) and int(m.gpus) > 0):
         abort(f"Runtime '{m.runtime}' is a GPU runtime but the GPU count is invalid: '{m.gpus}'. Set gpus: N on "
               "the model, defaults.gpus on its category, or pass --gpus N.")
     have = os.environ.get("MM_ACCEL_RESOURCE", "")

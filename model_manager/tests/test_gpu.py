@@ -184,7 +184,8 @@ def preflight(monkeypatch, nodes, pods=None, **model):
     (_nodes(8, taints={0: [{"key": "maintenance", "effect": "NoSchedule"}]}), None, "1", False),
     (_nodes(8, taints={0: [GPU_TAINT]}), None, "8", True),        # the GPU taint is tolerated
     (_nodes(8), _pods(("n0", "other", 8)), "1", False),           # all held by another model
-    (_nodes(8), _pods(("n0", "m", 8)), "8", True),                # its own pods: a re-deploy
+    (_nodes(8), _pods(("n0", "m", 8)), "8", False),               # its own: a changed re-deploy rolls a new pod
+    (_nodes(8, 8), _pods(("n0", "other", 8)), "8", True),         # the other node is free
 ])
 def test_gpu_preflight_counts_free_gpus(monkeypatch, nodes, pods, gpus, fits):
     assert (preflight(monkeypatch, nodes, pods, gpus=gpus) == []) is fits
@@ -221,6 +222,11 @@ def test_declared_gpus_the_cluster_lacks_stop_the_deploy(monkeypatch):
 def test_gpu_preflight_skips_when_the_cluster_cannot_be_read(monkeypatch):
     monkeypatch.setattr(k8s, "get_json", lambda *a: None)
     assert policy.GpuRuntime().preflight(Model(**GPU_MODEL, gpus="1"), 1) == []
+
+
+def test_catalog_tensor_parallel_is_read_on_one_gpu_and_the_last_wins():
+    assert cli._engine_cli_args(cli.Options(), 1, ("--tensor-parallel-size", "2")) == ([], 2)
+    assert cli._engine_cli_args(cli.Options(), 4, ("--tensor-parallel-size", "2", "--tensor-parallel-size=8")) == ([], 8)
 
 
 def test_tensor_parallel_larger_than_the_gpu_count_is_refused(monkeypatch, capsys):

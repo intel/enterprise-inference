@@ -131,7 +131,8 @@ accident.
 
 A deploy then checks the cluster itself: a Ready node, not cordoned or tainted
 against the pod, must have at least `gpus` free `nvidia.com/gpu`, counting what
-other pods already hold (a pod's GPUs cannot span nodes). Otherwise it stops
+running pods already hold (a pod's GPUs cannot span nodes, and a changed
+re-deploy needs room for its new pod next to the running one). Otherwise it stops
 before downloading weights, for example when the profile declares a GPU node
 that has not joined the cluster or whose device plugin is not ready yet.
 `MM_PREFLIGHT=warn` proceeds anyway; `MM_SKIP_PREFLIGHT=1` skips the check. A
@@ -170,7 +171,8 @@ models, but not Llama 3.1 70B (~140 GB), Nemotron 3 Super FP8 (~128 GB) or
 Nemotron 3 Ultra NVFP4 (~352 GB). Set it before the first inference install,
 in `global_config.yaml`, for example `llm_services_model_store_size: 1Ti` for
 all of them. Growing an existing PVC works only if its StorageClass allows
-volume expansion.
+volume expansion. A download that outlasts the deploy's two-hour wait resumes
+when the deploy is run again.
 
 Pod security is unchanged: the upstream `vllm/vllm-openai` image runs under the
 same `runAsNonRoot` / `drop: ALL` context as the CPU image, with its caches

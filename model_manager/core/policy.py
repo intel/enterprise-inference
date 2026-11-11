@@ -193,9 +193,8 @@ class GpuRuntime(BestEffort):
         used: dict = {}
         for pod in pods.get("items", []):
             node = text(pick(pod.get("spec"), "nodeName"))
-            if node and pick(pick(pod.get("metadata"), "labels", {}), "app.kubernetes.io/name") != m.name:
-                used[node] = used.get(node, 0) + sum(_quantity(pick(pick(c.get("resources"), "requests", {}), resource))
-                                                     for c in pick(pod.get("spec"), "containers", []))
+            used[node] = used.get(node, 0) + sum(_quantity(pick(pick(c.get("resources"), "requests", {}), resource))
+                                                 for c in pick(pod.get("spec"), "containers", []))
         ready = [n for n in nodes.get("items", []) if _schedulable(n, tolerated)]
         alloc = {text(pick(n.get("metadata"), "name")): _quantity(pick(pick(n.get("status"), "allocatable", {}), resource))
                  for n in ready}
@@ -214,8 +213,9 @@ class GpuRuntime(BestEffort):
 
     def failure(self, m: Model, tp: int) -> str:
         return (f"GPU pre-flight failed: cannot place {m.name} ({m.gpus} x {m.accel_resource}) on any node. Lower "
-                "--gpus, or wait until the GPU node is Ready with its device plugin. Override with MM_PREFLIGHT=warn "
-                "(proceed anyway) or MM_SKIP_PREFLIGHT=1 (skip check).")
+                "--gpus, free GPUs (a changed re-deploy needs room for its new pod next to the running one), or wait "
+                "until the GPU node is Ready with its device plugin. Override with MM_PREFLIGHT=warn (proceed anyway) or "
+                "MM_SKIP_PREFLIGHT=1 (skip check).")
 
 
 POLICIES = {p.name: p for p in (NriBalloons, KubeletStatic, BestEffort)}
