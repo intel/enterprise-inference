@@ -50,12 +50,12 @@ apply. Set `MM_FORCE_REDEPLOY=1` to force a full re-apply regardless.
 | `--hfid <hf/repo>` | Deploy any Hugging Face model directly, without a catalog entry (`--id` still works but is deprecated) |
 | `--name <name>` | Set the name to serve under (use with `--hfid`) |
 | `--as <name>` | Deploy a catalog model under a different name — run several variants at once |
-| `--server <name>` | Which engine serves the model: `vllm` (default) or `openvino` (alias: `--runtime`) |
+| `--server <name>` | Which engine serves the model: `vllm` (default), `openvino` or `vllm-cuda` (alias: `--runtime`) |
 | `--server-version <v>` | Which version of that engine to use — see [below](#pick-an-engine-and-version) |
 | `--cpu N` | Number of CPU cores to give the model. `--cpu auto` sizes it to a NUMA node — see [CPU auto](../customize/catalog.md#cpu-auto) |
 | `--memory NGi` | Memory limit, e.g. `32Gi` |
 | `--replicas N` | How many copies to run (default: 1) |
-| `--tp N` | Split one model across N CPU sockets for more throughput (advanced) |
+| `--tp N` | Split one model across N CPU sockets for more throughput (advanced); on a GPU engine, across N GPUs, which also sets `--gpus` |
 | `--gpus N` | GPUs per pod for a GPU engine (`vllm-cuda`); also the default `--tp` — see [below](#deploy-on-gpu-nodes-rack-scale) |
 | `--category <cat>` | Force the workload type: `llm`, `embed`, `rerank`, or `vlm` |
 | `--node <name>` | Pin the model to a specific cluster node |
@@ -112,6 +112,8 @@ What `vllm-cuda` changes in the rendered manifest, relative to CPU `vllm`:
   by NCCL for tensor parallelism.
 - `--tensor-parallel-size <gpus>` is injected when `gpus > 1` and no TP flag
   was given.
+- **No CPU limit**, so the pod is Burstable and kubelet's static CPU manager
+  does not pin it.
 - **No CPU pinning.** NRI balloon / kubelet-static annotations, their
   pre-flight checks, and the AMX node requirement are all skipped: they are
   Xeon placement controls and do not apply to a GPU pod. A GPU pre-flight
@@ -125,7 +127,7 @@ What `vllm-cuda` changes in the rendered manifest, relative to CPU `vllm`:
 A `device: gpu` runtime is **refused unless `MM_ACCEL_RESOURCE` is set** to the
 extended resource the cluster advertises (e.g. `nvidia.com/gpu`). Intel
 Enterprise AI Solutions sets it automatically when
-`rack_scale_enabled: true` and the rack-profile declares an `accelerator:`;
+`rack_scale_enabled: true` and the rack-profile declares an NVIDIA `accelerator:`;
 on a standard CPU install it is empty and GPU models cannot be deployed by
 accident.
 

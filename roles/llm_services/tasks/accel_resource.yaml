@@ -6,11 +6,9 @@
   vars:
     _flags: >-
       {{ lookup('ansible.builtin.file', env_dir ~ '/inventory/metadata/rack-scale-flags.env', errors='ignore')
-         | default('', true) }}
+         | default('', true) if env_dir is defined else '' }}
     _vendor: >-
-      {{ rack_scale_gpu_vendor
-         | default(_flags | regex_search('(?m)^rack_scale_gpu_vendor=(\S*)', '\1') | default([''], true) | first) }}
+      {{ rack_scale_gpu_vendor if rack_scale_gpu_vendor is defined
+         else _flags | regex_search('(?m)^rack_scale_gpu_vendor=(\S*)', '\1') | default([''], true) | first }}
   ansible.builtin.set_fact:
-    _mm_accel_resource: >-
-      {{ 'nvidia.com/gpu' if (rack_scale_enabled | default(false) | bool) and env_dir is defined
-         and _vendor == 'nvidia' else '' }}
+    _mm_accel_resource: "{{ 'nvidia.com/gpu' if (rack_scale_enabled | default(false) | bool) and _vendor == 'nvidia' else '' }}"

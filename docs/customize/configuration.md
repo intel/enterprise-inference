@@ -294,6 +294,8 @@ Disabling NFD means those affinity rules cannot be satisfied.
 | `MM_ACCEL_RESOURCE` | Extended resource GPU runtimes request (e.g. `nvidia.com/gpu`); a `device: gpu` runtime is refused while it is empty. The rack-scale install sets it |
 | `MM_CPU_POLICY` | Override `kubernetes_cpu_policy` for one invocation |
 | `MM_NRI_ENABLED` | Set `false` to skip NRI CPU-pinning annotations |
+| `MM_PREFLIGHT` | `warn` — report a placement shortfall (CPU or GPU pre-flight) but proceed |
+| `MM_SKIP_PREFLIGHT` | `1` — skip the placement pre-flight entirely |
 | `MM_NRI_PREFLIGHT` | `warn` — report a capacity shortfall but proceed |
 | `MM_NRI_SKIP_PREFLIGHT` | `1` — skip the capacity check entirely |
 | `MM_FORCE_REDEPLOY` | `1` — re-apply a model even if its rendered spec is unchanged |

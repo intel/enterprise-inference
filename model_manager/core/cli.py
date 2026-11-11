@@ -209,11 +209,8 @@ def _engine_cli_args(o: Options, gpus: int, catalog_args: list[str]) -> tuple[li
     args = list(o.arg)
     if o.tp:
         return args + ["--tensor-parallel-size", o.tp], int(o.tp)
-    tp = _tp_in(args)
-    if tp is not None:
-        return args, tp
-    tp = _tp_in(catalog_args)
-    if tp is not None:
+    tp = _tp_in(args) or _tp_in(catalog_args)
+    if tp:
         return args, tp
     if gpus > 1:
         return args + ["--tensor-parallel-size", str(gpus)], gpus
@@ -338,7 +335,7 @@ def _spawn_reconciler(m: Model, timeout: int) -> tuple[Path, bool]:
 def _gpu_gate(m: Model, dry_run: bool) -> None:
     """Refuse a device: gpu runtime unless MM_ACCEL_RESOURCE names the extended resource the cluster
     advertises. Intel Enterprise AI Solutions sets it only when rack_scale_enabled=true and the rack
-    profile declares an accelerator, so a GPU model cannot be deployed by accident on a CPU install.
+    profile declares an NVIDIA accelerator, so a GPU model cannot be deployed by accident on a CPU install.
     --dry-run is a preview: it warns and renders with MM_ACCEL_RESOURCE, or the runtime's resource when unset."""
     if not m.gpu:
         return
@@ -362,7 +359,7 @@ def _gpu_gate(m: Model, dry_run: bool) -> None:
                     "refused.")
     abort(f"Runtime '{m.runtime}' targets a GPU (device: gpu) but no accelerator resource is enabled "
           "(MM_ACCEL_RESOURCE is empty). In Intel Enterprise AI Solutions this is set automatically when "
-          "rack_scale_enabled=true and rack-profile.yaml declares an accelerator: on at least one node. To deploy "
+          "rack_scale_enabled=true and rack-profile.yaml declares an NVIDIA accelerator: on at least one node. To deploy "
           f"manually on a cluster you trust: MM_ACCEL_RESOURCE={want or '<resource>'} ./model-manager deploy {m.name}")
 
 

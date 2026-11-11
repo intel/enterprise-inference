@@ -38,6 +38,8 @@ UNGATED_VENDOR_PREFERENCE = (r"^(    tolerations:\n)",
                              r"          - weight: 100\n            preference:\n              matchExpressions:\n"
                              r"                - key: gpu-vendor\n                  operator: In\n"
                              r"                  values:\n                    - nvidia\n\1")
+# Only an NVIDIA accelerator in the rack profile sets MM_ACCEL_RESOURCE (vllm-cuda is the only GPU runtime).
+NVIDIA_ONLY = (r"declares an accelerator: on at least one node", "declares an NVIDIA accelerator: on at least one node")
 # --tp without --gpus sets the GPU count too, so a TP 4 pod no longer holds 8 GPUs.
 TP_SETS_GPUS = [(r"^(\[INFO \]    GPUs: )8( x nvidia\.com/gpu)$", r"\g<1>4\2"), (r'^( +nvidia\.com/gpu: )"8"$', r'\1"4"')]
 LLAMA_GPU_READY = [[r"get LLMInferenceService llama-3-1-70b-instruct-cuda -n llm-inference -o json$", 0,
@@ -73,7 +75,7 @@ GPU_CASES = [
     case("gpu-explicit-tp", "deploy", "llama-3-1-70b-instruct-cuda", "--tp", "4", "--dry-run", env=GPU,
          deviations=[BURSTABLE_GPU, *TP_SETS_GPUS]),
     case("gpu-flag-ignored-on-cpu", "deploy", "qwen3-0-6b", "--gpus", "2", "--dry-run", env=BE),
-    case("gpu-gate-refuses", "deploy", "qwen3-0-6b-cuda"),
+    case("gpu-gate-refuses", "deploy", "qwen3-0-6b-cuda", deviations=[NVIDIA_ONLY]),
     case("gpu-bad-count", "deploy", "qwen3-0-6b-cuda", "--gpus", "x", env=GPU),
     case("gpu-deploy-wait", "deploy", "llama-3-1-70b-instruct-cuda", "--wait", env=GPU,
          k8s=GPU_NODES + DOWNLOAD + POOL + LLAMA_GPU_READY,
