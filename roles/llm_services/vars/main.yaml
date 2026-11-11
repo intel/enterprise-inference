@@ -31,6 +31,7 @@ __llm_mm_env_common:
   # (kserve role), at /<namespace>/<model>/v1/...
   MM_AIGATEWAY_ENABLED: "{{ 'true' if auth_type | default('jwt') == 'jwt' and not (cluster_distribution | default('kubernetes') == 'openshift') else 'false' }}"
   MM_PLATFORM: "{{ cluster_distribution | default('kubernetes') }}"
+  MM_KSERVE_NAMESPACE: "{{ kserve_namespace | default('kserve') }}"
   MM_PROMETHEUS_URL: "http://kube-prometheus-stack-prometheus.{{ observability_namespace | default('monitoring') }}.svc.cluster.local:9090"
   MM_EG_GATEWAY_NAME: "{{ gateway_name | default('eg-gateway') }}"
   MM_EG_GATEWAY_NS: "{{ gateway_namespace | default('envoy-gateway-system') }}"

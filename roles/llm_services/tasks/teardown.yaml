@@ -83,25 +83,24 @@
     state: absent
   failed_when: false
 
-# The engine monitors (ServiceMonitor or PodMonitor, per file) live in the observability
-# namespace (observability.yaml), which this layer does not own.
+# The engine monitors live in the observability namespace (observability.yaml), which this layer
+# does not own. Removed by label, so a monitor of an engine taken out of llm_services_engines goes too.
 - name: "llm_services | Check for the Prometheus Operator CRDs"
   kubernetes.core.k8s_info:
     api_version: apiextensions.k8s.io/v1
     kind: CustomResourceDefinition
-    name: servicemonitors.monitoring.coreos.com
-  register: _llm_sm_crd
+    name: "{{ item }}.monitoring.coreos.com"
+  loop: [servicemonitors, podmonitors]
+  register: _llm_monitor_crds
 
 - name: "llm_services | Delete the engine monitors"
-  vars:
-    _llm_monitor: "{{ lookup('file', role_path + '/files/servicemonitors/' + item + '.yaml') | from_yaml }}"
   kubernetes.core.k8s:
     state: absent
-    api_version: "{{ _llm_monitor.apiVersion }}"
-    kind: "{{ _llm_monitor.kind }}"
-    name: "{{ _llm_monitor.metadata.name }}"
+    api_version: monitoring.coreos.com/v1
+    kind: "{{ item.spec.names.kind }}"
     namespace: "{{ observability_namespace | default('monitoring') }}"
-  loop: "{{ llm_services_engines }}"
-  when:
-    - _llm_sm_crd.resources | length > 0
-    - (role_path + '/files/servicemonitors/' + item + '.yaml') is file
+    label_selectors: [inference-engine]
+    delete_all: true
+  loop: "{{ _llm_monitor_crds.results | map(attribute='resources') | flatten }}"
+  loop_control:
+    label: "{{ item.spec.names.kind }}"

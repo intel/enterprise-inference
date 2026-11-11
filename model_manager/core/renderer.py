@@ -135,7 +135,8 @@ def _llmisvc_replicas(m: Model) -> str:
 
 def _isvc_scaling(m: Model) -> tuple[str, str]:
     """(metadata annotations, predictor replica lines): fixed min = max, or the KEDA class plus its
-    trigger (KServe makes the ScaledObject; the threshold applies per replica)."""
+    trigger. KServe's webhook requires target.value; KServe copies only that threshold into the ScaledObject
+    and sets no metric type, so KEDA applies it per replica (AverageValue)."""
     if not m.autoscaled:
         return "", f"    minReplicas: {m.replicas}\n    maxReplicas: {m.replicas}\n"
     server, query = _trigger(m)
@@ -157,7 +158,7 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
             args += ["--chat-template", path]
     common = {
         "MODEL_NAME": m.name, "NAMESPACE": m.namespace, "MODEL_URI": m.uri, "CPU": cpu, "MEMORY": m.memory,
-        "REPLICAS": m.replicas, "ARGS": _list([f"        - {quote(a)}" for a in dedupe_args(args + cli_args)]),
+        "ARGS": _list([f"        - {quote(a)}" for a in dedupe_args(args + cli_args)]),
         "ENV": _env(m, catalog, cli_args, o.env), "NRI_ANNOTATIONS": _annotations(annotations, m.kind),
         "AFFINITY": _affinity(m.node, catalog.require_amx),
         "EXTRA_LABELS": "".join(f"\n    {p.split('=', 1)[0]}: {quote(p.split('=', 1)[1])}" for p in o.label),

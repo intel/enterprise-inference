@@ -336,22 +336,46 @@ def _require_autoscaling(m: Model) -> None:
     if not k8s.succeeds("explain", "--api-version", version, "llminferenceservices.spec.scaling.keda"):
         abort("This cluster's KServe has no KEDA scaling for LLMInferenceService (KServe 0.21+, installed with "
               f"envoy_gateway_upgrade: true); deploy {m.name} with a fixed --replicas.")
+    # KServe uses the KEDA class only in Standard mode; under Knative it validates and ignores autoScaling.
+    mode = _kserve_default_mode() if m.kind == "InferenceService" else ""
+    if mode not in ("", "Standard", "RawDeployment"):
+        abort(f"KServe deploys InferenceServices in {mode} mode, where KEDA autoscaling does not apply; deploy "
+              f"{m.name} with a fixed --replicas.")
+
+
+def _kserve_default_mode() -> str:
+    """KServe's defaultDeploymentMode, or '' when its config can't be read."""
+    namespace = os.environ.get("MM_KSERVE_NAMESPACE") or "kserve"
+    cm = k8s.get_json("configmap", "inferenceservice-config", "-n", namespace)
+    try:
+        return text(pick(json.loads(pick(pick(cm, "data", {}), "deploy", "{}")), "defaultDeploymentMode"))
+    except ValueError:
+        return ""
 
 
 def _drop_stale_autoscaler(m: Model) -> None:
     """KServe keeps the predictor's autoscaler of the previous class when the class changes, and KEDA
     rejects a ScaledObject for a Deployment an HPA manages (kserve#5196). Remove the one this
-    InferenceService owns (see _apply_manifest for when)."""
-    kind = "hpa" if m.autoscaled else "scaledobject.keda.sh"
-    stale = k8s.get_json(kind, f"{m.name}-predictor", "-n", m.namespace) or {}
-    owners = (stale.get("metadata") or {}).get("ownerReferences") or []
+    InferenceService owns (see _apply_manifest for when). Deleted before a failed apply, the HPA is not
+    missed: the model stays on fixed replicas (min = max) and KServe recreates it on its next reconcile."""
+    kind, name = ("hpa" if m.autoscaled else "scaledobject.keda.sh"), f"{m.name}-predictor"
+    r = k8s.run("get", kind, name, "-n", m.namespace, "--ignore-not-found", "-o", "json")
+    if r.returncode:  # no such resource type (KEDA not installed) means there is nothing to remove
+        if r.stderr.strip() and "doesn't have a resource type" not in r.stderr:
+            warn(f"Could not check for a previous autoscaler {kind}/{name} ({r.stderr.strip()}): if {m.name} "
+                 "stays Not Ready on a ScaledObject webhook error, run: "
+                 f"kubectl delete {kind} {name} -n {m.namespace}")
+        return
+    try:
+        owners = (json.loads(r.stdout or "{}").get("metadata") or {}).get("ownerReferences") or []
+    except ValueError:
+        return
     if any(o.get("kind") == "InferenceService" and o.get("name") == m.name for o in owners):
-        info(f"Removing the previous autoscaler {kind}/{m.name}-predictor")
-        r = k8s.run("delete", kind, f"{m.name}-predictor", "-n", m.namespace, "--ignore-not-found")
+        info(f"Removing the previous autoscaler {kind}/{name}")
+        r = k8s.run("delete", kind, name, "-n", m.namespace, "--ignore-not-found")
         if r.returncode:
-            warn(f"Could not remove {kind}/{m.name}-predictor ({r.stderr.strip()}): KServe cannot switch "
-                 f"{m.name} to the new autoscaler until it is gone. Run: kubectl delete {kind} "
-                 f"{m.name}-predictor -n {m.namespace}")
+            warn(f"Could not remove {kind}/{name} ({r.stderr.strip()}): KServe cannot switch {m.name} to the new "
+                 f"autoscaler until it is gone. Run: kubectl delete {kind} {name} -n {m.namespace}")
 
 
 def _apply_manifest(m: Model, manifest: str, changed: bool) -> None:

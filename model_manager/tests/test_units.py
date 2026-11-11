@@ -883,3 +883,51 @@ def test_failed_autoscaler_removal_is_reported(monkeypatch, capsys):
                                      min_replicas="1", max_replicas="3"))
     err = capsys.readouterr().err
     assert "Could not remove hpa/m-predictor (forbidden)" in err and "kubectl delete hpa m-predictor -n ns" in err
+
+
+@pytest.mark.parametrize("deploy_cfg, aborts", [
+    ('{"defaultDeploymentMode": "Knative"}', True),  # KServe validates and then ignores autoScaling there
+    ('{"defaultDeploymentMode": "Standard"}', False),
+    (None, False),                                    # config unreadable: do not block
+])
+def test_isvc_autoscaling_needs_standard_mode(monkeypatch, deploy_cfg, aborts):
+    def run(*args, stdin=None):
+        if args[:2] == ("get", "configmap"):
+            if deploy_cfg is None:
+                return subprocess.CompletedProcess(args, 1, "", "Forbidden")
+            return subprocess.CompletedProcess(args, 0, json.dumps({"data": {"deploy": deploy_cfg}}), "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+    monkeypatch.setattr(k8s, "run", run)
+    m = Model(name="m", namespace="n", kind="InferenceService", min_replicas="1", max_replicas="3")
+    if aborts:
+        with pytest.raises(SystemExit):
+            cli._require_autoscaling(m)
+    else:
+        cli._require_autoscaling(m)
+
+
+@pytest.mark.parametrize("stderr, warned", [
+    ('error: the server doesn\'t have a resource type "scaledobject"', False),  # KEDA not installed
+    ("Error from server (Forbidden): forbidden", True),
+])
+def test_unreadable_previous_autoscaler_is_reported(monkeypatch, capsys, stderr, warned):
+    calls = []
+
+    def run(*args, stdin=None):
+        calls.append(args[0])
+        return subprocess.CompletedProcess(args, 1, "", stderr)
+    monkeypatch.setattr(k8s, "run", run)
+    cli._drop_stale_autoscaler(Model(name="m", namespace="ns", kind="InferenceService"))
+    assert calls == ["get"]  # nothing deleted blindly
+    assert ("Could not check for a previous autoscaler" in capsys.readouterr().err) == warned
+
+
+def test_missing_previous_autoscaler_is_silent(monkeypatch, capsys):
+    calls = []
+
+    def run(*args, stdin=None):  # --ignore-not-found: rc 0, empty output
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+    monkeypatch.setattr(k8s, "run", run)
+    cli._drop_stale_autoscaler(Model(name="m", namespace="ns", kind="InferenceService"))
+    assert "--ignore-not-found" in calls[0] and len(calls) == 1 and not capsys.readouterr().err
