@@ -224,6 +224,11 @@ def test_gpu_preflight_skips_when_the_cluster_cannot_be_read(monkeypatch):
     assert policy.GpuRuntime().preflight(Model(**GPU_MODEL, gpus="1"), 1) == []
 
 
+def test_cli_tp_wins_over_an_arg_tp():
+    assert cli._engine_cli_args(cli.Options(tp="2", arg=["--tensor-parallel-size", "8"]), 2) == (
+        ["--tensor-parallel-size", "8", "--tensor-parallel-size", "2"], 2)
+
+
 def test_catalog_tensor_parallel_is_read_on_one_gpu_and_the_last_wins():
     assert cli._engine_cli_args(cli.Options(), 1, ("--tensor-parallel-size", "2")) == ([], 2)
     assert cli._engine_cli_args(cli.Options(), 4, ("--tensor-parallel-size", "2", "--tensor-parallel-size=8")) == ([], 8)

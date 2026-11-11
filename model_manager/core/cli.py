@@ -207,10 +207,8 @@ def _engine_cli_args(o: Options, gpus: int = 1, catalog_args: tuple[str, ...] = 
     A multi-GPU pod defaults to tensor parallelism across all its GPUs, unless the catalog's args
     (category, version, model) already set it: the CLI args render last and would override them."""
     args = list(o.arg)
-    if o.tp:
-        if "--tensor-parallel-size" not in args:
-            args += ["--tensor-parallel-size", o.tp]
-        return args, int(o.tp)
+    if o.tp:  # appended last, so it wins over any --arg --tensor-parallel-size (vLLM is last-wins)
+        return args + ["--tensor-parallel-size", o.tp], int(o.tp)
     tp = _tp_in(args)
     if tp is not None:
         return args, tp

@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+from typing import Any
 
 from . import k8s, nri_policy
 from .config import Model, is_uint, pick, text, truthy
@@ -221,7 +222,7 @@ class GpuRuntime(BestEffort):
 POLICIES = {p.name: p for p in (NriBalloons, KubeletStatic, BestEffort)}
 
 
-def _quantity(value) -> int:
+def _quantity(value: Any) -> int:
     """A whole-number extended-resource quantity (GPUs); 0 when absent or unparseable."""
     return int(text(value)) if is_uint(text(value)) else 0
 
