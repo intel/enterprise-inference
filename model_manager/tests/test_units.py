@@ -694,7 +694,11 @@ def test_autoscaling_limited_to_vllm_on_kubernetes(monkeypatch, model, env):
 @pytest.mark.parametrize("crd, explain, aborts", [(False, True, True), (True, False, True), (True, True, False)])
 def test_autoscaling_needs_keda_and_a_kserve_with_keda_scaling(monkeypatch, crd, explain, aborts):
     # KServe 0.18's LLMInferenceService has spec.scaling.wva only: the apply would fail on spec.scaling.keda.
+    monkeypatch.setenv("MM_LLMISVC_API_VERSION", "v1alpha1")
+    calls = []
+
     def run(*args, stdin=None):
+        calls.append(args)
         ok = crd if args[0] == "get" else explain
         return subprocess.CompletedProcess(args, 0 if ok else 1, "", "" if ok else "error")
     monkeypatch.setattr(k8s, "run", run)
@@ -704,6 +708,8 @@ def test_autoscaling_needs_keda_and_a_kserve_with_keda_scaling(monkeypatch, crd,
             cli._require_autoscaling(m)
     else:
         cli._require_autoscaling(m)
+    explained = [c for c in calls if c[0] == "explain"]
+    assert not crd or explained[0][:3] == ("explain", "--api-version", "serving.kserve.io/v1alpha1")
 
 
 def test_list_shows_the_autoscaling_range():
@@ -739,6 +745,27 @@ def test_missing_keda_aborts_before_any_change(deploy_env):
     assert not any(a[0] in ("apply", "create", "delete") for a in deploy_env)
 
 
+@pytest.mark.parametrize("scaling_only", [True, False])
+def test_changed_spec_is_applied_with_or_without_the_preflight(deploy_env, monkeypatch, scaling_only):
+    # A scaling-only change skips the capacity pre-flight but must still apply the new range.
+    steps = []
+    monkeypatch.setattr(k8s, "succeeds", lambda *a: True)  # deployed; the diff (rc 1) reports a change
+    monkeypatch.setattr(cli, "_require_autoscaling", lambda m: None)
+    monkeypatch.setattr(cli, "_only_scaling_changed", lambda *a: scaling_only)
+    monkeypatch.setattr(cli, "preflight_gate", lambda *a: steps.append("preflight"))
+    monkeypatch.setattr(cli, "warn_max_unplaceable", lambda *a: steps.append("max check"))
+    monkeypatch.setattr(k8s, "ensure_storage", lambda *a: steps.append("storage"))
+    monkeypatch.setattr(cli, "download_weights", lambda *a: steps.append("download"))
+    monkeypatch.setattr(cli, "_install_runtime", lambda m: None)
+    monkeypatch.setattr(k8s, "apply", lambda manifest, ssa: steps.append("apply"))
+    monkeypatch.setattr(routing, "register", lambda m: None)
+    monkeypatch.setattr(routing, "print_endpoints", lambda m: None)
+    monkeypatch.setattr(cli, "_wait_ready", lambda m, t: False)
+    cli.deploy(cli.parse_args(["deploy", "qwen3-0-6b", "--max-replicas", "3", "--wait"]), "qwen3-0-6b")
+    gate = [] if scaling_only else ["preflight", "max check"]
+    assert steps == gate + ["storage", "download", "apply"]
+
+
 @pytest.mark.parametrize("fits_max, warned", [(True, False), (False, True)])
 def test_max_replicas_only_warns(capsys, fits_max, warned):
     class Policy:
@@ -771,3 +798,29 @@ def test_nri_max_shortfall_reported_in_warn_mode(monkeypatch, capsys):
     assert policy.NriBalloons().preflight(m, 1) == []
     policy.warn_max_unplaceable(policy.NriBalloons(), m, 1)
     assert "do not all fit now (no room)" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("live_spec, diff_rc, want", [
+    ({"replicas": 1}, 0, True),   # only the replica count / autoscaling range differs
+    ({"replicas": 1}, 1, False),  # something else changed too: the pods roll
+    (None, 0, False),             # nothing live yet
+])
+def test_only_scaling_changed(monkeypatch, live_spec, diff_rc, want):
+    # The capacity pre-flight counts the running pods against themselves, so a scaling-only change skips it.
+    monkeypatch.setenv("MM_PLATFORM", "kubernetes")
+    o = cli.parse_args(["deploy", "qwen3-0-6b", "--max-replicas", "4"])
+    cat = Catalog(cli.MM_DIR / "models.yaml")
+    m = config.resolve(cat, "qwen3-0-6b", o)
+    config.resolve_autoscaling(m, o)
+    diffed = []
+
+    def run(*args, stdin=None):
+        if args[0] == "get":
+            body = json.dumps({"spec": live_spec}) if live_spec else ""
+            return subprocess.CompletedProcess(args, 0 if live_spec else 1, body, "")
+        diffed.append(stdin)
+        return subprocess.CompletedProcess(args, diff_rc, "", "")
+    monkeypatch.setattr(k8s, "run", run)
+    assert cli._only_scaling_changed(m, cat, o, {}, m.cpu, []) == want
+    if live_spec:  # compared with the live replica count, not the new range
+        assert "  replicas: 1\n" in diffed[0] and "scaling:" not in diffed[0]

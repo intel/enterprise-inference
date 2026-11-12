@@ -96,9 +96,14 @@ def adapt(manifest: str) -> str:
     return _PINNED_ID.sub("", manifest) if is_openshift() else manifest
 
 
+def llmisvc_api_version() -> str:
+    """The LLMInferenceService version detect() chose (v1alpha2 when it has not run, as in a --dry-run test)."""
+    return os.environ.get("MM_LLMISVC_API_VERSION", "v1alpha2")
+
+
 def adapt_llmisvc(manifest: str) -> str:
     """Fit a rendered LLMInferenceService to the API version the cluster serves and to OpenShift AI."""
-    version = os.environ.get("MM_LLMISVC_API_VERSION", "v1alpha2")
+    version = llmisvc_api_version()
     if version == "v1alpha2" and not is_openshift():
         return manifest
     doc = yaml.safe_load(manifest)

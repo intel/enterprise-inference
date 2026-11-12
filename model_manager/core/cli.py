@@ -1,6 +1,7 @@
 """model-manager CLI: deploy, undeploy, list and cpu-collisions-check."""
 from __future__ import annotations
 
+import dataclasses
 import fcntl
 import json
 import os
@@ -331,10 +332,30 @@ def _require_autoscaling(m: Model) -> None:
         abort("Autoscaling needs KEDA, which is not installed: set keda_enabled: true in global_config.yaml and "
               "install the platform layer, or deploy with a fixed --replicas.")
     # kubectl explain reads the API schema through discovery, which needs no RBAC on CRDs.
-    version = f"serving.kserve.io/{os.environ.get('MM_LLMISVC_API_VERSION') or 'v1alpha2'}"
+    version = f"serving.kserve.io/{platform.llmisvc_api_version()}"
     if not k8s.succeeds("explain", "--api-version", version, "llminferenceservices.spec.scaling.keda"):
         abort("This cluster's KServe has no KEDA scaling for LLMInferenceService (KServe 0.21+, installed with "
               f"envoy_gateway_upgrade: true); deploy {m.name} with a fixed --replicas.")
+
+
+def _only_scaling_changed(m: Model, catalog: Catalog, o: Options, annotations: dict, cpu: str,
+                          cli_args: list[str]) -> bool:
+    """Whether m differs from the live object only in its replica count or autoscaling range. The running pods
+    then stay, and the capacity pre-flight, which counts them against themselves, does not apply."""
+    spec = (k8s.get_json(m.kind, m.name, "-n", m.namespace) or {}).get("spec") or {}
+    if not spec:
+        return False
+    if m.kind == "LLMInferenceService":
+        scaling = spec.get("scaling") or {}
+        trigger = (((scaling.get("keda") or {}).get("triggers") or [{}])[0].get("metadata") or {})
+        live = dataclasses.replace(m, replicas=text(spec.get("replicas", m.replicas)),
+                                   min_replicas=text(scaling.get("minReplicas", "")) if scaling else "",
+                                   max_replicas=text(scaling.get("maxReplicas", "")) if scaling else "",
+                                   scale_target=text(trigger.get("threshold", "")) if scaling else "")
+    else:
+        live = dataclasses.replace(m, replicas=text((spec.get("predictor") or {}).get("minReplicas", m.replicas)))
+    same = renderer.manifest(live, catalog, o, annotations, cpu, cli_args)
+    return k8s.run("diff", *k8s.SSA, "-f", "-", stdin=same).returncode == 0
 
 
 def deploy(o: Options, target: str) -> None:
@@ -363,8 +384,8 @@ def deploy(o: Options, target: str) -> None:
         _require_autoscaling(m)
 
     # Unchanged spec: skip pre-flight and apply (the running pods would count against their own cores).
-    action = "apply"
-    if not truthy(os.environ.get("MM_FORCE_REDEPLOY", "")) and k8s.succeeds("get", m.kind, m.name, "-n", m.namespace):
+    action, live = "apply", k8s.succeeds("get", m.kind, m.name, "-n", m.namespace)
+    if not truthy(os.environ.get("MM_FORCE_REDEPLOY", "")) and live:
         rc = k8s.run("diff", *k8s.SSA, "-f", "-", stdin=manifest).returncode
         if rc == 0:
             action = "skip"
@@ -379,9 +400,13 @@ def deploy(o: Options, target: str) -> None:
     if renderer.inline_chat_template(m):
         _apply_chat_template(m)
     if action == "apply":
-        preflight_gate(policy, m, tp)
-        if m.autoscaled:
-            warn_max_unplaceable(policy, m, tp)
+        if live and _only_scaling_changed(m, catalog, o, annotations, cpu, cli_args):
+            info("  Only the replica count or autoscaling changed: the running pods stay, so the capacity pre-flight "
+                 "is skipped (new replicas that don't fit stay Pending).")
+        else:
+            preflight_gate(policy, m, tp)
+            if m.autoscaled:
+                warn_max_unplaceable(policy, m, tp)
         k8s.ensure_storage(m.namespace, catalog.pvc)
         download_weights(m, catalog, cli_args)
         _install_runtime(m)
