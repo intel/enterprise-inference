@@ -69,7 +69,7 @@ HFID = (r"or --id <hf/repo>", "or --hfid <hf/repo>")
 HELP_SCALING = [
     (r"^  --replicas N         Replica count \(default: 1\)$",
      "  --replicas N         Fixed replica count (default: 1); turns autoscaling off\n"
-     "  --min-replicas N     Autoscaling (KEDA, vLLM): fewest replicas (default: 1)\n"
+     "  --min-replicas N     Autoscaling (KEDA): fewest replicas (default: 1)\n"
      "  --max-replicas N     Autoscaling: most replicas; above --min-replicas turns it on\n"
      "  --scale-target N     Autoscaling: per-replica load that triggers a scale-up\n"
      "                            (vLLM: waiting requests, default 2; OVMS: in-flight requests, default 4)"),

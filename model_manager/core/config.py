@@ -183,6 +183,11 @@ class Model:
         return pick(self.rt, "container", {})
 
     @property
+    def run_as_user(self) -> str:
+        """The serving container's user, which also owns the downloaded files so it can read them."""
+        return text(pick(self.container, "run_as_user", 1000))
+
+    @property
     def cat(self) -> dict:
         return pick(pick(self.rt, "categories", {}), self.category or "llm", {})
 

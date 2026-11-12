@@ -6,6 +6,7 @@ import json
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 from . import platform
 from .config import Catalog, Model, gateway_ref, mm_path, pick, text
@@ -142,7 +143,7 @@ def live_scaling(m: Model, spec: dict) -> Model:
                                scale_target=text(pick(pick(trigger, "metadata", {}), "threshold")))
 
 
-def _fill(value, m: Model) -> str:
+def _fill(value: Any, m: Model) -> str:
     return text(value).replace("$model", m.name)
 
 
@@ -152,12 +153,7 @@ def _engine(m: Model) -> dict:
     command = [_fill(a, m) for a in pick(c, "command", [])]
     return {"COMMAND": f"        command: {json.dumps(command)}\n" if command else "",
             "READY_PATH": _fill(pick(c, "ready_path", "/health"), m),
-            "LIVE_PATH": _fill(pick(c, "live_path", "/health"), m), "RUN_AS": run_as_user(m)}
-
-
-def run_as_user(m: Model) -> str:
-    """The serving container's user, which also owns the downloaded files so it can read them."""
-    return text(pick(m.container, "run_as_user", 1000))
+            "LIVE_PATH": _fill(pick(c, "live_path", "/health"), m), "RUN_AS": m.run_as_user}
 
 
 def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_args: list[str]) -> str:

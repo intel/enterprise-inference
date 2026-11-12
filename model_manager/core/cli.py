@@ -40,7 +40,7 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
   {GREEN}--cpu{RESET} N              CPU cores
   {GREEN}--memory{RESET} NGi         Memory (e.g. 32Gi)
   {GREEN}--replicas{RESET} N         Fixed replica count (default: 1); turns autoscaling off
-  {GREEN}--min-replicas{RESET} N     Autoscaling (KEDA, vLLM): fewest replicas (default: 1)
+  {GREEN}--min-replicas{RESET} N     Autoscaling (KEDA): fewest replicas (default: 1)
   {GREEN}--max-replicas{RESET} N     Autoscaling: most replicas; above --min-replicas turns it on
   {GREEN}--scale-target{RESET} N     Autoscaling: per-replica load that triggers a scale-up
                             (vLLM: waiting requests, default 2; OVMS: in-flight requests, default 4)
@@ -363,7 +363,7 @@ def deploy(o: Options, target: str) -> None:
     info(f"Deploying {m.name} ({m.kind})")
     info(f"  Runtime: {m.runtime}{f' @ {m.version}' if m.version else ''} | Category: {m.category} | "
          f"Routing: {m.routing or 'default'}")
-    replicas = (f"{m.min_replicas}-{m.max_replicas} (autoscaled on waiting requests > {m.scale_target}/replica)"
+    replicas = (f"{m.min_replicas}-{m.max_replicas} (autoscaled, target {m.scale_target} per replica)"
                 if m.autoscaled else m.replicas)
     info(f"  CPU: {m.cpu} | Memory: {m.memory} | Replicas: {replicas}")
     if m.node:
@@ -481,15 +481,13 @@ def _live_routing(name: str, namespace: str) -> str:
     return "epp"
 
 
-OTHER_KIND = {"LLMInferenceService": "InferenceService", "InferenceService": "LLMInferenceService"}
-
-
 def _retire_other_kind(m: Model) -> None:
-    """A runtime that changed kind (OVMS: InferenceService -> LLMInferenceService) leaves the model's
-    old object behind. Remove it and its routes, when model-manager created it."""
-    other = OTHER_KIND.get(m.kind)
+    """A runtime that moved to LLMInferenceService (OVMS) leaves the model's InferenceService behind.
+    Remove it and its routes, when model-manager created it."""
+    other = "InferenceService"
     label = "jsonpath={.metadata.labels.app\\.kubernetes\\.io/managed-by}"
-    if not other or k8s.out("get", other, m.name, "-n", m.namespace, "-o", label) != "model-manager":
+    if m.kind != "LLMInferenceService" or \
+            k8s.out("get", other, m.name, "-n", m.namespace, "-o", label) != "model-manager":
         return
     info(f"Removing the previous {other}/{m.name}: it now deploys as an {m.kind}")
     old = Model(name=m.name, namespace=m.namespace, kind=other, routing=_live_routing(m.name, m.namespace))
@@ -509,10 +507,10 @@ def undeploy(o: Options, target: str) -> None:
     if m is None:
         abort(f"No catalog entry or deployed resource named '{target}' found.")
     info(f"Undeploying {m.name}")
+    _retire_other_kind(m)  # first: it reads the old routes to know which to delete
     k8s.delete(m.kind, m.name, m.namespace)
     k8s.delete("configmap", f"{m.name}-chat-template", m.namespace, quiet=True)
     routing.deregister(m)
-    _retire_other_kind(m)
     routing.litellm_deregister(m.name)
     if not o.wait:
         return ok(f"{m.name} undeployed")

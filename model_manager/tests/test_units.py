@@ -958,10 +958,9 @@ def test_servers_sorted_default_is_an_llmisvc():
 
 
 def test_files_belong_to_the_serving_user():
-    from core import renderer
     cat = Catalog(cli.MM_DIR / "models.yaml")
-    assert renderer.run_as_user(config.resolve(cat, "qwen3-5-2b-ovms", cli.Options())) == "5000"
-    assert renderer.run_as_user(config.resolve(cat, "qwen3-0-6b", cli.Options())) == "1000"
+    assert config.resolve(cat, "qwen3-5-2b-ovms", cli.Options()).run_as_user == "5000"
+    assert config.resolve(cat, "qwen3-0-6b", cli.Options()).run_as_user == "1000"
 
 
 def test_vllm_only_features_rejected_for_ovms(monkeypatch, tmp_path):
@@ -1001,3 +1000,40 @@ def test_previous_kind_retired(monkeypatch, owner, retired):
     want = ["delete aigatewayroute aigw-m", "delete aiservicebackend m", "delete backend m",
             "delete InferenceService m"]
     assert deleted == (want if retired else [])
+
+
+def test_undeploy_after_an_upgrade_removes_the_old_routes(monkeypatch):
+    # Upgrade, then undeploy with no deploy in between: the InferenceService's direct-route objects go too.
+    for k, v in {"MM_CONFIG": str(cli.MM_DIR / "models.yaml"), "MM_AIGATEWAY_ENABLED": "true",
+                 "MM_AI_GATEWAY_PROVIDER": "envoy", "MM_LITELLM_ENABLED": "false", "MM_PLATFORM": "kubernetes"}.items():
+        monkeypatch.setenv(k, v)
+    deleted, gone = [], set()
+
+    def run(*args, stdin=None):
+        if args[0] == "delete":
+            deleted.append(" ".join(args[1:3])); gone.add(args[1:3])
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:2] == ("get", "InferenceService") and ("InferenceService", "qwen3-5-2b-ovms") not in gone:
+            return subprocess.CompletedProcess(args, 0, "model-manager", "")
+        old = args[1:3] in (("aigatewayroute", "aigw-qwen3-5-2b-ovms"), ("aiservicebackend", "qwen3-5-2b-ovms"))
+        return subprocess.CompletedProcess(args, 0 if old and args[1:3] not in gone else 1, "", "")
+    monkeypatch.setattr(k8s, "run", run)
+    cli.undeploy(cli.parse_args(["undeploy", "qwen3-5-2b-ovms"]), "qwen3-5-2b-ovms")
+    for obj in ("aiservicebackend qwen3-5-2b-ovms", "backend qwen3-5-2b-ovms", "InferenceService qwen3-5-2b-ovms",
+                "LLMInferenceService qwen3-5-2b-ovms"):
+        assert obj in deleted, (obj, deleted)
+
+
+def test_runtime_without_a_signal_is_rejected(monkeypatch, tmp_path):
+    catalog = tmp_path / "models.yaml"
+    catalog.write_text((cli.MM_DIR / "models.yaml").read_text().replace(
+        "  openvino:\n", "  openvino:\n    autoscaling: {query: \"\"}\n", 1))
+    with pytest.raises(SystemExit):
+        _render(monkeypatch, "qwen3-5-2b-ovms", "--max-replicas", "3", catalog=catalog)
+
+
+def test_only_llmisvc_models_retire_an_old_kind(monkeypatch):
+    calls = []
+    monkeypatch.setattr(k8s, "run", lambda *a, stdin=None: calls.append(a) or subprocess.CompletedProcess(a, 1, "", ""))
+    cli._retire_other_kind(Model(name="m", namespace="ns", kind="InferenceService"))
+    assert calls == []  # no lookup: nothing moves the other way
