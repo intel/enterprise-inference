@@ -64,8 +64,7 @@
       kind: Namespace
       metadata:
         name: "{{ envoy_ai_gateway_namespace }}"
-        labels:
-          istio.io/dataplane-mode: "ambient"
+        labels: "{{ istio_namespace_labels | default({'istio.io/dataplane-mode': 'ambient'}) }}"
   when: istio_enabled | default(false) | bool
 
 # Host-network apiserver (no mesh identity) can't reach the AI-gateway controller's
@@ -188,8 +187,7 @@
       kind: Namespace
       metadata:
         name: "{{ ai_gateway_namespace }}"
-        labels:
-          istio.io/dataplane-mode: "ambient"
+        labels: "{{ istio_namespace_labels | default({'istio.io/dataplane-mode': 'ambient'}) }}"
   when:
     - ai_gateway_create | bool
     - istio_enabled | default(false) | bool
