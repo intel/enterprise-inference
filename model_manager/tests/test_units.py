@@ -804,6 +804,20 @@ def test_max_check_credits_the_running_replicas(capsys, running, checked):
     assert ("beyond the 3 running (up to 4)" in err) == (running == 3)
 
 
+def test_running_replicas_counts_pods_holding_cpus(monkeypatch):
+    # As NRI counts cores in use: on a node and Running/Pending; unscheduled and finished pods hold none.
+    pods = {"items": [{"spec": {"nodeName": "w1"}, "status": {"phase": "Running"}},
+                      {"spec": {"nodeName": "w1"}, "status": {"phase": "Pending"}},
+                      {"spec": {}, "status": {"phase": "Pending"}},
+                      {"spec": {"nodeName": "w1"}, "status": {"phase": "Failed"}}]}
+    asked = []
+    monkeypatch.setattr(k8s, "get_json", lambda *a: asked.append(a) or pods)
+    assert cli._running_replicas(Model(name="m", namespace="n", kind="LLMInferenceService")) == 2
+    assert asked[0][-1] == "app.kubernetes.io/name=m,kserve.io/component=workload"
+    monkeypatch.setattr(k8s, "get_json", lambda *a: None)
+    assert cli._running_replicas(Model(name="m", namespace="n")) == 0
+
+
 def test_no_schedulable_node_is_a_shortfall():
     assert "the schedulable nodes fit 0" in policy._replica_shortfall([], 8, 3)  # every node tainted NoSchedule
     assert policy._replica_shortfall(None, 8, 3) == ""  # nodes could not be read

@@ -338,10 +338,12 @@ def _require_autoscaling(m: Model) -> None:
 
 
 def _running_replicas(m: Model) -> int:
-    """Workload pods of m that exist now, and so already hold their CPUs."""
+    """Workload pods of m that hold their CPUs: on a node and Running or Pending, as NRI counts cores in use."""
     selector = (f"serving.kserve.io/inferenceservice={m.name}" if m.kind == "InferenceService"
                 else f"app.kubernetes.io/name={m.name},kserve.io/component=workload")
-    return len(k8s.out("get", "pods", "-n", m.namespace, "-l", selector, "-o", "name").split())
+    pods = pick(k8s.get_json("pods", "-n", m.namespace, "-l", selector), "items", [])
+    return sum(1 for p in pods if pick(pick(p, "spec", {}), "nodeName")
+               and pick(pick(p, "status", {}), "phase") in ("Running", "Pending"))
 
 
 def _only_scaling_changed(m: Model, render) -> bool:
