@@ -266,12 +266,17 @@ def test_empty_host_does_not_resolve():
 
 
 @pytest.mark.parametrize("current, applied", [("", True), ("img:new", False), ("img:old", True)])
-def test_runtime_installed_or_updated_on_image_change(monkeypatch, current, applied):
+def test_runtime_installed_or_updated_on_image_change(monkeypatch, tmp_path, current, applied):
     calls = []
+    (tmp_path / "isvc").mkdir()
+    (tmp_path / "isvc" / "serving-runtime.yaml").write_text(
+        "apiVersion: serving.kserve.io/v1alpha1\nkind: ClusterServingRuntime\nmetadata:\n  name: isvc-runtime\n"
+        "spec:\n  containers:\n    - name: kserve-container\n      image: {{RUNTIME_IMAGE}}\n")
+    monkeypatch.setenv("MM_RUNTIMES", str(tmp_path))
     monkeypatch.setattr(k8s, "out", lambda *a: current)
     monkeypatch.setattr(k8s, "apply", lambda manifest, **kw: calls.append(manifest))
-    m = Model(name="m", namespace="n", kind="InferenceService", runtime="openvino", runtime_image="img:new",
-              rt={"serving_runtime_manifest": "openvino/serving-runtime.yaml", "runtime_name": "openvino-runtime"})
+    m = Model(name="m", namespace="n", kind="InferenceService", runtime="isvc", runtime_image="img:new",
+              rt={"runtime_name": "isvc-runtime"})
     cli._install_runtime(m)
     assert bool(calls) == applied
     assert all("image: img:new" in c for c in calls)
@@ -407,7 +412,11 @@ def test_list_without_cluster_shows_unknown_status(cluster, capsys):
     assert re.search(r"^tmpl-inline .* \?$", out, re.M) and "Deployed" not in out
 
 
-def test_list_marks_unlisted_kind_unknown(cluster, capsys):
+def test_list_marks_unlisted_kind_unknown(cluster, capsys, monkeypatch, tmp_path):
+    catalog = tmp_path / "models.yaml"
+    catalog.write_text(FIXTURE_CATALOG.read_text().replace(
+        "  - name: multi\n", "  - name: multi\n    kind: InferenceService\n", 1))
+    monkeypatch.setenv("MM_CONFIG", str(catalog))
     cluster["failing"] = {"LLMInferenceService"}
     cli.list_models(cli.Options(), "")
     out, err = capsys.readouterr()
@@ -682,11 +691,15 @@ def test_bad_autoscaling_rejected(monkeypatch, argv):
         _render(monkeypatch, "qwen3-0-6b", *argv)
 
 
-@pytest.mark.parametrize("model, env", [("qwen3-5-2b-ovms", "kubernetes"), ("qwen3-0-6b", "openshift")])
-def test_autoscaling_limited_to_vllm_on_kubernetes(monkeypatch, model, env):
+@pytest.mark.parametrize("kind, env", [("InferenceService", "kubernetes"), ("", "openshift")])
+def test_autoscaling_needs_llmisvc_on_kubernetes(monkeypatch, tmp_path, kind, env):
+    catalog = tmp_path / "models.yaml"
+    text = (cli.MM_DIR / "models.yaml").read_text()
+    catalog.write_text(re.sub(r"^(  - name: qwen3-0-6b\b.*\n)", r"\g<1>" + (f"    kind: {kind}\n" if kind else ""),
+                              text, count=1, flags=re.MULTILINE))
     monkeypatch.setenv("MM_PLATFORM", env)
-    o = cli.parse_args(["deploy", model, "--max-replicas", "3"])
-    m = config.resolve(Catalog(cli.MM_DIR / "models.yaml"), model, o)  # undeploy resolves too: no checks here
+    o = cli.parse_args(["deploy", "qwen3-0-6b", "--max-replicas", "3"])
+    m = config.resolve(Catalog(catalog), "qwen3-0-6b", o)  # undeploy resolves too: no checks here
     with pytest.raises(SystemExit):
         config.resolve_autoscaling(m, o)
 
@@ -897,3 +910,94 @@ def test_only_scaling_changed(monkeypatch, diff_rc, want):
 def test_only_scaling_changed_needs_a_live_spec(monkeypatch):
     monkeypatch.setattr(k8s, "get_json", lambda *a: None)
     assert cli._only_scaling_changed(Model(name="m", namespace="n"), lambda model: "") is False
+
+
+# ── OVMS as an LLMInferenceService (the runtime's own container) ─────────────
+
+def _main(doc):
+    return doc["spec"]["template"]["containers"][0]
+
+
+def test_ovms_renders_an_llmisvc_with_its_own_container(monkeypatch):
+    m, doc = _render(monkeypatch, "qwen3-5-2b-ovms")
+    main = _main(doc)
+    assert doc["kind"] == "LLMInferenceService" and m.routing == "epp" and doc["spec"]["replicas"] == 1
+    assert doc["spec"]["router"]["scheduler"] == {}  # KServe's scheduler routes each request
+    assert main["image"] == "openvino/model_server:2026.4.1" and main["command"] == ["/ovms/bin/ovms"]
+    assert main["args"][:7] == ["--config_path", "/mnt/models/config_all.json", "--rest_port", "8000", "--port",
+                                "9000", "--metrics_enable"]
+    assert "--served-model-name" not in main["args"]  # a vLLM flag
+    # Ready once the graph is loaded, not when the REST port opens.
+    for probe in ("startupProbe", "readinessProbe"):
+        assert main[probe]["httpGet"] == {"path": "/v2/models/qwen3-5-2b-ovms/ready", "port": 8000}
+    assert main["livenessProbe"]["httpGet"]["path"] == "/v2/health/live"
+    assert (main["securityContext"]["runAsUser"], main["securityContext"]["runAsGroup"]) == (5000, 5000)
+
+
+def test_vllm_keeps_kserves_container(monkeypatch):
+    _, doc = _render(monkeypatch, "qwen3-0-6b")
+    main = _main(doc)
+    assert "command" not in main and "--served-model-name" in main["args"]
+    assert {main[p]["httpGet"]["path"] for p in ("startupProbe", "readinessProbe", "livenessProbe")} == {"/health"}
+    assert main["securityContext"]["runAsUser"] == 1000
+
+
+def test_ovms_autoscaling_uses_its_signal(monkeypatch):
+    monkeypatch.setenv("MM_PROMETHEUS_URL", "http://prom:9090")
+    m, doc = _render(monkeypatch, "qwen3-5-2b-ovms", "--max-replicas", "3")
+    assert "replicas" not in doc["spec"] and m.scale_target == "4"  # the runtime's default
+    assert doc["spec"]["scaling"]["keda"]["triggers"][0]["metadata"] == {
+        "serverAddress": "http://prom:9090", "threshold": "4",
+        "query": 'sum(ovms_current_graphs{namespace="llm-inference",model="qwen3-5-2b-ovms"})'}
+
+
+def test_servers_sorted_default_is_an_llmisvc():
+    # was the fx-servers-sorted-default parity case: no default_server picks the first server by name
+    m = config.resolve(Catalog(FIXTURE_CATALOG), "multi", cli.Options())
+    assert (m.runtime, m.kind) == ("openvino", "LLMInferenceService")
+
+
+def test_files_belong_to_the_serving_user():
+    from core import renderer
+    cat = Catalog(cli.MM_DIR / "models.yaml")
+    assert renderer.run_as_user(config.resolve(cat, "qwen3-5-2b-ovms", cli.Options())) == "5000"
+    assert renderer.run_as_user(config.resolve(cat, "qwen3-0-6b", cli.Options())) == "1000"
+
+
+def test_vllm_only_features_rejected_for_ovms(monkeypatch, tmp_path):
+    catalog = tmp_path / "models.yaml"
+    catalog.write_text((cli.MM_DIR / "models.yaml").read_text().replace(
+        "  - name: qwen3-5-2b-ovms\n", "  - name: qwen3-5-2b-ovms\n    chat_template: '{{ messages }}'\n", 1))
+    with pytest.raises(SystemExit):
+        _render(monkeypatch, "qwen3-5-2b-ovms", catalog=catalog)
+
+
+def test_ovms_not_on_openshift(monkeypatch):
+    from core import renderer
+    o = cli.parse_args(["deploy", "qwen3-5-2b-ovms"])
+    cat = Catalog(cli.MM_DIR / "models.yaml")
+    m = config.resolve(cat, "qwen3-5-2b-ovms", o)
+    monkeypatch.setenv("MM_PLATFORM", "openshift")
+    with pytest.raises(SystemExit):  # OpenShift AI's template starts vLLM itself
+        renderer.manifest(m, cat, o, {}, m.cpu, [])
+
+
+@pytest.mark.parametrize("owner, retired", [("model-manager", True), ("someone-else", False), ("", False)])
+def test_previous_kind_retired(monkeypatch, owner, retired):
+    # An upgrade leaves an OVMS model's InferenceService; the LLMInferenceService replaces it.
+    monkeypatch.setenv("MM_AIGATEWAY_ENABLED", "true")
+    monkeypatch.setenv("MM_AI_GATEWAY_PROVIDER", "envoy")
+    calls = []
+
+    def run(*args, stdin=None):
+        calls.append(" ".join(args[:3]))
+        if args[:2] == ("get", "InferenceService"):
+            return subprocess.CompletedProcess(args, 0 if owner else 1, owner, "")
+        found = args[:3] in (("get", "aigatewayroute", "aigw-m"), ("get", "aiservicebackend", "m"))
+        return subprocess.CompletedProcess(args, 0 if found else 1, "", "")
+    monkeypatch.setattr(k8s, "run", run)
+    cli._retire_other_kind(Model(name="m", namespace="ns", kind="LLMInferenceService"))
+    deleted = [c for c in calls if c.startswith("delete")]
+    want = ["delete aigatewayroute aigw-m", "delete aiservicebackend m", "delete backend m",
+            "delete InferenceService m"]
+    assert deleted == (want if retired else [])

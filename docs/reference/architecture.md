@@ -111,7 +111,7 @@ deploy:
 | Runtime | Object | Routing |
 |---|---|---|
 | vLLM | `LLMInferenceService` | `epp` — EPP endpoint picker |
-| OpenVINO | `InferenceService` | `aigateway` |
+| OpenVINO | `LLMInferenceService` | `epp` — EPP endpoint picker |
 
 Both land in `llm_services_namespace` (default `llm-inference`).
 

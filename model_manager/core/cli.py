@@ -42,7 +42,8 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
   {GREEN}--replicas{RESET} N         Fixed replica count (default: 1); turns autoscaling off
   {GREEN}--min-replicas{RESET} N     Autoscaling (KEDA, vLLM): fewest replicas (default: 1)
   {GREEN}--max-replicas{RESET} N     Autoscaling: most replicas; above --min-replicas turns it on
-  {GREEN}--scale-target{RESET} N     Autoscaling: waiting requests per replica that trigger a scale-up (default: 2)
+  {GREEN}--scale-target{RESET} N     Autoscaling: per-replica load that triggers a scale-up
+                            (vLLM: waiting requests, default 2; OVMS: in-flight requests, default 4)
   {GREEN}--tp{RESET} N               Tensor-parallel size (splits across N NUMA nodes)
   {GREEN}--cpu-policy{RESET} <p>     CPU pinning: nri-balloons | kubelet-static | best-effort
                             (default: MM_CPU_POLICY, else auto-detected)
@@ -410,7 +411,9 @@ def deploy(o: Options, target: str) -> None:
                 warn_max_unplaceable(policy, m, tp)
         k8s.ensure_storage(m.namespace, catalog.pvc)
         download_weights(m, catalog, cli_args)
-        _install_runtime(m)
+        if m.kind == "InferenceService":
+            _install_runtime(m)
+        _retire_other_kind(m)
         k8s.apply(manifest, ssa=True)
         ok(f"Manifest applied: {m.kind}/{m.name} in {m.namespace}")
     routing.register(m)
@@ -463,16 +466,35 @@ def _discover(name: str, namespace: str) -> Model | None:
                          "-o", "jsonpath={.items[0].metadata.namespace}"))
         if not ns:
             continue
-        if k8s.succeeds("get", "httproute", f"direct-{name}", "-n", ns):
-            mode = "direct"
-        elif k8s.succeeds("get", "aigatewayroute", f"aigw-{name}", "-n", ns) and \
-                k8s.succeeds("get", "aiservicebackend", name, "-n", ns):
-            mode = "aigateway"
-        else:
-            mode = "epp"
         info(f"Discovered live {kind}/{name} in {ns} (no catalog entry)")
-        return Model(name=name, namespace=ns, kind=kind, routing=mode)
+        return Model(name=name, namespace=ns, kind=kind, routing=_live_routing(name, ns))
     return None
+
+
+def _live_routing(name: str, namespace: str) -> str:
+    """The routing mode a live model was deployed with, read from the routes that exist."""
+    if k8s.succeeds("get", "httproute", f"direct-{name}", "-n", namespace):
+        return "direct"
+    if k8s.succeeds("get", "aigatewayroute", f"aigw-{name}", "-n", namespace) and \
+            k8s.succeeds("get", "aiservicebackend", name, "-n", namespace):
+        return "aigateway"
+    return "epp"
+
+
+OTHER_KIND = {"LLMInferenceService": "InferenceService", "InferenceService": "LLMInferenceService"}
+
+
+def _retire_other_kind(m: Model) -> None:
+    """A runtime that changed kind (OVMS: InferenceService -> LLMInferenceService) leaves the model's
+    old object behind. Remove it and its routes, when model-manager created it."""
+    other = OTHER_KIND.get(m.kind)
+    label = "jsonpath={.metadata.labels.app\\.kubernetes\\.io/managed-by}"
+    if not other or k8s.out("get", other, m.name, "-n", m.namespace, "-o", label) != "model-manager":
+        return
+    info(f"Removing the previous {other}/{m.name}: it now deploys as an {m.kind}")
+    old = Model(name=m.name, namespace=m.namespace, kind=other, routing=_live_routing(m.name, m.namespace))
+    routing.deregister(old)
+    k8s.delete(other, m.name, m.namespace, quiet=True)
 
 
 def undeploy(o: Options, target: str) -> None:
@@ -490,6 +512,7 @@ def undeploy(o: Options, target: str) -> None:
     k8s.delete(m.kind, m.name, m.namespace)
     k8s.delete("configmap", f"{m.name}-chat-template", m.namespace, quiet=True)
     routing.deregister(m)
+    _retire_other_kind(m)
     routing.litellm_deregister(m.name)
     if not o.wait:
         return ok(f"{m.name} undeployed")
