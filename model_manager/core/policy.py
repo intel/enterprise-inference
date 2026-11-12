@@ -126,7 +126,7 @@ def _allocatable(m: Model) -> list[int] | None:
 
 def _replica_shortfall(alloc: list[int] | None, per_pod: int, replicas: int) -> str:
     """Each replica needs per_pod CPUs on one node, so count whole replica slots per node."""
-    if replicas < 2 or not alloc or per_pod < 1:
+    if replicas < 2 or alloc is None or per_pod < 1:  # [] is known: no schedulable node
         return ""
     slots = sum(a // per_pod for a in alloc)
     if replicas > slots:
@@ -295,11 +295,16 @@ def preflight_gate(policy: BestEffort, m: Model, tp: int) -> None:
     abort(policy.failure(m, tp))
 
 
-def warn_max_unplaceable(policy: BestEffort, m: Model, tp: int) -> None:
-    """preflight_gate gates the minimum; a maximum that does not fit only leaves the extra replicas Pending."""
+def warn_max_unplaceable(policy: BestEffort, m: Model, tp: int, running: int = 0) -> None:
+    """preflight_gate gates the minimum; replicas up to the maximum that do not fit only stay Pending. On a
+    scaling-only change the `running` replicas already hold their CPUs, so only the ones beyond them are checked."""
     if _preflight_skipped():
         return
-    shortfall = policy.replica_shortfall(dataclasses.replace(m, replicas=m.max_replicas), tp)
+    total = int(m.max_replicas or m.replicas)
+    extra = total - running
+    if extra < 1:
+        return
+    shortfall = policy.replica_shortfall(dataclasses.replace(m, replicas=str(extra)), tp)
     if shortfall:
-        warn(f"{m.name}: {m.max_replicas} replicas do not all fit now ({shortfall}); "
-             "scale-ups past capacity stay Pending.")
+        what = f"the {extra} replicas beyond the {running} running (up to {total})" if running else f"{total} replicas"
+        warn(f"{m.name}: {what} do not all fit now ({shortfall}); the ones that don't fit stay Pending.")

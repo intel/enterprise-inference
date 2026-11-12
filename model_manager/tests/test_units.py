@@ -762,7 +762,8 @@ def test_changed_spec_is_applied_with_or_without_the_preflight(deploy_env, monke
     monkeypatch.setattr(cli, "_require_autoscaling", lambda m: None)
     monkeypatch.setattr(cli, "_only_scaling_changed", lambda m, render: asked.append(m.name) or scaling_only)
     monkeypatch.setattr(cli, "preflight_gate", lambda *a: steps.append("preflight"))
-    monkeypatch.setattr(cli, "warn_max_unplaceable", lambda *a: steps.append("max check"))
+    monkeypatch.setattr(cli, "warn_max_unplaceable", lambda *a, running=0: steps.append(f"max check, {running} running"))
+    monkeypatch.setattr(cli, "_running_replicas", lambda m: 2)
     monkeypatch.setattr(k8s, "ensure_storage", lambda *a: steps.append("storage"))
     monkeypatch.setattr(cli, "download_weights", lambda *a: steps.append("download"))
     monkeypatch.setattr(cli, "_install_runtime", lambda m: None)
@@ -771,7 +772,8 @@ def test_changed_spec_is_applied_with_or_without_the_preflight(deploy_env, monke
     monkeypatch.setattr(routing, "print_endpoints", lambda m: None)
     monkeypatch.setattr(cli, "_wait_ready", lambda m, t: False)
     cli.deploy(cli.parse_args(["deploy", "qwen3-0-6b", "--max-replicas", "3", "--wait"]), "qwen3-0-6b")
-    assert steps == (["preflight", "max check"] if gated else []) + ["storage", "download", "apply"]
+    gate = ["preflight", "max check, 0 running"] if gated else ["max check, 2 running"]  # only the extra replicas
+    assert steps == gate + ["storage", "download", "apply"]
     assert bool(asked) == (counts_running and not forced)  # the live spec is read only when it matters
 
 
@@ -784,6 +786,27 @@ def test_max_replicas_only_warns(capsys, fits_max, warned):
     policy.warn_max_unplaceable(Policy(), m, 1)
     assert m.replicas == "1"  # checked on a copy
     assert ("do not all fit" in capsys.readouterr().err) == warned
+
+
+@pytest.mark.parametrize("running, checked", [(0, "4"), (3, "1"), (4, None)])
+def test_max_check_credits_the_running_replicas(capsys, running, checked):
+    # NRI on a scaling-only change: the running replicas hold their cores, so only the rest are checked.
+    asked = []
+
+    class Policy:
+        def replica_shortfall(self, m, tp):
+            asked.append(m.replicas)
+            return "no room"
+    m = Model(name="m", namespace="n", replicas="1", min_replicas="1", max_replicas="4")
+    policy.warn_max_unplaceable(Policy(), m, 1, running=running)
+    assert asked == ([checked] if checked else [])
+    err = capsys.readouterr().err
+    assert ("beyond the 3 running (up to 4)" in err) == (running == 3)
+
+
+def test_no_schedulable_node_is_a_shortfall():
+    assert "the schedulable nodes fit 0" in policy._replica_shortfall([], 8, 3)  # every node tainted NoSchedule
+    assert policy._replica_shortfall(None, 8, 3) == ""  # nodes could not be read
 
 
 @pytest.mark.parametrize("node_cpus, tp, warned", [

@@ -337,6 +337,13 @@ def _require_autoscaling(m: Model) -> None:
               f"envoy_gateway_upgrade: true); deploy {m.name} with a fixed --replicas.")
 
 
+def _running_replicas(m: Model) -> int:
+    """Workload pods of m that exist now, and so already hold their CPUs."""
+    selector = (f"serving.kserve.io/inferenceservice={m.name}" if m.kind == "InferenceService"
+                else f"app.kubernetes.io/name={m.name},kserve.io/component=workload")
+    return len(k8s.out("get", "pods", "-n", m.namespace, "-l", selector, "-o", "name").split())
+
+
 def _only_scaling_changed(m: Model, render) -> bool:
     """Whether m differs from the live object only in its replica count or autoscaling range."""
     spec = (k8s.get_json(m.kind, m.name, "-n", m.namespace) or {}).get("spec")
@@ -393,7 +400,8 @@ def deploy(o: Options, target: str) -> None:
 
         if changed and policy.counts_running_pods and _only_scaling_changed(m, render):
             info(f"  Only the replica count or autoscaling changed: the running pods stay, and {policy.name} would "
-                 "count their cores as taken, so the pre-flight is skipped (new replicas that don't fit stay Pending).")
+                 "count their cores as taken, so only the replicas beyond them are checked (warning only).")
+            warn_max_unplaceable(policy, m, tp, running=_running_replicas(m))
         else:
             preflight_gate(policy, m, tp)
             if m.autoscaled:
