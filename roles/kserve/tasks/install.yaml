@@ -203,8 +203,7 @@
       kind: Namespace
       metadata:
         name: "{{ kserve_namespace }}"
-        labels:
-          istio.io/dataplane-mode: "ambient"
+        labels: "{{ istio_namespace_labels | default({'istio.io/dataplane-mode': 'ambient'}) }}"
   when: istio_enabled | default(false) | bool
 
 # Host-network apiserver (no mesh identity) can't reach the KServe + LLMISVC admission
@@ -448,8 +447,7 @@
           kind: Namespace
           metadata:
             name: "{{ kserve_lws_namespace }}"
-            labels:
-              istio.io/dataplane-mode: "ambient"
+            labels: "{{ istio_namespace_labels | default({'istio.io/dataplane-mode': 'ambient'}) }}"
       when:
         - istio_enabled | default(false) | bool
         - _lws_check.status is not defined or _lws_check.status is none
