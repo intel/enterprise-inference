@@ -774,7 +774,8 @@ def test_changed_spec_is_applied_with_or_without_the_preflight(deploy_env, monke
     monkeypatch.setattr(policy.BestEffort, "counts_running_pods", counts_running)
     monkeypatch.setattr(cli, "_require_autoscaling", lambda m: None)
     monkeypatch.setattr(cli, "_only_scaling_changed", lambda m, render: asked.append(m.name) or scaling_only)
-    monkeypatch.setattr(cli, "preflight_gate", lambda *a: steps.append("preflight"))
+    monkeypatch.setattr(cli, "_owned_inference_service", lambda m: None)
+    monkeypatch.setattr(cli, "preflight_gate", lambda *a, running=0: steps.append("preflight"))
     monkeypatch.setattr(cli, "warn_max_unplaceable", lambda *a, running=0: steps.append(f"max check, {running} running"))
     monkeypatch.setattr(cli, "_running_replicas", lambda m: 2)
     monkeypatch.setattr(k8s, "ensure_storage", lambda *a: steps.append("storage"))
@@ -995,7 +996,7 @@ def test_previous_kind_retired(monkeypatch, owner, retired):
         found = args[:3] in (("get", "aigatewayroute", "aigw-m"), ("get", "aiservicebackend", "m"))
         return subprocess.CompletedProcess(args, 0 if found else 1, "", "")
     monkeypatch.setattr(k8s, "run", run)
-    cli._retire_other_kind(Model(name="m", namespace="ns", kind="LLMInferenceService"))
+    cli._retire_inference_service(Model(name="m", namespace="ns", kind="LLMInferenceService"))
     deleted = [c for c in calls if c.startswith("delete")]
     want = ["delete aigatewayroute aigw-m", "delete aiservicebackend m", "delete backend m",
             "delete InferenceService m"]
@@ -1032,8 +1033,41 @@ def test_runtime_without_a_signal_is_rejected(monkeypatch, tmp_path):
         _render(monkeypatch, "qwen3-5-2b-ovms", "--max-replicas", "3", catalog=catalog)
 
 
-def test_only_llmisvc_models_retire_an_old_kind(monkeypatch):
+def test_only_llmisvc_models_retire_an_inference_service(monkeypatch):
     calls = []
     monkeypatch.setattr(k8s, "run", lambda *a, stdin=None: calls.append(a) or subprocess.CompletedProcess(a, 1, "", ""))
-    cli._retire_other_kind(Model(name="m", namespace="ns", kind="InferenceService"))
+    cli._retire_inference_service(Model(name="m", namespace="ns", kind="InferenceService"))
     assert calls == []  # no lookup: nothing moves the other way
+
+
+@pytest.mark.parametrize("counts_running, credited", [(True, 1), (False, 0)])
+def test_upgrade_credits_the_old_inference_service(deploy_env, monkeypatch, counts_running, credited):
+    # The old InferenceService is removed before the new pods start, so NRI must not count its cores as taken.
+    gated = []
+    monkeypatch.setattr(k8s, "succeeds", lambda *a: False)  # no LLMInferenceService yet
+    monkeypatch.setattr(policy.BestEffort, "counts_running_pods", counts_running)
+    old = Model(name="qwen3-5-2b-ovms", namespace="ns", kind="InferenceService")
+    monkeypatch.setattr(cli, "_owned_inference_service", lambda m: old)
+    monkeypatch.setattr(cli, "_running_replicas", lambda m: 1 if m is old else 0)
+    monkeypatch.setattr(cli, "preflight_gate", lambda *a, running=0: gated.append(running))
+    for name in ("download_weights", "_install_runtime", "_retire_inference_service"):
+        monkeypatch.setattr(cli, name, lambda *a: None)
+    monkeypatch.setattr(k8s, "ensure_storage", lambda *a: None)
+    monkeypatch.setattr(k8s, "apply", lambda manifest, ssa: None)
+    monkeypatch.setattr(routing, "register", lambda m: None)
+    monkeypatch.setattr(routing, "print_endpoints", lambda m: None)
+    monkeypatch.setattr(cli, "_wait_ready", lambda m, t: False)
+    cli.deploy(cli.parse_args(["deploy", "qwen3-5-2b-ovms", "--wait"]), "qwen3-5-2b-ovms")
+    assert gated == [credited]
+
+
+@pytest.mark.parametrize("running, checked", [(0, ["2"]), (1, ["1"]), (2, [])])
+def test_preflight_gate_checks_only_the_replicas_beyond_the_running(running, checked):
+    asked = []
+
+    class Policy:
+        def preflight(self, m, tp):
+            asked.append(m.replicas)
+            return []
+    policy.preflight_gate(Policy(), Model(name="m", namespace="n", replicas="2"), 1, running=running)
+    assert asked == checked

@@ -406,14 +406,20 @@ def deploy(o: Options, target: str) -> None:
                  "count their cores as taken, so only the replicas beyond them are checked (warning only).")
             warn_max_unplaceable(policy, m, tp, running=_running_replicas(m))
         else:
-            preflight_gate(policy, m, tp)
+            # An upgrade removes the old InferenceService before the new pods start, so its cores are free for them.
+            old = _owned_inference_service(m)
+            running = _running_replicas(old) if old and policy.counts_running_pods else 0
+            if running:
+                info(f"  The previous InferenceService/{m.name} is removed before the new pods start: its {running} "
+                     "running pods' cores are counted as free.")
+            preflight_gate(policy, m, tp, running=running)
             if m.autoscaled:
-                warn_max_unplaceable(policy, m, tp)
+                warn_max_unplaceable(policy, m, tp, running=running)
         k8s.ensure_storage(m.namespace, catalog.pvc)
         download_weights(m, catalog, cli_args)
         if m.kind == "InferenceService":
             _install_runtime(m)
-        _retire_other_kind(m)
+        _retire_inference_service(m)
         k8s.apply(manifest, ssa=True)
         ok(f"Manifest applied: {m.kind}/{m.name} in {m.namespace}")
     routing.register(m)
@@ -481,18 +487,24 @@ def _live_routing(name: str, namespace: str) -> str:
     return "epp"
 
 
-def _retire_other_kind(m: Model) -> None:
-    """A runtime that moved to LLMInferenceService (OVMS) leaves the model's InferenceService behind.
-    Remove it and its routes, when model-manager created it."""
-    other = "InferenceService"
+def _owned_inference_service(m: Model) -> Model | None:
+    """The InferenceService an OVMS model ran as before it moved to LLMInferenceService, when model-manager created it."""
     label = "jsonpath={.metadata.labels.app\\.kubernetes\\.io/managed-by}"
     if m.kind != "LLMInferenceService" or \
-            k8s.out("get", other, m.name, "-n", m.namespace, "-o", label) != "model-manager":
+            k8s.out("get", "InferenceService", m.name, "-n", m.namespace, "-o", label) != "model-manager":
+        return None
+    return Model(name=m.name, namespace=m.namespace, kind="InferenceService",
+                 routing=_live_routing(m.name, m.namespace))
+
+
+def _retire_inference_service(m: Model) -> None:
+    """Remove the InferenceService m replaces, and its routes."""
+    old = _owned_inference_service(m)
+    if old is None:
         return
-    info(f"Removing the previous {other}/{m.name}: it now deploys as an {m.kind}")
-    old = Model(name=m.name, namespace=m.namespace, kind=other, routing=_live_routing(m.name, m.namespace))
+    info(f"Removing the previous InferenceService/{m.name}: it now deploys as an {m.kind}")
     routing.deregister(old)
-    k8s.delete(other, m.name, m.namespace, quiet=True)
+    k8s.delete("InferenceService", m.name, m.namespace, quiet=True)
 
 
 def undeploy(o: Options, target: str) -> None:
@@ -507,7 +519,7 @@ def undeploy(o: Options, target: str) -> None:
     if m is None:
         abort(f"No catalog entry or deployed resource named '{target}' found.")
     info(f"Undeploying {m.name}")
-    _retire_other_kind(m)  # first: it reads the old routes to know which to delete
+    _retire_inference_service(m)  # first: it reads the old routes to know which to delete
     k8s.delete(m.kind, m.name, m.namespace)
     k8s.delete("configmap", f"{m.name}-chat-template", m.namespace, quiet=True)
     routing.deregister(m)

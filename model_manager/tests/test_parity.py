@@ -83,7 +83,7 @@ KUBELET_PER_POD = (r"allocatable CPUs \(cpu=(\d+) x tp=\d+\)", r"allocatable CPU
 # fx-servers-sorted-default) have no counterpart there; test_units covers what they checked.
 OVMS_KIND = (r"^\$ kubectl delete InferenceService qwen3-5-2b-ovms ",
              "$ kubectl delete LLMInferenceService qwen3-5-2b-ovms ")
-OVMS_AIGATEWAY_ROUTE = [(r"^\$ kubectl delete (aiservicebackend|backend) qwen3-5-2b-ovms .*\n", "")]
+OVMS_AIGATEWAY_ROUTE = (r"^\$ kubectl delete (aiservicebackend|backend) qwen3-5-2b-ovms .*\n", "")
 OVMS_AGW_ROUTE = (r"^(\$ kubectl delete httproute )direct-(qwen3-5-2b-ovms )", r"\1aigw-\2")
 HELP_HFID = [
     (r"^  deploy <model>\|--id <hf/repo>   ", "  deploy <model>|--hfid <hf/repo> "),
@@ -206,7 +206,7 @@ CASES = [
     case("kubelet-static-preflight-blocks", "deploy", "llama3-8b-awq", env={"MM_CPU_POLICY": "kubelet-static"},
          k8s=STATIC + SMALL_NODES, deviations=[KUBELET_PER_POD]),
     case("undeploy-embed", "undeploy", "bge-base-en"),
-    case("undeploy-ovms", "undeploy", "qwen3-5-2b-ovms", deviations=[OVMS_KIND, *OVMS_AIGATEWAY_ROUTE]),
+    case("undeploy-ovms", "undeploy", "qwen3-5-2b-ovms", deviations=[OVMS_KIND, OVMS_AIGATEWAY_ROUTE]),
     case("undeploy-live-alias", "undeploy", "qwen-alt", k8s=[
         [r"get LLMInferenceService qwen-alt -n llm-inference -o jsonpath", 0, "llm-inference"],
         [r"get httproute direct-qwen-alt", 0, ""]]),

@@ -280,11 +280,15 @@ def _preflight_skipped() -> bool:
     return truthy(os.environ.get("MM_SKIP_PREFLIGHT", ""))
 
 
-def preflight_gate(policy: BestEffort, m: Model, tp: int) -> None:
-    """Abort a deploy that cannot be placed, before weights are downloaded."""
+def preflight_gate(policy: BestEffort, m: Model, tp: int, running: int = 0) -> None:
+    """Abort a deploy that cannot be placed, before weights are downloaded. `running` pods free their cores for the
+    new ones (an upgrade from another kind), so only the replicas beyond them are checked."""
     if _preflight_skipped():
         return
-    errors = policy.preflight(m, tp)
+    extra = int(m.replicas) - running
+    if extra < 1:
+        return
+    errors = policy.preflight(dataclasses.replace(m, replicas=str(extra)) if running else m, tp)
     if not errors:
         return
     warn(f"{policy.label} pre-flight issues detected:")
