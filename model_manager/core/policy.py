@@ -50,6 +50,7 @@ def kubelet_config(node: str) -> dict | None:
 class BestEffort:
     """No pinning; the CFS scheduler places threads."""
     name = "best-effort"
+    counts_running_pods = False  # the pre-flight counts free capacity, which a running replica already holds
 
     def prepare(self, m: Model) -> None:
         """Normalise m.cpu/m.memory for the policy; may abort."""
@@ -73,6 +74,7 @@ class BestEffort:
 class NriBalloons(BestEffort):
     """NRI balloons plugin: NUMA-aware balloons sized per tensor-parallel shard."""
     name = "nri-balloons"
+    counts_running_pods = True
     label = "NRI"
 
     def annotations(self, m: Model, tp: int) -> tuple[dict, str]:
