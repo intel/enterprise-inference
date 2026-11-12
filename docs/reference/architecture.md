@@ -90,6 +90,7 @@ enterprise-ai-solutions/
 └── ext/
     └── enterprise.ai-inference/  # ← this repo
         ├── components.yaml       # component registry, merged into the core registry
+        ├── version.yaml          # layer version and the platform/installer ranges it requires
         ├── config.yaml           # seed for env/<env>/config.inference.yaml
         ├── roles/                # discovered via roles_path
         ├── charts/               # vendored Helm charts (LiteLLM)
