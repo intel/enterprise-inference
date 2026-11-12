@@ -9,6 +9,8 @@ __llm_mm_env: "{{ __llm_mm_env_common | combine(__llm_mm_env_openshift if __llm_
 __llm_mm_env_openshift:
   MM_INFERENCE_GATEWAY: "{{ kserve_openshift_gateway_name | default('openshift-ai-inference') }}"
   MM_INFERENCE_GATEWAY_NS: "{{ kserve_openshift_gateway_namespace | default('openshift-ingress') }}"
+  # Models are routed by OpenShift AI's inference Gateway (kserve role), at /<namespace>/<model>/v1/...
+  MM_AIGATEWAY_ENABLED: "false"
 __llm_mm_env_common:
   # Proxy — so weight downloads work behind a corporate proxy.
   MM_HTTP_PROXY: "{{ http_proxy | default(lookup('env', 'http_proxy')) | default('') }}"
@@ -24,12 +26,10 @@ __llm_mm_env_common:
   # LiteLLM registration — only when auth_type=litellm_vkey.
   MM_LITELLM_ENABLED: "{{ __llm_mm_litellm | string | lower }}"
   MM_LITELLM_URL: "{{ ('http://litellm.' ~ (litellm_namespace | default('litellm')) ~ '.svc.cluster.local:4000') if __llm_mm_litellm | bool else '' }}"
-  # In-cluster AI Gateway data plane LiteLLM calls vLLM models through.
+  # In-cluster AI Gateway LiteLLM calls the models through. Its AIGatewayRoutes are
+  # created in every auth_type (model-manager's default, as on the CLI): auth_type
+  # only picks who authorizes the external API (Keycloak JWT or LiteLLM keys).
   MM_LITELLM_KSERVE_URL: "{{ _llm_ai_gateway_url }}"
-  # AIGatewayRoute unified endpoint — only when auth_type=jwt.
-  # Not on OpenShift: models are routed by OpenShift AI's inference Gateway
-  # (kserve role), at /<namespace>/<model>/v1/...
-  MM_AIGATEWAY_ENABLED: "{{ 'true' if auth_type | default('jwt') == 'jwt' and not (cluster_distribution | default('kubernetes') == 'openshift') else 'false' }}"
   MM_PLATFORM: "{{ cluster_distribution | default('kubernetes') }}"
   MM_EG_GATEWAY_NAME: "{{ gateway_name | default('eg-gateway') }}"
   MM_EG_GATEWAY_NS: "{{ gateway_namespace | default('envoy-gateway-system') }}"
