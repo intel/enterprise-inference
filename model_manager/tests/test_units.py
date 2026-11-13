@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import cli, config, download, k8s, nri_policy, policy, renderer, routing  # noqa: E402
@@ -993,13 +994,13 @@ def test_owned_inference_service_retired(monkeypatch, owner, retired):
         calls.append(" ".join(args[:3]))
         if args[:2] == ("get", "InferenceService"):
             return subprocess.CompletedProcess(args, 0 if owner else 1, owner, "")
-        found = args[:3] in (("get", "aigatewayroute", "aigw-m"), ("get", "aiservicebackend", "m"))
+        found = args[0] == "delete" or args[:3] in (("get", "aigatewayroute", "aigw-m"), ("get", "aiservicebackend", "m"))
         return subprocess.CompletedProcess(args, 0 if found else 1, "", "")
     monkeypatch.setattr(k8s, "run", run)
     cli._retire_inference_service(Model(name="m", namespace="ns", kind="LLMInferenceService"))
     deleted = [c for c in calls if c.startswith("delete")]
-    want = ["delete aigatewayroute aigw-m", "delete aiservicebackend m", "delete backend m",
-            "delete InferenceService m"]
+    want = ["delete InferenceService m", "delete aigatewayroute aigw-m", "delete aiservicebackend m",
+            "delete backend m"]
     assert deleted == (want if retired else [])
 
 
@@ -1106,3 +1107,42 @@ def test_upgrade_credit_counts_only_the_pinned_nodes_pods(monkeypatch, node, cre
     monkeypatch.setattr(k8s, "get_json", lambda *a: pods if a[0] == "pods" else spec)
     m = Model(name="m", namespace="ns", kind="LLMInferenceService", node=node)
     assert cli._upgrade_credit(m, {BALLOON: "vllm-balloon"}, "8") == credited
+
+
+def test_failed_retire_aborts_and_keeps_the_routes(monkeypatch):
+    # The old model keeps serving: no route is removed and the replacement is not applied.
+    old = Model(name="m", namespace="ns", kind="InferenceService")
+    monkeypatch.setattr(cli, "_owned_inference_service", lambda m: old)
+    monkeypatch.setattr(k8s, "run", lambda *a, stdin=None: subprocess.CompletedProcess(a, 1, "", "forbidden"))
+    deregistered = []
+    monkeypatch.setattr(routing, "deregister", deregistered.append)
+    with pytest.raises(SystemExit):
+        cli._retire_inference_service(Model(name="m", namespace="ns", kind="LLMInferenceService"))
+    assert deregistered == []
+
+
+@pytest.mark.parametrize("llmisvc, isvc, want", [("", "16", "16"), ("12", "16", "12")])
+def test_auto_cpu_keeps_the_old_inference_service_cpu(monkeypatch, llmisvc, isvc, want):
+    # An OVMS upgrade keeps the old CPU instead of sizing against cores the old pods still hold.
+    live = {"LLMInferenceService": llmisvc, "InferenceService": isvc}
+    monkeypatch.setattr(k8s, "out", lambda *a: live[a[1]])
+    m = Model(name="m", namespace="ns", kind="LLMInferenceService", cpu="auto")
+    policy.resolve_auto_cpu(policy.BestEffort(), m, 1)
+    assert m.cpu == want
+
+
+def test_live_scaling_restores_the_query_for_a_fixed_count():
+    # --replicas 1 leaves scale_query empty; the live trigger's query makes the re-render match.
+    spec = {"scaling": {"minReplicas": 1, "maxReplicas": 3,
+                        "keda": {"triggers": [{"metadata": {"query": "q{model=\"m\"}", "threshold": "2"}}]}}}
+    m = Model(name="m", namespace="ns", kind="LLMInferenceService", replicas="1")
+    assert renderer.live_scaling(m, spec).scale_query == 'q{model="m"}'
+
+
+def test_switching_to_a_fixed_count_is_a_scaling_only_change():
+    # The live autoscaled spec, read back into a --replicas 1 model, renders the same scaling block.
+    auto = Model(name="m", namespace="ns", kind="LLMInferenceService", replicas="1", min_replicas="1",
+                 max_replicas="3", scale_target="2", scale_query='q{model="$model"}')
+    live = yaml.safe_load("spec:\n" + renderer._llmisvc_replicas(auto))["spec"]
+    fixed = Model(name="m", namespace="ns", kind="LLMInferenceService", replicas="1")
+    assert renderer._llmisvc_replicas(renderer.live_scaling(fixed, live)) == renderer._llmisvc_replicas(auto)

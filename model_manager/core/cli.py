@@ -519,8 +519,11 @@ def _retire_inference_service(m: Model) -> None:
     if old is None:
         return
     info(f"Removing the previous InferenceService/{m.name}: it now deploys as an {m.kind}")
+    # Delete first: if it fails, the old model keeps its routes and its cores, and the replacement is not applied.
+    r = k8s.run("delete", "InferenceService", m.name, "-n", m.namespace, "--ignore-not-found")
+    if r.returncode:
+        abort(f"Could not remove the previous InferenceService/{m.name}: {r.stderr.strip()}")
     routing.deregister(old)
-    k8s.delete("InferenceService", m.name, m.namespace, quiet=True)
 
 
 def undeploy(o: Options, target: str) -> None:

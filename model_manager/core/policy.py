@@ -256,8 +256,10 @@ def resolve_auto_cpu(policy: BestEffort, m: Model, tp: int) -> None:
     """
     if m.cpu != "auto":
         return
-    path = LIVE_CPU.get(m.kind)
-    live = k8s.out("get", m.kind, m.name, "-n", m.namespace, "-o", f"jsonpath={path}") if path else ""
+    # An OVMS upgrade from InferenceService keeps the CPU the old one runs with.
+    kinds = [m.kind] + (["InferenceService"] if m.kind == "LLMInferenceService" else [])
+    live = next((v for k in kinds if (v := k8s.out("get", k, m.name, "-n", m.namespace, "-o",
+                                                   f"jsonpath={LIVE_CPU[k]}"))), "")
     if live:
         if isinstance(policy, NriBalloons) and is_uint(live):
             live = str(nri_policy.model_cpu(int(live)))  # the request carries any hideHyperthreads doubling

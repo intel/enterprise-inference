@@ -136,11 +136,13 @@ def live_scaling(m: Model, spec: dict) -> Model:
     if m.kind != "LLMInferenceService":
         return dataclasses.replace(m, replicas=text(pick(pick(spec, "predictor", {}), "minReplicas", m.replicas)))
     scaling = pick(spec, "scaling", {})
-    trigger = (pick(pick(scaling, "keda", {}), "triggers", []) or [{}])[0]
+    metadata = pick((pick(pick(scaling, "keda", {}), "triggers", []) or [{}])[0], "metadata", {})
+    # The query too: switching to a fixed count leaves m.scale_query empty.
     return dataclasses.replace(m, replicas=text(pick(spec, "replicas", m.replicas)),
                                min_replicas=text(pick(scaling, "minReplicas")),
                                max_replicas=text(pick(scaling, "maxReplicas")),
-                               scale_target=text(pick(pick(trigger, "metadata", {}), "threshold")))
+                               scale_target=text(pick(metadata, "threshold")),
+                               scale_query=text(pick(metadata, "query")) or m.scale_query)
 
 
 def _fill(value: Any, m: Model) -> str:
