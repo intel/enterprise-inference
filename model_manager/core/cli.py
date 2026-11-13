@@ -16,7 +16,7 @@ from pathlib import Path
 from . import __version__, k8s, platform, renderer, routing
 from .config import MM_DIR, Catalog, Model, is_uint, mm_path, pick, resolve, resolve_autoscaling, text, truthy
 from .download import download_weights
-from .policy import preflight_gate, resolve_auto_cpu, resolve_policy, warn_max_unplaceable
+from .policy import ANN, preflight_gate, resolve_auto_cpu, resolve_policy, warn_max_unplaceable, whole_cpus
 from .ui import BOLD, CYAN, DIM, GREEN, RESET, YELLOW, abort, fmt_duration, info, ok, warn
 
 USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubernetes
@@ -407,8 +407,7 @@ def deploy(o: Options, target: str) -> None:
             warn_max_unplaceable(policy, m, tp, running=_running_replicas(m))
         else:
             # An upgrade removes the old InferenceService before the new pods start, so its cores are free for them.
-            old = _owned_inference_service(m)
-            running = _running_replicas(old) if old and policy.counts_running_pods else 0
+            running = _upgrade_credit(m, annotations, cpu) if policy.counts_running_pods else 0
             if running:
                 info(f"  The previous InferenceService/{m.name} is removed before the new pods start: its {running} "
                      "running pods' cores are counted as free.")
@@ -495,6 +494,21 @@ def _owned_inference_service(m: Model) -> Model | None:
         return None
     return Model(name=m.name, namespace=m.namespace, kind="InferenceService",
                  routing=_live_routing(m.name, m.namespace))
+
+
+def _upgrade_credit(m: Model, annotations: dict, cpu: str) -> int:
+    """Running pods of the InferenceService m replaces whose cores a new replica can take: the same NRI balloon
+    (which follows tp) and at least as many CPUs. Any other change gets the full check."""
+    old = _owned_inference_service(m)
+    if old is None:
+        return 0
+    predictor = pick(pick(k8s.get_json("InferenceService", m.name, "-n", m.namespace) or {}, "spec", {}), "predictor", {})
+    old_cpu = text(pick(pick(pick(pick(predictor, "model", {}), "resources", {}), "requests", {}), "cpu"))
+    balloon = f"{ANN}/balloon"
+    if pick(pick(predictor, "annotations", {}), balloon) != annotations.get(balloon) or \
+            whole_cpus(old_cpu, floor=True) < whole_cpus(cpu):
+        return 0
+    return _running_replicas(old)
 
 
 def _retire_inference_service(m: Model) -> None:

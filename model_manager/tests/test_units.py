@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import cli, config, download, k8s, nri_policy, policy, renderer, routing  # noqa: E402
 from core.config import Catalog, Model  # noqa: E402
-from core.policy import _whole_cpus  # noqa: E402
+from core.policy import whole_cpus  # noqa: E402
 from core.renderer import dedupe_args, engine_args  # noqa: E402
 
 
@@ -55,7 +55,7 @@ def test_numeric_catalog_args_are_rendered():
 
 @pytest.mark.parametrize("cpu, whole", [("8", 8), ("7.5", 8), ("7500m", 8), ("0m", 0), ("abc", 0), ("²", 0)])
 def test_whole_cpus(cpu, whole):
-    assert _whole_cpus(cpu) == whole
+    assert whole_cpus(cpu) == whole
 
 
 @pytest.mark.parametrize("hide_ht, tp, want", [("false", 1, 28), ("false", 2, 56), ("true", 1, 14)])
@@ -983,7 +983,7 @@ def test_ovms_not_on_openshift(monkeypatch):
 
 
 @pytest.mark.parametrize("owner, retired", [("model-manager", True), ("someone-else", False), ("", False)])
-def test_previous_kind_retired(monkeypatch, owner, retired):
+def test_owned_inference_service_retired(monkeypatch, owner, retired):
     # An upgrade leaves an OVMS model's InferenceService; the LLMInferenceService replaces it.
     monkeypatch.setenv("MM_AIGATEWAY_ENABLED", "true")
     monkeypatch.setenv("MM_AI_GATEWAY_PROVIDER", "envoy")
@@ -1046,9 +1046,7 @@ def test_upgrade_credits_the_old_inference_service(deploy_env, monkeypatch, coun
     gated = []
     monkeypatch.setattr(k8s, "succeeds", lambda *a: False)  # no LLMInferenceService yet
     monkeypatch.setattr(policy.BestEffort, "counts_running_pods", counts_running)
-    old = Model(name="qwen3-5-2b-ovms", namespace="ns", kind="InferenceService")
-    monkeypatch.setattr(cli, "_owned_inference_service", lambda m: old)
-    monkeypatch.setattr(cli, "_running_replicas", lambda m: 1 if m is old else 0)
+    monkeypatch.setattr(cli, "_upgrade_credit", lambda m, annotations, cpu: 1)
     monkeypatch.setattr(cli, "preflight_gate", lambda *a, running=0: gated.append(running))
     for name in ("download_weights", "_install_runtime", "_retire_inference_service"):
         monkeypatch.setattr(cli, name, lambda *a: None)
@@ -1071,3 +1069,28 @@ def test_preflight_gate_checks_only_the_replicas_beyond_the_running(running, che
             return []
     policy.preflight_gate(Policy(), Model(name="m", namespace="n", replicas="2"), 1, running=running)
     assert asked == checked
+
+
+BALLOON = "cpu-policy.model-manager.io/balloon"
+
+
+@pytest.mark.parametrize("old_cpu, old_balloon, new_cpu, credited", [
+    ("8", "vllm-balloon", "8", 2),      # same shape: the new replicas take the freed cores
+    ("16", "vllm-balloon", "8", 2),     # smaller new replicas fit too
+    ("8", "vllm-balloon", "32", 0),     # bigger new replicas: full check
+    ("8", "vllm-balloon-tp2", "8", 0),  # another balloon (tp): full check
+    ("", "vllm-balloon", "8", 0),       # unreadable old spec: full check
+])
+def test_upgrade_credit_needs_the_freed_cores_to_fit(monkeypatch, old_cpu, old_balloon, new_cpu, credited):
+    m = Model(name="m", namespace="ns", kind="LLMInferenceService")
+    monkeypatch.setattr(cli, "_owned_inference_service", lambda m: Model(name="m", namespace="ns", kind="InferenceService"))
+    monkeypatch.setattr(cli, "_running_replicas", lambda m: 2)
+    spec = {"spec": {"predictor": {"annotations": {BALLOON: old_balloon},
+                                   "model": {"resources": {"requests": {"cpu": old_cpu}}}}}}
+    monkeypatch.setattr(k8s, "get_json", lambda *a: spec)
+    assert cli._upgrade_credit(m, {BALLOON: "vllm-balloon"}, new_cpu) == credited
+
+
+def test_no_upgrade_credit_without_an_old_inference_service(monkeypatch):
+    monkeypatch.setattr(cli, "_owned_inference_service", lambda m: None)
+    assert cli._upgrade_credit(Model(name="m", namespace="ns", kind="LLMInferenceService"), {}, "8") == 0
