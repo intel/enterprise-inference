@@ -1,0 +1,5 @@
+# rc: 1
+--- stdout
+--- stderr
+[ERROR]  --gpus requires a positive integer, got: x
+--- kubectl

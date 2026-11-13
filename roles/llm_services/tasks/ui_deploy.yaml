@@ -267,7 +267,7 @@
       metadata: {name: model-manager}
       rules:
         - apiGroups: [""]
-          resources: [nodes, pods, namespaces, services]
+          resources: [nodes, pods, namespaces, services, persistentvolumes]
           verbs: [get, list]
         - apiGroups: [apps]
           resources: [daemonsets]

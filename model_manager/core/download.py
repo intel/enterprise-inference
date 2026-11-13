@@ -8,7 +8,7 @@ import time
 
 from . import k8s
 from .config import Catalog, Model, hf_model_info, pick, text
-from .renderer import proxy_env, quote, render, template, trust_remote_code
+from .renderer import gpu_toleration, proxy_env, quote, render, template, trust_remote_code
 from .ui import YELLOW, RESET, abort, info, ok
 
 TIMEOUT = 7200
@@ -79,7 +79,19 @@ def _script(m: Model, cli_args: list[str]) -> str:
         "@NAME@", m.name).replace("@DIR@", f"/models/{m.name}")
 
 
-def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
+def _node_affinity(nodes: tuple) -> str:
+    """Pin the Job to these nodes, so a volume that binds on first use lands where the GPU pod can mount it.
+    One term per node: the API takes a single value in a node field selector, and terms are ORed."""
+    if not nodes:
+        return ""
+    return ("\n      affinity:\n        nodeAffinity:\n          requiredDuringSchedulingIgnoredDuringExecution:\n"
+            "            nodeSelectorTerms:" + "".join(
+                "\n              - matchFields:\n                  - key: metadata.name\n"
+                f"                    operator: In\n                    values:\n                      - {quote(n)}"
+                for n in nodes))
+
+
+def download_weights(m: Model, catalog: Catalog, cli_args: list[str], nodes: tuple) -> None:
     if catalog.connectivity_url and not _curl_ok(catalog.connectivity_url, catalog.https_proxy):
         abort(f"Network check failed: cannot reach {catalog.connectivity_url} (proxy: {catalog.https_proxy or 'none'}). "
               "Check network/proxy settings in models.yaml or environment.")
@@ -102,6 +114,8 @@ def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
                          "                  name: hf-token\n                  key: token")
     env_items += [f"            - name: {k}\n              value: {quote(v)}" for k, v in proxy_env(catalog)]
     uid = m.run_as_user
+    # Tainted GPU nodes may be the only ones the Job can use (e.g. a node-local PVC), so it tolerates the taint.
+    toleration = gpu_toleration(m, 6)
     job = f"download-{m.name}"
     manifest = render(
         template("download-job.yaml"), MODEL_NAME=m.name, NAMESPACE=m.namespace, MODEL_ID=m.model_id,
@@ -110,7 +124,8 @@ def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
         DOWNLOAD_CMD="\n".join("              " + line for line in _script(m, cli_args).split("\n")),
         # Small requests so the job schedules; limits track the serving envelope (OVMS converts in memory).
         DL_CPU_REQUEST="500m", DL_MEM_REQUEST="2Gi", DL_CPU_LIMIT=m.cpu or "2", DL_MEM_LIMIT=m.memory or "8Gi",
-        TTL_SECONDS=os.environ.get("DOWNLOAD_JOB_TTL") or "300", TIMEOUT=str(TIMEOUT))
+        TTL_SECONDS=os.environ.get("DOWNLOAD_JOB_TTL") or "300", TIMEOUT=str(TIMEOUT),
+        TOLERATIONS="\n" + toleration if toleration else "", AFFINITY=_node_affinity(nodes))
 
     k8s.run("delete", "job", job, "-n", m.namespace, "--ignore-not-found")
     k8s.apply(manifest)

@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+from typing import Any
 
 from . import k8s, nri_policy
 from .config import Model, is_uint, pick, text, truthy
@@ -207,7 +208,158 @@ class KubeletStatic(BestEffort):
                 "(proceed anyway) or MM_SKIP_PREFLIGHT=1 (skip check).")
 
 
+class GpuRuntime(BestEffort):
+    """device: gpu runtimes carry no CPU pinning: balloons and static-CPU alignment are Xeon placement
+    controls, and the accelerator resource limit does the scheduling. The pod is rendered without a CPU
+    limit (Burstable), so kubelet's static CPU manager does not pin it either. Never selected by --cpu-policy."""
+    name = "n/a (GPU runtime — no CPU pinning)"
+    label = "GPU"
+
+    def __init__(self, pvc: str) -> None:
+        """pvc: the model-store claim. rolls: deploy clears it when only spec.replicas changes, so the pods stay."""
+        self.pvc, self.rolls, self.download_nodes = pvc, True, ()
+
+    def annotations(self, m: Model, tp: int) -> tuple[dict, str]:
+        return {}, m.cpu
+
+    def preflight(self, m: Model, tp: int) -> list[str]:
+        """The cluster's free GPUs decide, not the declared accelerator: a node in the rack profile that never
+        joined, or whose device plugin is not up, advertises none. --node is only a preference, so every node counts."""
+        nodes = k8s.get_json("nodes")
+        pods = k8s.get_json("pods", "-A", "--field-selector", "status.phase!=Succeeded,status.phase!=Failed")
+        if not nodes or not pods:
+            warn(f"Could not list nodes and pods to verify free {m.accel_resource} — skipping the GPU capacity check.")
+            return []
+        resource, tolerated = m.accel_resource, text(pick(m.rt, "accelerator_toleration_key"))
+        used, own, own_pods = _gpu_usage(pods.get("items", []), m, resource)
+        need, new = int(m.gpus), max(int(m.replicas) - own_pods, 1 if self.rolls else 0)
+        if not new:
+            return []
+        ready = {text(pick(n.get("metadata"), "name")): n for n in nodes.get("items", []) if _schedulable(n, tolerated)}
+        alloc = {name: _quantity(pick(pick(n.get("status"), "allocatable", {}), resource)) for name, n in ready.items()}
+        if not any(alloc.values()):
+            return [f"No Ready, schedulable node advertises allocatable {resource}: no GPU node has joined the "
+                    "cluster, or its device plugin is not ready yet."]
+        free = {name: count - used.get(name, 0) - own.get(name, 0) for name, count in alloc.items() if count}
+        terms, unbound = _model_store(m.namespace, self.pvc)
+        if terms:
+            free = {name: f for name, f in free.items() if _node_matches(ready[name], terms)}
+        per_node = [max(f, 0) // need for f in free.values()]
+        # A store that binds on first use lands on one node, and every replica must mount it there.
+        fit = max(per_node, default=0) if unbound else sum(per_node)
+        if not fit and self.rolls and own_pods and any(alloc[name] - used.get(name, 0) >= need for name in free):
+            return [f"{m.name}'s own running pods hold the {resource} it needs: if this change restarts the pod (any "
+                    "change but --replicas may), the rollout starts the new one next to the running one. Undeploy it "
+                    f"first (./model-manager undeploy {m.name}), or use MM_PREFLIGHT=warn to apply anyway (e.g. a "
+                    "label-only change)."]
+        if not fit and terms:
+            return [f"The model store {self.pvc} is node-local storage on nodes without {need} free {resource}, so the "
+                    "GPU pod could not mount it. GPU models need shared (ReadWriteMany) storage, or the model store "
+                    "on a GPU node."]
+        if not fit:
+            return [f"No node has {need} free {resource}; the most on one node is {max(max(free.values()), 0)}. A "
+                    "pod's GPUs cannot span nodes: lower --gpus, or free GPUs on a node."]
+        if fit < new:
+            warn(f"GPU: only {fit} of {new} new replicas fit on the free {resource} — the rest will stay Pending.")
+        if unbound:
+            self.download_nodes = tuple(name for name, f in free.items() if max(f, 0) // need >= min(new, fit))
+            warn(f"The model store {self.pvc} binds on first use, so it is created on one of {', '.join(self.download_nodes)}"
+                 " where the download runs. On node-local storage, every model using it, CPU ones included, must then "
+                 "run on that node.")
+        return []
+
+    def failure(self, m: Model, tp: int) -> str:
+        return (f"GPU pre-flight failed: cannot place {m.name} ({m.gpus} x {m.accel_resource}) on any node. Override "
+                "with MM_PREFLIGHT=warn (proceed anyway) or MM_SKIP_PREFLIGHT=1 (skip check).")
+
+
 POLICIES = {p.name: p for p in (NriBalloons, KubeletStatic, BestEffort)}
+
+
+def _gpu_usage(pods: list, m: Model, resource: str) -> tuple[dict, dict, int]:
+    """GPUs held per node by other pods and by m's own pods, and how many of m's scheduled pods hold GPUs
+    (a terminating pod still holds its GPUs, but is no longer a replica)."""
+    used: dict = {}
+    own: dict = {}
+    own_pods = 0
+    for pod in pods:
+        meta, node = pod.get("metadata") or {}, text(pick(pod.get("spec"), "nodeName"))
+        mine = (pick(meta, "namespace"), pick(pick(meta, "labels", {}), "app.kubernetes.io/name")) == (m.namespace, m.name)
+        gpus = _pod_request(pod, resource)
+        held = own if mine else used
+        held[node] = held.get(node, 0) + gpus
+        own_pods += bool(mine and gpus and node and not meta.get("deletionTimestamp"))
+    return used, own, own_pods
+
+
+def _pod_request(pod: dict, resource: str) -> int:
+    """A pod's effective request, as the scheduler counts it: its containers plus restartable init (sidecar)
+    containers, or the peak while the init containers run, whichever is larger."""
+    def request(c: dict) -> int:
+        return _quantity(pick(pick(c.get("resources"), "requests", {}), resource))
+    spec, sidecars, peak = pod.get("spec") or {}, 0, 0
+    for c in pick(spec, "initContainers", []):
+        if c.get("restartPolicy") == "Always":
+            sidecars += request(c)
+            peak = max(peak, sidecars)
+        else:
+            peak = max(peak, sidecars + request(c))
+    return max(sum(request(c) for c in pick(spec, "containers", [])) + sidecars, peak)
+
+
+def _model_store(namespace: str, pvc: str) -> tuple[list, bool]:
+    """The model-store PV's required node terms (node-local storage), and whether the PVC is unbound, not
+    ReadWriteMany and binds on first use, so the download Job's node decides where it lands."""
+    claim = k8s.get_json("pvc", pvc, "-n", namespace)
+    if not claim:
+        return [], False
+    spec = claim.get("spec") or {}
+    volume = text(pick(spec, "volumeName"))
+    if volume:
+        pv = k8s.get_json("pv", volume)
+        if not pv:
+            warn(f"Could not read PersistentVolume {volume} — skipping the model-store node check.")
+        affinity = pick(pick(pv, "spec", {}), "nodeAffinity", {})
+        return pick(pick(affinity, "required", {}), "nodeSelectorTerms", []), False
+    mode = k8s.out("get", "storageclass", text(pick(spec, "storageClassName")), "-o", "jsonpath={.volumeBindingMode}")
+    return [], mode == "WaitForFirstConsumer" and "ReadWriteMany" not in pick(spec, "accessModes", [])
+
+
+def _node_matches(node: dict, terms: list) -> bool:
+    """Whether a node satisfies required nodeSelectorTerms: any term, with all of its expressions."""
+    labels, name = pick(node.get("metadata"), "labels", {}), text(pick(node.get("metadata"), "name"))
+
+    def holds(e: dict, value: Any) -> bool:
+        op, values = e.get("operator"), e.get("values") or []
+        if op in ("Gt", "Lt"):  # one integer value; a label that is missing or not an integer does not match
+            label, bound = _int(value), _int(values[0]) if len(values) == 1 else None
+            return label is not None and bound is not None and (label > bound if op == "Gt" else label < bound)
+        return {"In": value in values, "NotIn": value not in values, "Exists": value is not None,
+                "DoesNotExist": value is None}.get(op, False)
+    return any((pick(t, "matchExpressions", []) or pick(t, "matchFields", []))  # an empty term matches no node
+               and all(holds(e, labels.get(e.get("key"))) for e in pick(t, "matchExpressions", []))
+               and all(holds(f, name if f.get("key") == "metadata.name" else None) for f in pick(t, "matchFields", []))
+               for t in terms)
+
+
+def _int(value: Any) -> int | None:
+    digits = value[1:] if isinstance(value, str) and value[:1] in ("+", "-") else value
+    return int(value) if isinstance(digits, str) and is_uint(digits) else None
+
+
+def _quantity(value: Any) -> int:
+    """A whole-number extended-resource quantity (GPUs); 0 when absent or unparseable."""
+    return int(text(value)) if is_uint(text(value)) else 0
+
+
+def _schedulable(node: dict, tolerated: str) -> bool:
+    """Ready, not cordoned, and no NoSchedule/NoExecute taint other than the accelerator's own, which GPU pods
+    tolerate."""
+    ready = any(c.get("type") == "Ready" and c.get("status") == "True"
+                for c in pick(node.get("status"), "conditions", []))
+    blocking = [t for t in pick(node.get("spec"), "taints", []) if t.get("effect") in ("NoSchedule", "NoExecute")
+                and not (t.get("key") == tolerated and t.get("effect") == "NoSchedule")]
+    return ready and not pick(node.get("spec"), "unschedulable", False) and not blocking
 
 
 def whole_cpus(cpu: str, floor: bool = False) -> int:

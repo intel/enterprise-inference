@@ -14,9 +14,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import __version__, k8s, platform, renderer, routing
-from .config import MM_DIR, Catalog, Model, is_uint, mm_path, pick, resolve, resolve_autoscaling, text, truthy
+from .config import MM_DIR, Catalog, Model, env, is_uint, mm_path, pick, resolve, resolve_autoscaling, text, truthy
 from .download import download_weights
-from .policy import ANN, preflight_gate, resolve_auto_cpu, resolve_policy, warn_max_unplaceable, whole_cpus
+from .policy import ANN, GpuRuntime, preflight_gate, resolve_auto_cpu, resolve_policy, warn_max_unplaceable, whole_cpus
 from .ui import BOLD, CYAN, DIM, GREEN, RESET, YELLOW, abort, fmt_duration, info, ok, warn
 
 USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubernetes
@@ -34,7 +34,7 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
 {BOLD}{CYAN}Deploy Options:{RESET}
   {GREEN}--hfid{RESET} <hf/repo>     Ad-hoc deploy any HuggingFace model (--id still works, deprecated)
   {GREEN}--name{RESET} <name>        Override generated name (with --hfid)
-  {GREEN}--server{RESET} <name>      Model server/engine: vllm (default) | openvino  (alias: --runtime)
+  {GREEN}--server{RESET} <name>      Model server/engine: vllm (default) | openvino | vllm-cuda  (alias: --runtime)
   {GREEN}--server-version{RESET} V   Server version (must be declared for the model if it uses servers:)
   {GREEN}--as{RESET} <name>          Deploy under a distinct name (run multiple server/version variants at once)
   {GREEN}--cpu{RESET} N              CPU cores
@@ -44,7 +44,8 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
   {GREEN}--max-replicas{RESET} N     Autoscaling: most replicas; above --min-replicas turns it on
   {GREEN}--scale-target{RESET} N     Autoscaling: per-replica load that triggers a scale-up
                             (vLLM: waiting requests, default 2; OVMS: in-flight requests, default 4)
-  {GREEN}--tp{RESET} N               Tensor-parallel size (splits across N NUMA nodes)
+  {GREEN}--tp{RESET} N               Tensor-parallel size (splits across N NUMA nodes; on a GPU runtime, also N GPUs)
+  {GREEN}--gpus{RESET} N             GPUs per pod (device: gpu runtimes, e.g. vllm-cuda); also the default --tp
   {GREEN}--cpu-policy{RESET} <p>     CPU pinning: nri-balloons | kubelet-static | best-effort
                             (default: MM_CPU_POLICY, else auto-detected)
   {GREEN}--category{RESET} <cat>     Override category: llm | embed | rerank | vlm
@@ -76,6 +77,9 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
 {BOLD}{CYAN}Environment:{RESET}
   {GREEN}HF_TOKEN{RESET}              HuggingFace token for gated models
   {GREEN}MM_CONFIG{RESET}             Path to models.yaml
+  {GREEN}MM_ACCEL_RESOURCE{RESET}     Accelerator extended resource the cluster advertises (e.g. nvidia.com/gpu).
+                        Required to deploy a device: gpu runtime (vllm-cuda); ai-solutions sets
+                        it in rack-scale mode only
   {GREEN}MM_CPU_POLICY{RESET}         Cluster CPU policy: nri-balloons (default) |
                         kubelet-static | best-effort. Set by the Ansible
                         install from kubernetes_cpu_policy; --cpu-policy wins.
@@ -124,6 +128,7 @@ class Options:
     max_replicas: str = ""
     scale_target: str = ""
     tp: str = ""
+    gpus: str = ""
     cpu_policy: str = ""
     category: str = ""
     routing: str = ""
@@ -137,8 +142,8 @@ class Options:
 FLAGS = {"--dry-run": "dry_run", "--wait": "wait", "--catalog": "catalog_only", "--deployed": "deployed_only"}
 VALUES = {"--wait-timeout": "wait_timeout", "--hfid": "id", "--id": "id", "--name": "name", "--server": "server",
           "--runtime": "server", "--server-version": "server_version", "--as": "alias", "--cpu": "cpu",
-          "--memory": "memory", "--replicas": "replicas", "--tp": "tp", "--cpu-policy": "cpu_policy",
-          "--category": "category", "--routing": "routing", "--node": "node",
+          "--memory": "memory", "--replicas": "replicas", "--tp": "tp", "--gpus": "gpus",
+          "--cpu-policy": "cpu_policy", "--category": "category", "--routing": "routing", "--node": "node",
           "--min-replicas": "min_replicas", "--max-replicas": "max_replicas", "--scale-target": "scale_target"}
 LISTS = {"--env": "env", "--arg": "arg", "--label": "label"}
 
@@ -176,7 +181,7 @@ def parse_args(argv: list[str]) -> Options:
                 abort(f"{a} requires a value")
             i += 1
             value = argv[i]  # taken verbatim, so `--arg --max-model-len=4096` works
-            if a in ("--wait-timeout", "--replicas", "--tp", "--min-replicas", "--max-replicas",
+            if a in ("--wait-timeout", "--replicas", "--tp", "--gpus", "--min-replicas", "--max-replicas",
                      "--scale-target") and not (is_uint(value) and int(value) > 0):
                 abort(f"{a} requires a positive integer, got: {value}")
             if a == "--label":
@@ -195,19 +200,30 @@ def parse_args(argv: list[str]) -> Options:
     return o
 
 
-def _engine_cli_args(o: Options) -> tuple[list[str], int]:
-    """--arg list (with --tp injected unless it already sets the flag) and the tensor-parallel size."""
-    args = list(o.arg)
-    if o.tp:
-        if "--tensor-parallel-size" not in args:
-            args += ["--tensor-parallel-size", o.tp]
-        return args, int(o.tp)
+def _tp_in(args: list[str]) -> int | None:
+    """The --tensor-parallel-size set in args (either form; the last wins, as in vLLM), or None."""
+    found = None
     for n, a in enumerate(args):
         if a == "--tensor-parallel-size" or a.startswith("--tensor-parallel-size="):
             tp = a.split("=", 1)[1] if "=" in a else (args[n + 1] if n + 1 < len(args) else "1")
             if not (is_uint(tp) and int(tp) > 0):
                 abort(f"--tensor-parallel-size requires a positive integer, got: {tp}")
-            return args, int(tp)
+            found = int(tp)
+    return found
+
+
+def _engine_cli_args(o: Options, gpus: int, catalog_args: list[str]) -> tuple[list[str], int]:
+    """--arg list (with --tp appended: it renders last, so it wins over an --arg one) and the tensor-parallel size.
+    A multi-GPU pod defaults to tensor parallelism across all its GPUs, unless the catalog's args
+    (category, version, model) already set it: the CLI args render last and would override them."""
+    args = list(o.arg)
+    if o.tp:
+        return args + ["--tensor-parallel-size", o.tp], int(o.tp)
+    tp = _tp_in(args) or _tp_in(catalog_args)
+    if tp:
+        return args, tp
+    if gpus > 1:
+        return args + ["--tensor-parallel-size", str(gpus)], gpus
     return args, 1
 
 
@@ -326,6 +342,37 @@ def _spawn_reconciler(m: Model, timeout: int) -> tuple[Path, bool]:
     return log, True
 
 
+def _gpu_gate(m: Model, dry_run: bool) -> None:
+    """Refuse a device: gpu runtime unless MM_ACCEL_RESOURCE names the extended resource the cluster
+    advertises. Intel Enterprise AI Solutions sets it only when rack_scale_enabled=true and the rack
+    profile declares an NVIDIA accelerator, so a GPU model cannot be deployed by accident on a CPU install.
+    --dry-run is a preview: it warns and renders with MM_ACCEL_RESOURCE, or the runtime's resource when unset."""
+    if not m.gpu:
+        return
+    if m.kind == "InferenceService":
+        abort(f"Runtime '{m.runtime}' is a GPU runtime, which deploys only as an LLMInferenceService, not InferenceService.")
+    if not (is_uint(m.gpus) and int(m.gpus) > 0):
+        abort(f"Runtime '{m.runtime}' is a GPU runtime but the GPU count is invalid: '{m.gpus}'. Set gpus: N on "
+              "the model, defaults.gpus on its category, or pass --gpus N.")
+    have = env("MM_ACCEL_RESOURCE", "")
+    want = text(pick(m.rt, "accelerator_resource"))
+    if have and want and have.split("/")[0] != want.split("/")[0]:
+        msg = (f"Runtime '{m.runtime}' is built for {renderer.gpu_vendor(want) or want} GPUs ({want}), but the cluster's "
+               f"accelerator is {have} (MM_ACCEL_RESOURCE). Use a runtime for that accelerator, or unset "
+               "MM_ACCEL_RESOURCE on a cluster without it.")
+        return warn(f"{msg} Previewing anyway (--dry-run).") if dry_run else abort(msg)
+    if have:
+        return
+    if dry_run:
+        return warn(f"MM_ACCEL_RESOURCE is not set — previewing anyway (--dry-run) with "
+                    f"'{want or '?'}'. A real deploy of '{m.runtime}' would be "
+                    "refused.")
+    abort(f"Runtime '{m.runtime}' targets a GPU (device: gpu) but no accelerator resource is enabled "
+          "(MM_ACCEL_RESOURCE is empty). In Intel Enterprise AI Solutions this is set automatically when "
+          "rack_scale_enabled=true and rack-profile.yaml declares an NVIDIA accelerator: on at least one node. To deploy "
+          f"manually on a cluster you trust: MM_ACCEL_RESOURCE={want or '<resource>'} ./model-manager deploy {m.name}")
+
+
 def _require_autoscaling(m: Model) -> None:
     """KEDA installed, and a KServe whose LLMInferenceService has KEDA scaling (checked before the download)."""
     if not k8s.succeeds("get", "crd", "scaledobjects.keda.sh"):
@@ -362,17 +409,25 @@ def deploy(o: Options, target: str) -> None:
     m = resolve(catalog, target, o)
     resolve_autoscaling(m, o)
     m.check()
+    _gpu_gate(m, o.dry_run)
     info(f"Deploying {m.name} ({m.kind})")
     info(f"  Runtime: {m.runtime}{f' @ {m.version}' if m.version else ''} | Category: {m.category} | "
          f"Routing: {m.routing or 'default'}")
     replicas = (f"{m.min_replicas}-{m.max_replicas} (autoscaled, target {m.scale_target} per replica)"
                 if m.autoscaled else m.replicas)
     info(f"  CPU: {m.cpu} | Memory: {m.memory} | Replicas: {replicas}")
+    if m.gpu:
+        info(f"  GPUs: {m.gpus} x {m.accel_resource}")
     if m.node:
         info(f"  Node: {m.node}")
-    policy = resolve_policy(o.cpu_policy, m.node)
+    policy = GpuRuntime(catalog.pvc) if m.gpu else resolve_policy(o.cpu_policy, m.node)
     info(f"  CPU policy: {policy.name}")
-    cli_args, tp = _engine_cli_args(o)
+    gpus = int(m.gpus) if m.gpu else 1
+    cli_args, tp = _engine_cli_args(o, gpus, renderer.engine_args(m) if m.gpu else [])
+    if m.gpu and tp > gpus:
+        abort(f"Tensor parallel size {tp} needs {tp} GPUs, but {m.name} requests {gpus}. Pass --gpus {tp}.")
+    if m.gpu and tp < gpus:
+        warn(f"{gpus - tp} of {gpus} GPUs unused (tensor parallel size {tp}); pass --gpus {tp}.")
     resolve_auto_cpu(policy, m, tp)
     policy.prepare(m)
     annotations, cpu = policy.annotations(m, tp)
@@ -403,6 +458,8 @@ def deploy(o: Options, target: str) -> None:
         def render(model: Model) -> str:
             return renderer.manifest(model, catalog, o, annotations, cpu, cli_args)
 
+        if m.gpu and not truthy(os.environ.get("MM_SKIP_PREFLIGHT", "")):
+            policy.rolls = not _only_scaling_changed(m, render)
         if changed and policy.counts_running_pods and _only_scaling_changed(m, render):
             info(f"  Only the replica count or autoscaling changed: the running pods stay, and {policy.name} would "
                  "count their cores as taken, so only the replicas beyond them are checked (warning only).")
@@ -417,7 +474,7 @@ def deploy(o: Options, target: str) -> None:
             if m.autoscaled:
                 warn_max_unplaceable(policy, m, tp, running=running)
         k8s.ensure_storage(m.namespace, catalog.pvc)
-        download_weights(m, catalog, cli_args)
+        download_weights(m, catalog, cli_args, policy.download_nodes if m.gpu else ())
         if m.kind == "InferenceService":
             _install_runtime(m)
         _retire_inference_service(m)
