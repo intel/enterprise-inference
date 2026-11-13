@@ -338,13 +338,15 @@ def _require_autoscaling(m: Model) -> None:
               f"envoy_gateway_upgrade: true); deploy {m.name} with a fixed --replicas.")
 
 
-def _running_replicas(m: Model) -> int:
-    """Workload pods of m that hold their CPUs: on a node and Running or Pending, as NRI counts cores in use."""
+def _running_replicas(m: Model, node: str = "") -> int:
+    """Workload pods of m that hold their CPUs (on `node`, when given): on a node and Running or Pending, as NRI
+    counts cores in use."""
     selector = (f"serving.kserve.io/inferenceservice={m.name}" if m.kind == "InferenceService"
                 else f"app.kubernetes.io/name={m.name},kserve.io/component=workload")
     pods = pick(k8s.get_json("pods", "-n", m.namespace, "-l", selector), "items", [])
-    return sum(1 for p in pods if pick(pick(p, "spec", {}), "nodeName")
-               and pick(pick(p, "status", {}), "phase") in ("Running", "Pending"))
+    on = [p for p in pods if pick(pick(p, "spec", {}), "nodeName") and pick(pick(p, "status", {}), "phase")
+          in ("Running", "Pending")]
+    return sum(1 for p in on if not node or p["spec"]["nodeName"] == node)
 
 
 def _only_scaling_changed(m: Model, render) -> bool:
@@ -508,7 +510,7 @@ def _upgrade_credit(m: Model, annotations: dict, cpu: str) -> int:
     if pick(pick(predictor, "annotations", {}), balloon) != annotations.get(balloon) or \
             whole_cpus(old_cpu, floor=True) < whole_cpus(cpu):
         return 0
-    return _running_replicas(old)
+    return _running_replicas(old, m.node)  # cores freed on another node don't help a pinned deploy
 
 
 def _retire_inference_service(m: Model) -> None:

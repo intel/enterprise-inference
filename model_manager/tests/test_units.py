@@ -1084,7 +1084,7 @@ BALLOON = "cpu-policy.model-manager.io/balloon"
 def test_upgrade_credit_needs_the_freed_cores_to_fit(monkeypatch, old_cpu, old_balloon, new_cpu, credited):
     m = Model(name="m", namespace="ns", kind="LLMInferenceService")
     monkeypatch.setattr(cli, "_owned_inference_service", lambda m: Model(name="m", namespace="ns", kind="InferenceService"))
-    monkeypatch.setattr(cli, "_running_replicas", lambda m: 2)
+    monkeypatch.setattr(cli, "_running_replicas", lambda m, node="": 2)
     spec = {"spec": {"predictor": {"annotations": {BALLOON: old_balloon},
                                    "model": {"resources": {"requests": {"cpu": old_cpu}}}}}}
     monkeypatch.setattr(k8s, "get_json", lambda *a: spec)
@@ -1094,3 +1094,15 @@ def test_upgrade_credit_needs_the_freed_cores_to_fit(monkeypatch, old_cpu, old_b
 def test_no_upgrade_credit_without_an_old_inference_service(monkeypatch):
     monkeypatch.setattr(cli, "_owned_inference_service", lambda m: None)
     assert cli._upgrade_credit(Model(name="m", namespace="ns", kind="LLMInferenceService"), {}, "8") == 0
+
+
+@pytest.mark.parametrize("node, credited", [("", 2), ("a", 1), ("b", 1), ("c", 0)])
+def test_upgrade_credit_counts_only_the_pinned_nodes_pods(monkeypatch, node, credited):
+    # A deploy pinned to a node gains only the cores the old pods free on that node.
+    monkeypatch.setattr(cli, "_owned_inference_service", lambda m: Model(name="m", namespace="ns", kind="InferenceService"))
+    pods = {"items": [{"spec": {"nodeName": n}, "status": {"phase": "Running"}} for n in ("a", "b")]}
+    spec = {"spec": {"predictor": {"annotations": {BALLOON: "vllm-balloon"},
+                                   "model": {"resources": {"requests": {"cpu": "8"}}}}}}
+    monkeypatch.setattr(k8s, "get_json", lambda *a: pods if a[0] == "pods" else spec)
+    m = Model(name="m", namespace="ns", kind="LLMInferenceService", node=node)
+    assert cli._upgrade_credit(m, {BALLOON: "vllm-balloon"}, "8") == credited
