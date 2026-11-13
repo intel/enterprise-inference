@@ -154,11 +154,14 @@ The model store must be mountable on a GPU node. On node-local storage
 deploy: GPU models need shared (ReadWriteMany) storage, or the store on a GPU
 node. A store that binds on first use (and is not ReadWriteMany) is created
 where the download Job runs, so the pre-flight pins the Job to the GPU nodes
-that fit (not when it is skipped), and warns: on node-local storage every model,
+that fit (not when it is skipped, or when `MM_PREFLIGHT=warn` proceeds past a
+refusal), and warns: on node-local storage every model,
 CPU ones included, must then run on that node.
 
 `--tp N` without `--gpus` also sets the GPU count to N. A tensor parallel size
 larger than the GPU count is refused; a smaller one warns about the unused GPUs.
+The count covers tensor parallelism only: with pipeline or data parallelism passed
+through `--arg`, set `--gpus` to the total GPUs the pod needs.
 For a manual CLI deploy on a GPU cluster you already trust:
 
 ```bash
