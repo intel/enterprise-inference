@@ -146,7 +146,8 @@ too. When the model already fills its node, run `./model-manager undeploy <name>
 first, or set `MM_PREFLIGHT=warn` to apply anyway (for example for a label-only
 change; a new pod then waits for GPUs). A change of `--replicas` alone keeps the
 running pods: a scale-down needs no free GPUs, and a scale-up needs them only
-for the added replicas.
+for the added replicas. GPU models take a fixed `--replicas`: autoscaling
+(`--min-replicas`/`--max-replicas`) is not available for `vllm-cuda` yet.
 
 The model store must be mountable on a GPU node. On node-local storage
 (`local-path`), a store already bound to a node without the GPUs stops the
@@ -275,6 +276,7 @@ Each `deploy` runs these steps in order:
    flags into one final configuration.
 2. **Capacity check** — confirm the requested CPU fits the node's physical cores
    before changing anything. See [CPU Pinning & NUMA](../reference/cpu_pinning.md).
+   A GPU model checks free GPUs and the model store instead (see [The gate](#the-gate)).
 3. **Ensure storage** — make sure the shared `model-store` PVC is ready.
 4. **Download weights** — a one-off Kubernetes Job pulls the model from Hugging Face
    onto that volume, skipped if the weights are already there.
