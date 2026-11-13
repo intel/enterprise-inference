@@ -285,7 +285,7 @@
           kind: Namespace
           metadata:
             name: "{{ langfuse_clickhouse_operator_namespace }}"
-            labels: "{{ ({'istio.io/dataplane-mode': 'ambient'} if istio_enabled | default(false) | bool else {})
+            labels: "{{ ((istio_namespace_labels | default({'istio.io/dataplane-mode': 'ambient'})) if istio_enabled | default(false) | bool else {})
                         | combine({'pod-security.kubernetes.io/enforce': 'restricted',
                                    'pod-security.kubernetes.io/audit': 'restricted',
                                    'pod-security.kubernetes.io/warn': 'restricted'}

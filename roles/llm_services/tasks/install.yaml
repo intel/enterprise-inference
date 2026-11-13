@@ -20,8 +20,7 @@
       kind: Namespace
       metadata:
         name: "{{ llm_services_namespace }}"
-        labels:
-          istio.io/dataplane-mode: "ambient"
+        labels: "{{ istio_namespace_labels | default({'istio.io/dataplane-mode': 'ambient'}) }}"
   when: istio_enabled | default(false) | bool
 
 - name: "llm_services | Label namespace — PSS"

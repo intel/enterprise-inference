@@ -46,8 +46,7 @@
       kind: Namespace
       metadata:
         name: "{{ agentgateway_namespace }}"
-        labels:
-          istio.io/dataplane-mode: "ambient"
+        labels: "{{ istio_namespace_labels | default({'istio.io/dataplane-mode': 'ambient'}) }}"
   when: istio_enabled | default(false) | bool
 
 - name: "agentgateway | Label control-plane namespace — PSS"
@@ -162,8 +161,7 @@
       kind: Namespace
       metadata:
         name: "{{ ai_gateway_namespace }}"
-        labels:
-          istio.io/dataplane-mode: "ambient"
+        labels: "{{ istio_namespace_labels | default({'istio.io/dataplane-mode': 'ambient'}) }}"
   when:
     - ai_gateway_create | bool
     - istio_enabled | default(false) | bool
