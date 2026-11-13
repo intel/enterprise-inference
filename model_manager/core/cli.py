@@ -16,7 +16,7 @@ from pathlib import Path
 from . import __version__, k8s, platform, renderer, routing
 from .config import MM_DIR, Catalog, Model, is_uint, mm_path, pick, resolve, resolve_autoscaling, text, truthy
 from .download import download_weights
-from .policy import preflight_gate, resolve_auto_cpu, resolve_policy, warn_max_unplaceable
+from .policy import ANN, preflight_gate, resolve_auto_cpu, resolve_policy, warn_max_unplaceable, whole_cpus
 from .ui import BOLD, CYAN, DIM, GREEN, RESET, YELLOW, abort, fmt_duration, info, ok, warn
 
 USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubernetes
@@ -40,9 +40,10 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
   {GREEN}--cpu{RESET} N              CPU cores
   {GREEN}--memory{RESET} NGi         Memory (e.g. 32Gi)
   {GREEN}--replicas{RESET} N         Fixed replica count (default: 1); turns autoscaling off
-  {GREEN}--min-replicas{RESET} N     Autoscaling (KEDA, vLLM): fewest replicas (default: 1)
+  {GREEN}--min-replicas{RESET} N     Autoscaling (KEDA): fewest replicas (default: 1)
   {GREEN}--max-replicas{RESET} N     Autoscaling: most replicas; above --min-replicas turns it on
-  {GREEN}--scale-target{RESET} N     Autoscaling: waiting requests per replica that trigger a scale-up (default: 2)
+  {GREEN}--scale-target{RESET} N     Autoscaling: per-replica load that triggers a scale-up
+                            (vLLM: waiting requests, default 2; OVMS: in-flight requests, default 4)
   {GREEN}--tp{RESET} N               Tensor-parallel size (splits across N NUMA nodes)
   {GREEN}--cpu-policy{RESET} <p>     CPU pinning: nri-balloons | kubelet-static | best-effort
                             (default: MM_CPU_POLICY, else auto-detected)
@@ -337,13 +338,15 @@ def _require_autoscaling(m: Model) -> None:
               f"envoy_gateway_upgrade: true); deploy {m.name} with a fixed --replicas.")
 
 
-def _running_replicas(m: Model) -> int:
-    """Workload pods of m that hold their CPUs: on a node and Running or Pending, as NRI counts cores in use."""
+def _running_replicas(m: Model, node: str = "") -> int:
+    """Workload pods of m that hold their CPUs (on `node`, when given): on a node and Running or Pending, as NRI
+    counts cores in use."""
     selector = (f"serving.kserve.io/inferenceservice={m.name}" if m.kind == "InferenceService"
                 else f"app.kubernetes.io/name={m.name},kserve.io/component=workload")
     pods = pick(k8s.get_json("pods", "-n", m.namespace, "-l", selector), "items", [])
-    return sum(1 for p in pods if pick(pick(p, "spec", {}), "nodeName")
-               and pick(pick(p, "status", {}), "phase") in ("Running", "Pending"))
+    on = [p for p in pods if pick(pick(p, "spec", {}), "nodeName") and pick(pick(p, "status", {}), "phase")
+          in ("Running", "Pending")]
+    return sum(1 for p in on if not node or p["spec"]["nodeName"] == node)
 
 
 def _only_scaling_changed(m: Model, render) -> bool:
@@ -362,7 +365,7 @@ def deploy(o: Options, target: str) -> None:
     info(f"Deploying {m.name} ({m.kind})")
     info(f"  Runtime: {m.runtime}{f' @ {m.version}' if m.version else ''} | Category: {m.category} | "
          f"Routing: {m.routing or 'default'}")
-    replicas = (f"{m.min_replicas}-{m.max_replicas} (autoscaled on waiting requests > {m.scale_target}/replica)"
+    replicas = (f"{m.min_replicas}-{m.max_replicas} (autoscaled, target {m.scale_target} per replica)"
                 if m.autoscaled else m.replicas)
     info(f"  CPU: {m.cpu} | Memory: {m.memory} | Replicas: {replicas}")
     if m.node:
@@ -405,12 +408,19 @@ def deploy(o: Options, target: str) -> None:
                  "count their cores as taken, so only the replicas beyond them are checked (warning only).")
             warn_max_unplaceable(policy, m, tp, running=_running_replicas(m))
         else:
-            preflight_gate(policy, m, tp)
+            # An upgrade removes the old InferenceService before the new pods start, so its cores are free for them.
+            running = _upgrade_credit(m, annotations, cpu) if policy.counts_running_pods else 0
+            if running:
+                info(f"  The previous InferenceService/{m.name} is removed before the new pods start: its {running} "
+                     "running pods' cores are counted as free.")
+            preflight_gate(policy, m, tp, running=running)
             if m.autoscaled:
-                warn_max_unplaceable(policy, m, tp)
+                warn_max_unplaceable(policy, m, tp, running=running)
         k8s.ensure_storage(m.namespace, catalog.pvc)
         download_weights(m, catalog, cli_args)
-        _install_runtime(m)
+        if m.kind == "InferenceService":
+            _install_runtime(m)
+        _retire_inference_service(m)
         k8s.apply(manifest, ssa=True)
         ok(f"Manifest applied: {m.kind}/{m.name} in {m.namespace}")
     routing.register(m)
@@ -463,16 +473,57 @@ def _discover(name: str, namespace: str) -> Model | None:
                          "-o", "jsonpath={.items[0].metadata.namespace}"))
         if not ns:
             continue
-        if k8s.succeeds("get", "httproute", f"direct-{name}", "-n", ns):
-            mode = "direct"
-        elif k8s.succeeds("get", "aigatewayroute", f"aigw-{name}", "-n", ns) and \
-                k8s.succeeds("get", "aiservicebackend", name, "-n", ns):
-            mode = "aigateway"
-        else:
-            mode = "epp"
         info(f"Discovered live {kind}/{name} in {ns} (no catalog entry)")
-        return Model(name=name, namespace=ns, kind=kind, routing=mode)
+        return Model(name=name, namespace=ns, kind=kind, routing=_live_routing(name, ns))
     return None
+
+
+def _live_routing(name: str, namespace: str) -> str:
+    """The routing mode a live model was deployed with, read from the routes that exist."""
+    if k8s.succeeds("get", "httproute", f"direct-{name}", "-n", namespace):
+        return "direct"
+    if k8s.succeeds("get", "aigatewayroute", f"aigw-{name}", "-n", namespace) and \
+            k8s.succeeds("get", "aiservicebackend", name, "-n", namespace):
+        return "aigateway"
+    return "epp"
+
+
+def _owned_inference_service(m: Model) -> Model | None:
+    """The InferenceService an OVMS model ran as before it moved to LLMInferenceService, when model-manager created it."""
+    label = "jsonpath={.metadata.labels.app\\.kubernetes\\.io/managed-by}"
+    if m.kind != "LLMInferenceService" or \
+            k8s.out("get", "InferenceService", m.name, "-n", m.namespace, "-o", label) != "model-manager":
+        return None
+    return Model(name=m.name, namespace=m.namespace, kind="InferenceService",
+                 routing=_live_routing(m.name, m.namespace))
+
+
+def _upgrade_credit(m: Model, annotations: dict, cpu: str) -> int:
+    """Running pods of the InferenceService m replaces whose cores a new replica can take: the same NRI balloon
+    (which follows tp) and at least as many CPUs. Any other change gets the full check."""
+    old = _owned_inference_service(m)
+    if old is None:
+        return 0
+    predictor = pick(pick(k8s.get_json("InferenceService", m.name, "-n", m.namespace) or {}, "spec", {}), "predictor", {})
+    old_cpu = text(pick(pick(pick(pick(predictor, "model", {}), "resources", {}), "requests", {}), "cpu"))
+    balloon = f"{ANN}/balloon"
+    if pick(pick(predictor, "annotations", {}), balloon) != annotations.get(balloon) or \
+            whole_cpus(old_cpu, floor=True) < whole_cpus(cpu):
+        return 0
+    return _running_replicas(old, m.node)  # cores freed on another node don't help a pinned deploy
+
+
+def _retire_inference_service(m: Model) -> None:
+    """Remove the InferenceService m replaces, and its routes."""
+    old = _owned_inference_service(m)
+    if old is None:
+        return
+    info(f"Removing the previous InferenceService/{m.name}: it now deploys as an {m.kind}")
+    # Delete first: if it fails, the old model keeps its routes and its cores, and the replacement is not applied.
+    r = k8s.run("delete", "InferenceService", m.name, "-n", m.namespace, "--ignore-not-found")
+    if r.returncode:
+        abort(f"Could not remove the previous InferenceService/{m.name}: {r.stderr.strip()}")
+    routing.deregister(old)
 
 
 def undeploy(o: Options, target: str) -> None:
@@ -487,6 +538,7 @@ def undeploy(o: Options, target: str) -> None:
     if m is None:
         abort(f"No catalog entry or deployed resource named '{target}' found.")
     info(f"Undeploying {m.name}")
+    _retire_inference_service(m)  # first: it reads the old routes to know which to delete
     k8s.delete(m.kind, m.name, m.namespace)
     k8s.delete("configmap", f"{m.name}-chat-template", m.namespace, quiet=True)
     routing.deregister(m)

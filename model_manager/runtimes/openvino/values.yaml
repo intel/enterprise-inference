@@ -6,15 +6,28 @@
 # load time. OVMS is a flat runtime with no version axis — server_version is
 # not applicable, and requesting one via --server-version aborts with a clear
 # message.
+#
+# OVMS runs as an LLMInferenceService: KServe's scheduler routes each request
+# (approximate prefix-cache affinity) and scales it like vLLM. The download job
+# writes the servable and config_all.json to the model's folder on the store,
+# which KServe mounts at /mnt/models.
 # =============================================================================
 
 # One image serves and pulls (`ovms --pull` of pre-exported OpenVINO models). 2026.4+
 # loads models that ship an MTP draft (e.g. Qwen3.5). Set model_downloader_image to a
 # -py tag only to convert a model that is not already in OpenVINO format.
-image: "openvino/model_server:2026.4.1"                     # injected into the ClusterServingRuntime (override in models.yaml → runtimes.openvino.image)
+image: "openvino/model_server:2026.4.1"
 device: cpu
-kind: InferenceService
-format: openvino
-runtime_name: openvino-runtime                              # ClusterServingRuntime to reference
-routing: aigateway
-serving_runtime_manifest: openvino/serving-runtime.yaml     # raw CR manifest applied on first deploy
+kind: LLMInferenceService
+routing: epp
+container:
+  command: ["/ovms/bin/ovms"]
+  args: ["--config_path", "/mnt/models/config_all.json", "--rest_port", "8000", "--port", "9000", "--metrics_enable"]
+  # Ready only once the graph is loaded: the REST port opens seconds earlier.
+  ready_path: /v2/models/$model/ready
+  live_path: /v2/health/live
+  run_as_user: 5000           # the image's user; the download job writes the files as it
+# In-flight requests: OVMS exports no LLM queue metric.
+autoscaling:
+  query: 'sum(ovms_current_graphs{namespace="$namespace",model="$model"})'
+  scale_target: 4

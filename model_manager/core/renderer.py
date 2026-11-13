@@ -6,6 +6,7 @@ import json
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 from . import platform
 from .config import Catalog, Model, gateway_ref, mm_path, pick, text
@@ -117,11 +118,11 @@ PROMETHEUS_URL = "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster
 
 
 def _llmisvc_replicas(m: Model) -> str:
-    """spec.replicas, or spec.scaling with a KEDA trigger on vLLM's waiting queue (KServe makes the ScaledObject).
-    The CRD rejects both together."""
+    """spec.replicas, or spec.scaling with a KEDA trigger on the runtime's signal (KServe makes the
+    ScaledObject). The CRD rejects both together. Model.check made both names DNS labels, safe in PromQL."""
     if not m.autoscaled:
         return f"  replicas: {m.replicas}"
-    query = f'sum(vllm:num_requests_waiting{{namespace="{m.namespace}",model="{m.name}"}})'
+    query = m.scale_query.replace("$namespace", m.namespace).replace("$model", m.name)
     return "\n".join([
         "  scaling:", f"    minReplicas: {m.min_replicas}", f"    maxReplicas: {m.max_replicas}", "    keda:",
         "      pollingInterval: 15", "      triggers:", "        - type: prometheus", "          metadata:",
@@ -135,17 +136,39 @@ def live_scaling(m: Model, spec: dict) -> Model:
     if m.kind != "LLMInferenceService":
         return dataclasses.replace(m, replicas=text(pick(pick(spec, "predictor", {}), "minReplicas", m.replicas)))
     scaling = pick(spec, "scaling", {})
-    trigger = (pick(pick(scaling, "keda", {}), "triggers", []) or [{}])[0]
+    metadata = pick((pick(pick(scaling, "keda", {}), "triggers", []) or [{}])[0], "metadata", {})
+    # The query too: switching to a fixed count leaves m.scale_query empty.
     return dataclasses.replace(m, replicas=text(pick(spec, "replicas", m.replicas)),
                                min_replicas=text(pick(scaling, "minReplicas")),
                                max_replicas=text(pick(scaling, "maxReplicas")),
-                               scale_target=text(pick(pick(trigger, "metadata", {}), "threshold")))
+                               scale_target=text(pick(metadata, "threshold")),
+                               scale_query=text(pick(metadata, "query")) or m.scale_query)
+
+
+def _fill(value: Any, m: Model) -> str:
+    return text(value).replace("$model", m.name)
+
+
+def _engine(m: Model) -> dict:
+    """Command, probe paths and user of the main container: the runtime's own, or KServe's vLLM defaults."""
+    c = m.container
+    command = [_fill(a, m) for a in pick(c, "command", [])]
+    return {"COMMAND": f"        command: {json.dumps(command)}\n" if command else "",
+            "READY_PATH": _fill(pick(c, "ready_path", "/health"), m),
+            "LIVE_PATH": _fill(pick(c, "live_path", "/health"), m), "RUN_AS": m.run_as_user}
 
 
 def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_args: list[str]) -> str:
     """The LLMInferenceService / InferenceService for m. cli_args already carries any --tp injection."""
     args = engine_args(m)
-    if m.kind == "LLMInferenceService":
+    if m.kind == "LLMInferenceService" and m.container:
+        if platform.is_openshift():  # OpenShift AI's template starts vLLM itself (see platform.adapt_llmisvc)
+            abort(f"Runtime '{m.runtime}' is not supported on OpenShift: its LLMInferenceService template "
+                  "starts vLLM.")
+        if m.chat_template:
+            abort(f"Model '{m.name}': chat_template applies to vLLM only, not runtime '{m.runtime}'.")
+        args = [_fill(a, m) for a in pick(m.container, "args", [])] + args
+    elif m.kind == "LLMInferenceService":
         args += ["--served-model-name", m.name]
         if m.chat_template:
             path = f"{CHAT_TEMPLATE_DIR}/chat_template.jinja" if inline_chat_template(m) else m.chat_template
@@ -161,15 +184,15 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
         inline = inline_chat_template(m)
         gateway, gateway_ns = gateway_ref()
         return platform.adapt_llmisvc(render(
-            template("llm-inference-service.yaml"), **common, IMAGE=m.image, SCALING=_llmisvc_replicas(m),
+            template("llm-inference-service.yaml"), **common, **_engine(m), IMAGE=m.image,
+            SCALING=_llmisvc_replicas(m),
             GATEWAY_NAME=gateway, GATEWAY_NAMESPACE=gateway_ns,
             CHAT_TEMPLATE_MOUNT=(f"        volumeMounts:\n          - name: chat-template\n"
                                  f"            mountPath: {CHAT_TEMPLATE_DIR}\n            readOnly: true\n") if inline else "",
             CHAT_TEMPLATE_VOLUME=(f"    volumes:\n      - name: chat-template\n        configMap:\n"
                                   f"          name: {m.name}-chat-template\n") if inline else ""))
     if m.kind == "InferenceService":
-        name = "inference-service-ovms.yaml" if m.runtime == "openvino" else "inference-service.yaml"
-        return render(template(name), **common, MODEL_ID=m.model_id, PVC_NAME=catalog.pvc,
+        return render(template("inference-service.yaml"), **common, MODEL_ID=m.model_id, PVC_NAME=catalog.pvc,
                       MODEL_FORMAT=text(pick(m.rt, "format")) or "openvino",
                       RUNTIME_NAME=text(pick(m.rt, "runtime_name")) or f"{m.runtime}-runtime")
     abort(f"Unknown model kind: {m.kind}")

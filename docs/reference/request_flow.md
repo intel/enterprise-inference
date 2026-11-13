@@ -107,8 +107,7 @@ curl https://inference.example.com/v1/chat/completions \
 ### Step 3b: Direct Routing — ai-gateway → workload service
 
 - Request forwarded directly to `<model>-kserve-workload-svc:8000`
-- For OpenVINO models: ai-gateway rewrites `/v1/` → `/v3/` (OVMS uses v3 API internally)
-- No EPP involved — useful for non-LLM models or models that don't support EPP
+- No EPP involved — useful for non-LLM models (vLLM and OpenVINO LLMs both go through EPP)
 
 ---
 

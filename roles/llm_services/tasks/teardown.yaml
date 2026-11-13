@@ -54,6 +54,17 @@
     delete_all: true
   failed_when: false
 
+# Cluster-scoped, so not removed with the namespace (OVMS used one before it became an
+# LLMInferenceService).
+- name: "llm_services | Delete model-manager's ClusterServingRuntimes"
+  kubernetes.core.k8s:
+    api_version: serving.kserve.io/v1alpha1
+    kind: ClusterServingRuntime
+    label_selectors: [app.kubernetes.io/managed-by=model-manager]
+    state: absent
+    delete_all: true
+  failed_when: false
+
 - name: "llm_services | Find PVs bound to namespace"
   kubernetes.core.k8s_info:
     api_version: v1

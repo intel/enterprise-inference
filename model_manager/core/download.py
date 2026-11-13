@@ -101,7 +101,7 @@ def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
         env_items.append("            - name: HF_TOKEN\n              valueFrom:\n                secretKeyRef:\n"
                          "                  name: hf-token\n                  key: token")
     env_items += [f"            - name: {k}\n              value: {quote(v)}" for k, v in proxy_env(catalog)]
-    uid = "5000" if m.runtime == "openvino" else "1000"  # the serving image's user, so it can read the files
+    uid = m.run_as_user
     job = f"download-{m.name}"
     manifest = render(
         template("download-job.yaml"), MODEL_NAME=m.name, NAMESPACE=m.namespace, MODEL_ID=m.model_id,

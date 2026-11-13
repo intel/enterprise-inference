@@ -119,7 +119,7 @@ def _allocatable(m: Model) -> list[int] | None:
     nodes = k8s.get_json("node", m.node) if m.node else k8s.get_json("nodes")
     if not nodes:
         return None
-    return [_whole_cpus(text(pick(pick(n.get("status"), "allocatable", {}), "cpu", "0")), floor=True)
+    return [whole_cpus(text(pick(pick(n.get("status"), "allocatable", {}), "cpu", "0")), floor=True)
             for n in ([nodes] if m.node else nodes.get("items", []))
             if not any(t.get("effect") == "NoSchedule" for t in pick(n.get("spec"), "taints", []))]
 
@@ -151,7 +151,7 @@ class KubeletStatic(BestEffort):
         elif tpc_env:
             warn(f"Invalid MM_KUBELET_THREADS_PER_CORE='{tpc_env}' — expected a positive integer; using "
                  "auto-detected default.")
-        cpu = _whole_cpus(m.cpu)
+        cpu = whole_cpus(m.cpu)
         if cpu < 1:
             abort(f"kubelet-static needs a numeric CPU quantity >= 1 for '{m.name}', got '{m.cpu}'. Set an integer "
                   "cpu in models.yaml or pass --cpu N.")
@@ -210,7 +210,7 @@ class KubeletStatic(BestEffort):
 POLICIES = {p.name: p for p in (NriBalloons, KubeletStatic, BestEffort)}
 
 
-def _whole_cpus(cpu: str, floor: bool = False) -> int:
+def whole_cpus(cpu: str, floor: bool = False) -> int:
     """CPU quantity (8, 7.5, 7500m) in whole CPUs, rounded up (or down); 0 when unparseable."""
     if cpu.endswith("m") and is_uint(cpu[:-1]):
         value = int(cpu[:-1]) / 1000
@@ -256,8 +256,10 @@ def resolve_auto_cpu(policy: BestEffort, m: Model, tp: int) -> None:
     """
     if m.cpu != "auto":
         return
-    path = LIVE_CPU.get(m.kind)
-    live = k8s.out("get", m.kind, m.name, "-n", m.namespace, "-o", f"jsonpath={path}") if path else ""
+    # An OVMS upgrade from InferenceService keeps the CPU the old one runs with.
+    kinds = [m.kind] + (["InferenceService"] if m.kind == "LLMInferenceService" else [])
+    live = next((v for k in kinds if (v := k8s.out("get", k, m.name, "-n", m.namespace, "-o",
+                                                   f"jsonpath={LIVE_CPU[k]}"))), "")
     if live:
         if isinstance(policy, NriBalloons) and is_uint(live):
             live = str(nri_policy.model_cpu(int(live)))  # the request carries any hideHyperthreads doubling
@@ -267,7 +269,7 @@ def resolve_auto_cpu(policy: BestEffort, m: Model, tp: int) -> None:
     default = text(pick(pick(m.cat, "defaults", {}), "cpu", 8))
     if isinstance(policy, NriBalloons):
         cpu = nri_policy.auto_cpu(tp, m.node)
-        if cpu < _whole_cpus(default):
+        if cpu < whole_cpus(default):
             abort(f"cpu: auto — only {cpu} free CPUs per NUMA node for {m.name} (tp={tp}, need >= {default}). "
                   "Undeploy a model, add a node, or pass --cpu.")
         m.cpu = str(cpu)
@@ -280,11 +282,15 @@ def _preflight_skipped() -> bool:
     return truthy(os.environ.get("MM_SKIP_PREFLIGHT", ""))
 
 
-def preflight_gate(policy: BestEffort, m: Model, tp: int) -> None:
-    """Abort a deploy that cannot be placed, before weights are downloaded."""
+def preflight_gate(policy: BestEffort, m: Model, tp: int, running: int = 0) -> None:
+    """Abort a deploy that cannot be placed, before weights are downloaded. `running` pods free their cores for the
+    new ones (an upgrade from another kind), so only the replicas beyond them are checked."""
     if _preflight_skipped():
         return
-    errors = policy.preflight(m, tp)
+    extra = int(m.replicas) - running
+    if extra < 1:
+        return
+    errors = policy.preflight(dataclasses.replace(m, replicas=str(extra)) if running else m, tp)
     if not errors:
         return
     warn(f"{policy.label} pre-flight issues detected:")

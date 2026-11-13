@@ -30,5 +30,10 @@ spec:
           targetLabel: namespace
         - replacement: vllm
           targetLabel: engine
+        # OVMS also serves as an LLMInferenceService; tell it apart by its image.
+        - sourceLabels: [__meta_kubernetes_pod_container_image]
+          regex: .*/model_server:.*
+          replacement: ovms
+          targetLabel: engine
     - <<: *vllm_endpoint
       port: https

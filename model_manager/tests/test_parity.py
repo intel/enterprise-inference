@@ -46,8 +46,6 @@ FX_TEMPLATES = {"MM_CHAT_TEMPLATES": str(MM / "tests" / "fixtures" / "chat-templ
 NRI = {"MM_CPU_POLICY": "nri-balloons"}
 # Legacy computed LiteLLM's api_base even with LiteLLM disabled, warning about it.
 NO_LITELLM_URL = (r"^\[WARN \]  AI Gateway service 'ai-gateway' not found.*\n", "")
-# OVMS moved to one image (2026.4.1) for serving and the weights download.
-OVMS_IMAGE = (r"openvino/model_server:2026\.(1-py|3)\b", "openvino/model_server:2026.4.1")
 # --help documents MM_PLATFORM and MM_INFERENCE_GATEWAY_SVC_NS, which are new.
 HELP_SVC_NS = (r"^(  MM_INFERENCE_HOSTNAME .*\n)",
                r"\1  MM_PLATFORM           openshift | kubernetes (default: detected). On\n"
@@ -71,14 +69,22 @@ HFID = (r"or --id <hf/repo>", "or --hfid <hf/repo>")
 HELP_SCALING = [
     (r"^  --replicas N         Replica count \(default: 1\)$",
      "  --replicas N         Fixed replica count (default: 1); turns autoscaling off\n"
-     "  --min-replicas N     Autoscaling (KEDA, vLLM): fewest replicas (default: 1)\n"
+     "  --min-replicas N     Autoscaling (KEDA): fewest replicas (default: 1)\n"
      "  --max-replicas N     Autoscaling: most replicas; above --min-replicas turns it on\n"
-     "  --scale-target N     Autoscaling: waiting requests per replica that trigger a scale-up (default: 2)"),
+     "  --scale-target N     Autoscaling: per-replica load that triggers a scale-up\n"
+     "                            (vLLM: waiting requests, default 2; OVMS: in-flight requests, default 4)"),
     (r"^(  kubectl patch llminferenceservice .*)\n",
      r"\1  # fixed count only\n  kubectl get scaledobject,hpa -n llm-inference          # autoscaled models\n"),
 ]
 # A kubelet-static pod requests cpu CPUs; tensor parallelism splits them, it does not multiply them.
 KUBELET_PER_POD = (r"allocatable CPUs \(cpu=(\d+) x tp=\d+\)", r"allocatable CPUs (cpu=\1)")
+# OVMS deploys as an LLMInferenceService routed through the KServe scheduler (epp), no longer as
+# an InferenceService with a direct route. The legacy OVMS deploy cases (ovms-nri, deploy-ovms-wait,
+# fx-servers-sorted-default) have no counterpart there; test_units covers what they checked.
+OVMS_KIND = (r"^\$ kubectl delete InferenceService qwen3-5-2b-ovms ",
+             "$ kubectl delete LLMInferenceService qwen3-5-2b-ovms ")
+OVMS_AIGATEWAY_ROUTE = (r"^\$ kubectl delete (aiservicebackend|backend) qwen3-5-2b-ovms .*\n", "")
+OVMS_AGW_ROUTE = (r"^(\$ kubectl delete httproute )direct-(qwen3-5-2b-ovms )", r"\1aigw-\2")
 HELP_HFID = [
     (r"^  deploy <model>\|--id <hf/repo>   ", "  deploy <model>|--hfid <hf/repo> "),
     (r"^  --id <hf/repo>       Ad-hoc deploy any HuggingFace model$",
@@ -118,7 +124,6 @@ CASES = [
          env={"MM_CPU_POLICY": "kubelet-static"}),
     case("kubelet-static-bad-cpu", "deploy", "llama3-8b-awq", "--dry-run", "--cpu", "abc",
          env={"MM_CPU_POLICY": "kubelet-static"}),
-    case("ovms-nri", "deploy", "qwen3-5-2b-ovms", "--dry-run", env=NRI),
     case("embed-direct", "deploy", "bge-base-en", "--dry-run", "--cpu-policy", "BEST-EFFORT"),
     case("agent-default-model", "deploy", "qwen2-5-coder-14b", "--dry-run", env=BE),
     case("rerank-explicit-routing", "deploy", "bge-reranker", "--dry-run", "--routing", "epp", env=BE),
@@ -145,7 +150,6 @@ CASES = [
     case("fx-template-file-both", "deploy", "tmpl-file-both", "--dry-run", env={**BE, **FX_TEMPLATES},
          catalog=FIXTURE),
     case("fx-template-file-missing", "deploy", "tmpl-file-missing", "--dry-run", env=BE, catalog=FIXTURE),
-    case("fx-servers-sorted-default", "deploy", "multi", "--dry-run", env=BE, catalog=FIXTURE),
     case("fx-cpu-auto-best-effort", "deploy", "auto-cpu", "--dry-run", env=BE, catalog=FIXTURE),
     case("fx-cpu-auto-nri", "deploy", "auto-cpu", "--dry-run", "--tp", "2", env=NRI, catalog=FIXTURE,
          k8s=nri_node(8)),
@@ -186,9 +190,6 @@ CASES = [
          deviations=[NO_LITELLM_URL]),
     case("deploy-not-ready-reconciler", "deploy", "qwen3-0-6b", "--wait-timeout", "1", env=BE, k8s=DOWNLOAD),
     case("deploy-wait-timeout", "deploy", "qwen3-0-6b", "--wait", "--wait-timeout", "1", env=BE, k8s=DOWNLOAD),
-    case("deploy-ovms-wait", "deploy", "qwen3-5-2b-ovms", "--wait", env=BE, k8s=DOWNLOAD + [
-        [r"get InferenceService qwen3-5-2b-ovms -n llm-inference -o json$", 0, _ready("Ready")]],
-         deviations=[OVMS_IMAGE]),
     case("redeploy-unchanged", "deploy", "qwen3-0-6b", env={**BE, "MM_FORCE_REDEPLOY": "0"},
          k8s=QWEN_EXISTS + POOL + QWEN_READY, deviations=[NO_LITELLM_URL]),
     case("redeploy-diff-error-ready", "deploy", "qwen3-0-6b", env=BE,
@@ -205,12 +206,13 @@ CASES = [
     case("kubelet-static-preflight-blocks", "deploy", "llama3-8b-awq", env={"MM_CPU_POLICY": "kubelet-static"},
          k8s=STATIC + SMALL_NODES, deviations=[KUBELET_PER_POD]),
     case("undeploy-embed", "undeploy", "bge-base-en"),
-    case("undeploy-ovms", "undeploy", "qwen3-5-2b-ovms"),
+    case("undeploy-ovms", "undeploy", "qwen3-5-2b-ovms", deviations=[OVMS_KIND, OVMS_AIGATEWAY_ROUTE]),
     case("undeploy-live-alias", "undeploy", "qwen-alt", k8s=[
         [r"get LLMInferenceService qwen-alt -n llm-inference -o jsonpath", 0, "llm-inference"],
         [r"get httproute direct-qwen-alt", 0, ""]]),
     case("undeploy-missing", "undeploy", "ghost"),
-    case("undeploy-all-agentgateway", "undeploy", "all", "--wait", env={"MM_AI_GATEWAY_PROVIDER": "agentgateway"}),
+    case("undeploy-all-agentgateway", "undeploy", "all", "--wait", env={"MM_AI_GATEWAY_PROVIDER": "agentgateway"},
+         deviations=[OVMS_KIND, OVMS_AGW_ROUTE]),
 ]
 
 

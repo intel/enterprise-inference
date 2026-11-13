@@ -105,14 +105,24 @@ runtimes:
 Plumbing in `model_manager/runtimes/openvino/values.yaml`:
 
 ```yaml
-image: "openvino/model_server:2026.4.1"                   # serving and weights download
+image: "openvino/model_server:2026.4.1"   # serving and weights download
 device: cpu
-kind: InferenceService
-format: openvino
-runtime_name: openvino-runtime                            # ClusterServingRuntime to reference
-routing: aigateway
-serving_runtime_manifest: openvino/serving-runtime.yaml   # applied on first deploy
+kind: LLMInferenceService
+routing: epp                              # KServe's scheduler picks a replica per request
+container:                                # OVMS replaces KServe's vLLM command
+  command: ["/ovms/bin/ovms"]
+  args: ["--config_path", "/mnt/models/config_all.json", "--rest_port", "8000", "--port", "9000", "--metrics_enable"]
+  ready_path: /v2/models/$model/ready     # Ready once the graph is loaded
+  live_path: /v2/health/live
+  run_as_user: 5000                       # also owns the downloaded files
+autoscaling:                              # KEDA signal: in-flight requests per replica
+  query: 'sum(ovms_current_graphs{namespace="$namespace",model="$model"})'
+  scale_target: 4
 ```
+
+A runtime without `container` runs KServe's default vLLM command. The download job
+writes the servable and its `config_all.json` to the model's folder, which KServe mounts
+read-only at `/mnt/models`.
 
 ### `weight_format` — only for raw Hugging Face repos
 
@@ -127,9 +137,8 @@ must be converted and quantized to OpenVINO IR.
 
 ### API paths
 
-Clients always use the OpenAI `/v1/` paths. For OpenVINO-served models the AI gateway
-rewrites `/v1/` → `/v3/` internally, since OVMS uses the v3 API — this is invisible to
-callers. See [Inference Request Flow](../reference/request_flow.md).
+Clients always use the OpenAI `/v1/` paths, which OVMS serves directly. See
+[Inference Request Flow](../reference/request_flow.md).
 
 ## Which kind of Kubernetes object?
 
@@ -138,7 +147,7 @@ The runtime's `kind` decides what `model-manager` creates:
 | Runtime | Object | Template |
 |---|---|---|
 | vLLM | `LLMInferenceService` | `model_manager/templates/llm-inference-service.yaml` |
-| OpenVINO | `InferenceService` | `model_manager/templates/inference-service.yaml` |
+| OpenVINO | `LLMInferenceService` | the same template, with the runtime's `container` |
+| A runtime with `kind: InferenceService` | `InferenceService` | `model_manager/templates/inference-service.yaml`, with the `ClusterServingRuntime` under `model_manager/runtimes/<name>/` |
 
-The raw `ClusterServingRuntime` manifests stay as files under
-`model_manager/runtimes/<name>/`.
+A model whose runtime changes kind replaces its old object on the next deploy (or undeploy).

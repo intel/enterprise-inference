@@ -10,12 +10,21 @@
 #   device                   cpu | gpu                                (default: cpu)
 #   kind                     LLMInferenceService | InferenceService   (default: LLMInferenceService)
 #   routing                  epp | direct
-#   format                   model format hint                        (OVMS only)
-#   runtime_name             ClusterServingRuntime name to reference  (OVMS only)
-#   model_downloader_image   image for the weight-download job        (OVMS only)
-#   serving_runtime_manifest path to a raw CR manifest to apply       (OVMS only)
+#   container                LLMInferenceService engines other than vLLM: command,
+#                            args, ready_path, live_path ($model filled in), run_as_user
+#                            (see runtimes/openvino). Unset: KServe's vLLM command
+#   autoscaling              KEDA signal: query (PromQL, $namespace/$model filled in)
+#                            and scale_target, its default per-replica threshold
+#   format                   model format hint                        (InferenceService)
+#   runtime_name             ClusterServingRuntime name to reference  (InferenceService)
+#   serving_runtime_manifest path to a raw CR manifest to apply       (InferenceService)
+#   model_downloader_image   image for the weight-download job        (OVMS)
 # =============================================================================
 
 device: cpu
 kind: LLMInferenceService
 routing: epp
+# Requests queued because the replica is saturated.
+autoscaling:
+  query: 'sum(vllm:num_requests_waiting{namespace="$namespace",model="$model"})'
+  scale_target: 2
