@@ -20,12 +20,13 @@ from core.renderer import dedupe_args, engine_args  # noqa: E402
 
 @pytest.fixture
 def kubectl(monkeypatch):
-    """Record kubectl calls as (argv, stdin); every call succeeds with empty output."""
+    """Record kubectl calls as (argv, stdin); every call succeeds with empty output (a Job reads as complete)."""
     calls = []
 
     def run(*args, stdin=None):
         calls.append((args, stdin))
-        return subprocess.CompletedProcess(args, 0, "", "")
+        out = '{"status": {"succeeded": 1}}' if args[:2] == ("get", "job") else ""
+        return subprocess.CompletedProcess(args, 0, out, "")
     monkeypatch.setattr(k8s, "run", run)
     return calls
 
@@ -59,22 +60,30 @@ def test_whole_cpus(cpu, whole):
     assert whole_cpus(cpu) == whole
 
 
-@pytest.mark.parametrize("hide_ht, tp, want", [("false", 1, 28), ("false", 2, 56), ("true", 1, 14)])
-def test_auto_cpu_sizes_to_smallest_node(monkeypatch, hide_ht, tp, want):
-    monkeypatch.setenv("MM_NRI_HIDE_HT", hide_ht)  # hidden: the request doubles, so half the free CPUs
+@pytest.mark.parametrize("tp, want", [(1, 28), (2, 56)])
+def test_auto_cpu_sizes_to_smallest_node(monkeypatch, tp, want):
+    # w1 has 28 free CPUs on each NUMA node, w2 has 32: w1 decides.
+    free = {"w1": {0: 28, 1: 28}, "w2": {0: 32, 1: 32}}
     monkeypatch.setattr(nri_policy, "_schedulable_nri_nodes", lambda _: ["w1", "w2"])
-    monkeypatch.setattr(nri_policy, "_balloon_pods_cpu_on_node", lambda n: {"w1": 8, "w2": 0}[n])
-    monkeypatch.setattr(nri_policy, "_per_numa_capacity", lambda _: [64, 64])
-    monkeypatch.setattr(nri_policy, "_reserved_cpus_count", lambda _: 64)
-    assert nri_policy.auto_cpu(tp) == want  # w1 (28 free per NUMA node) decides
+    monkeypatch.setattr(nri_policy, "_balloon_pods_cpu_on_node", lambda n: 0)
+    monkeypatch.setattr(nri_policy, "_per_numa_free", lambda n, in_use: free[n])
+    monkeypatch.setattr(nri_policy, "_tp_numa_sets", lambda n, b: [(0,), (1,)] if b.endswith("tp1") else [(0, 1)])
+    assert nri_policy.auto_cpu(tp) == want
 
 
-def test_cpu_auto_keeps_live_request_without_ht_doubling(monkeypatch):
-    monkeypatch.setenv("MM_NRI_HIDE_HT", "true")
+def test_cpu_auto_keeps_the_live_request(monkeypatch):
     monkeypatch.setattr(k8s, "out", lambda *args: "16")
     m = Model(name="m", namespace="n", kind="LLMInferenceService", cpu="auto")
     policy.resolve_auto_cpu(policy.NriBalloons(), m, 1)
-    assert m.cpu == "8"  # renders the live request of 16 again instead of doubling it on every re-deploy
+    assert m.cpu == "16"  # a re-deploy renders the same request, so the spec is unchanged
+
+
+def test_balloon_names_are_engine_neutral(monkeypatch):
+    monkeypatch.delenv("MM_NRI_BALLOON_NAME", raising=False)
+    assert [nri_policy.balloon_name(tp) for tp in (1, 2, 3, 8, 16)] == [
+        "model-balloon-tp1", "model-balloon-tp2", "model-balloon-tp4", "model-balloon-tp8", "model-balloon-tp8"]
+    monkeypatch.setenv("MM_NRI_BALLOON_NAME", "custom")
+    assert nri_policy.balloon_name(2) == "custom"
 
 
 @pytest.mark.parametrize("name, model_id", [("ok", "org/m'; rm -rf /models #"), ("Bad_Name", "org/m")])
@@ -487,7 +496,7 @@ metadata:
   name: m
 spec:
   annotations:
-    balloon.balloons.resource-policy.nri.io/container.main: vllm-balloon-tp1
+    balloon.balloons.resource-policy.nri.io/container.main: model-balloon-tp1
   model:
     uri: pvc://model-store/m
   template:
@@ -562,7 +571,7 @@ def test_openshift_llmisvc(monkeypatch):
     doc = yaml.safe_load(platform.adapt_llmisvc(platform.adapt(LLMISVC)))
     main = doc["spec"]["template"]["containers"][0]
     assert doc["apiVersion"] == "serving.kserve.io/v1alpha1" and "annotations" not in doc["spec"]
-    assert doc["metadata"]["annotations"] == {"balloon.balloons.resource-policy.nri.io/container.main": "vllm-balloon-tp1"}
+    assert doc["metadata"]["annotations"] == {"balloon.balloons.resource-policy.nri.io/container.main": "model-balloon-tp1"}
     assert doc["spec"]["model"] == {"uri": "pvc://model-store/m", "name": "served"}
     assert "args" not in main and main["env"] == [
         {"name": "VLLM_ADDITIONAL_ARGS", "value": "--max-model-len=4096 --chat-template '/etc/chat-template/a b.jinja'"}]
@@ -607,11 +616,11 @@ def test_balloon_cpu_counts_label_selected_pods(monkeypatch):
                 "status": {"phase": phase},
                 "spec": {"containers": [{"resources": {"requests": {"cpu": cpu}}}]}}
     policies = {"items": [{"spec": {"balloonTypes": [
-        {"name": "vllm-balloon-tp1", "matchExpressions": [
+        {"name": "model-balloon-tp1", "matchExpressions": [
             {"key": "pod/labels/kserve.io/component", "operator": "In", "values": ["workload"]}]},
         {"name": "default"}]}}]}
     pods = {"items": [
-        pod("annotated", "4", annotations={"balloon.balloons.resource-policy.nri.io/container.main": "vllm-balloon"}),
+        pod("annotated", "4", annotations={"balloon.balloons.resource-policy.nri.io/container.main": "model-balloon"}),
         pod("by-label", "8", labels={"kserve.io/component": "workload"}),
         pod("by-label-done", "16", labels={"kserve.io/component": "workload"}, phase="Succeeded"),
         pod("other", "2000m", labels={"app": "x"})]}
@@ -759,66 +768,6 @@ def test_missing_keda_aborts_before_any_change(deploy_env):
     assert not any(a[0] in ("apply", "create", "delete") for a in deploy_env)
 
 
-@pytest.mark.parametrize("scaling_only, counts_running, forced, gated", [
-    (True, True, False, False),   # NRI would count the running pods' cores as taken: skip its check
-    (False, True, False, True),   # the pods roll: check
-    (True, False, False, True),   # kubelet-static / best-effort count total capacity: keep the max warning
-    (True, True, True, True),     # MM_FORCE_REDEPLOY runs no diff, so nothing is known to have changed
-])
-def test_changed_spec_is_applied_with_or_without_the_preflight(deploy_env, monkeypatch, scaling_only, counts_running,
-                                                               forced, gated):
-    # Whether or not the pre-flight runs, the new spec is applied.
-    steps, asked = [], []
-    if forced:
-        monkeypatch.setenv("MM_FORCE_REDEPLOY", "1")
-    monkeypatch.setattr(k8s, "succeeds", lambda *a: True)  # deployed; the diff (rc 1) reports a change
-    monkeypatch.setattr(policy.BestEffort, "counts_running_pods", counts_running)
-    monkeypatch.setattr(cli, "_require_autoscaling", lambda m: None)
-    monkeypatch.setattr(cli, "_only_scaling_changed", lambda m, render: asked.append(m.name) or scaling_only)
-    monkeypatch.setattr(cli, "_owned_inference_service", lambda m: None)
-    monkeypatch.setattr(cli, "preflight_gate", lambda *a, running=0: steps.append("preflight"))
-    monkeypatch.setattr(cli, "warn_max_unplaceable", lambda *a, running=0: steps.append(f"max check, {running} running"))
-    monkeypatch.setattr(cli, "_running_replicas", lambda m: 2)
-    monkeypatch.setattr(k8s, "ensure_storage", lambda *a: steps.append("storage"))
-    monkeypatch.setattr(cli, "download_weights", lambda *a: steps.append("download"))
-    monkeypatch.setattr(cli, "_install_runtime", lambda m: None)
-    monkeypatch.setattr(k8s, "apply", lambda manifest, ssa: steps.append("apply"))
-    monkeypatch.setattr(routing, "register", lambda m: None)
-    monkeypatch.setattr(routing, "print_endpoints", lambda m: None)
-    monkeypatch.setattr(cli, "_wait_ready", lambda m, t: False)
-    cli.deploy(cli.parse_args(["deploy", "qwen3-0-6b", "--max-replicas", "3", "--wait"]), "qwen3-0-6b")
-    gate = ["preflight", "max check, 0 running"] if gated else ["max check, 2 running"]  # only the extra replicas
-    assert steps == gate + ["storage", "download", "apply"]
-    assert bool(asked) == (counts_running and not forced)  # the live spec is read only when it matters
-
-
-@pytest.mark.parametrize("fits_max, warned", [(True, False), (False, True)])
-def test_max_replicas_only_warns(capsys, fits_max, warned):
-    class Policy:
-        def replica_shortfall(self, m, tp):
-            return "" if fits_max or m.replicas != "3" else "too big"
-    m = Model(name="m", namespace="n", replicas="1", min_replicas="1", max_replicas="3")
-    policy.warn_max_unplaceable(Policy(), m, 1)
-    assert m.replicas == "1"  # checked on a copy
-    assert ("do not all fit" in capsys.readouterr().err) == warned
-
-
-@pytest.mark.parametrize("running, checked", [(0, "4"), (3, "1"), (4, None)])
-def test_max_check_credits_the_running_replicas(capsys, running, checked):
-    # NRI on a scaling-only change: the running replicas hold their cores, so only the rest are checked.
-    asked = []
-
-    class Policy:
-        def replica_shortfall(self, m, tp):
-            asked.append(m.replicas)
-            return "no room"
-    m = Model(name="m", namespace="n", replicas="1", min_replicas="1", max_replicas="4")
-    policy.warn_max_unplaceable(Policy(), m, 1, running=running)
-    assert asked == ([checked] if checked else [])
-    err = capsys.readouterr().err
-    assert ("beyond the 3 running (up to 4)" in err) == (running == 3)
-
-
 def test_running_replicas_counts_pods_holding_cpus(monkeypatch):
     # As NRI counts cores in use: on a node and Running/Pending; unscheduled and finished pods hold none.
     pods = {"items": [{"spec": {"nodeName": "w1"}, "status": {"phase": "Running"}},
@@ -836,29 +785,6 @@ def test_running_replicas_counts_pods_holding_cpus(monkeypatch):
 def test_no_schedulable_node_is_a_shortfall():
     assert "the schedulable nodes fit 0" in policy._replica_shortfall([], 8, 3)  # every node tainted NoSchedule
     assert policy._replica_shortfall(None, 8, 3) == ""  # nodes could not be read
-
-
-@pytest.mark.parametrize("node_cpus, tp, warned", [
-    ([8, 8], 1, True),     # 24 CPUs needed, 16 allocatable
-    ([12, 12], 1, True),   # 24 = 24 in total, but each node fits one 8-CPU replica
-    ([16, 8], 1, False),   # 2 + 1 slots
-    ([24], 2, False),      # TP splits the 8 CPUs a pod requests, it does not multiply them
-])
-def test_kubelet_static_max_shortfall_counts_slots_per_node(monkeypatch, capsys, node_cpus, tp, warned):
-    nodes = {"items": [{"status": {"allocatable": {"cpu": str(c)}}, "spec": {}} for c in node_cpus]}
-    monkeypatch.setattr(k8s, "get_json", lambda *args: nodes)
-    m = Model(name="m", namespace="n", cpu="8", replicas="1", min_replicas="1", max_replicas="3")
-    policy.warn_max_unplaceable(policy.KubeletStatic(), m, tp)
-    assert ("3 replicas x 8 CPUs: the schedulable nodes fit" in capsys.readouterr().err) == warned
-
-
-def test_nri_max_shortfall_reported_in_warn_mode(monkeypatch, capsys):
-    # MM_NRI_PREFLIGHT=warn makes the gate pass; the max check still reports the errors.
-    monkeypatch.setattr(nri_policy, "preflight", lambda *a, **k: {"ok": True, "errors": ["no room"]})
-    m = Model(name="m", namespace="n", cpu="8", replicas="1", min_replicas="1", max_replicas="3")
-    assert policy.NriBalloons().preflight(m, 1) == []
-    policy.warn_max_unplaceable(policy.NriBalloons(), m, 1)
-    assert "do not all fit now (no room)" in capsys.readouterr().err
 
 
 def _autoscaled(argv):
@@ -1041,46 +967,15 @@ def test_only_llmisvc_models_retire_an_inference_service(monkeypatch):
     assert calls == []  # no lookup: nothing moves the other way
 
 
-@pytest.mark.parametrize("counts_running, credited", [(True, 1), (False, 0)])
-def test_upgrade_credits_the_old_inference_service(deploy_env, monkeypatch, counts_running, credited):
-    # The old InferenceService is removed before the new pods start, so NRI must not count its cores as taken.
-    gated = []
-    monkeypatch.setattr(k8s, "succeeds", lambda *a: False)  # no LLMInferenceService yet
-    monkeypatch.setattr(policy.BestEffort, "counts_running_pods", counts_running)
-    monkeypatch.setattr(cli, "_upgrade_credit", lambda m, annotations, cpu: 1)
-    monkeypatch.setattr(cli, "preflight_gate", lambda *a, running=0: gated.append(running))
-    for name in ("download_weights", "_install_runtime", "_retire_inference_service"):
-        monkeypatch.setattr(cli, name, lambda *a: None)
-    monkeypatch.setattr(k8s, "ensure_storage", lambda *a: None)
-    monkeypatch.setattr(k8s, "apply", lambda manifest, ssa: None)
-    monkeypatch.setattr(routing, "register", lambda m: None)
-    monkeypatch.setattr(routing, "print_endpoints", lambda m: None)
-    monkeypatch.setattr(cli, "_wait_ready", lambda m, t: False)
-    cli.deploy(cli.parse_args(["deploy", "qwen3-5-2b-ovms", "--wait"]), "qwen3-5-2b-ovms")
-    assert gated == [credited]
-
-
-@pytest.mark.parametrize("running, checked", [(0, ["2"]), (1, ["1"]), (2, [])])
-def test_preflight_gate_checks_only_the_replicas_beyond_the_running(running, checked):
-    asked = []
-
-    class Policy:
-        def preflight(self, m, tp):
-            asked.append(m.replicas)
-            return []
-    policy.preflight_gate(Policy(), Model(name="m", namespace="n", replicas="2"), 1, running=running)
-    assert asked == checked
-
-
 BALLOON = "cpu-policy.model-manager.io/balloon"
 
 
 @pytest.mark.parametrize("old_cpu, old_balloon, new_cpu, credited", [
-    ("8", "vllm-balloon", "8", 2),      # same shape: the new replicas take the freed cores
-    ("16", "vllm-balloon", "8", 2),     # smaller new replicas fit too
-    ("8", "vllm-balloon", "32", 0),     # bigger new replicas: full check
-    ("8", "vllm-balloon-tp2", "8", 0),  # another balloon (tp): full check
-    ("", "vllm-balloon", "8", 0),       # unreadable old spec: full check
+    ("8", "model-balloon", "8", 2),      # same shape: the new replicas take the freed cores
+    ("16", "model-balloon", "8", 2),     # smaller new replicas fit too
+    ("8", "model-balloon", "32", 0),     # bigger new replicas: full check
+    ("8", "model-balloon-tp2", "8", 0),  # another balloon (tp): full check
+    ("", "model-balloon", "8", 0),       # unreadable old spec: full check
 ])
 def test_upgrade_credit_needs_the_freed_cores_to_fit(monkeypatch, old_cpu, old_balloon, new_cpu, credited):
     m = Model(name="m", namespace="ns", kind="LLMInferenceService")
@@ -1089,7 +984,7 @@ def test_upgrade_credit_needs_the_freed_cores_to_fit(monkeypatch, old_cpu, old_b
     spec = {"spec": {"predictor": {"annotations": {BALLOON: old_balloon},
                                    "model": {"resources": {"requests": {"cpu": old_cpu}}}}}}
     monkeypatch.setattr(k8s, "get_json", lambda *a: spec)
-    assert cli._upgrade_credit(m, {BALLOON: "vllm-balloon"}, new_cpu) == credited
+    assert cli._upgrade_credit(m, {BALLOON: "model-balloon"}, new_cpu) == credited
 
 
 def test_no_upgrade_credit_without_an_old_inference_service(monkeypatch):
@@ -1102,11 +997,11 @@ def test_upgrade_credit_counts_only_the_pinned_nodes_pods(monkeypatch, node, cre
     # A deploy pinned to a node gains only the cores the old pods free on that node.
     monkeypatch.setattr(cli, "_owned_inference_service", lambda m: Model(name="m", namespace="ns", kind="InferenceService"))
     pods = {"items": [{"spec": {"nodeName": n}, "status": {"phase": "Running"}} for n in ("a", "b")]}
-    spec = {"spec": {"predictor": {"annotations": {BALLOON: "vllm-balloon"},
+    spec = {"spec": {"predictor": {"annotations": {BALLOON: "model-balloon"},
                                    "model": {"resources": {"requests": {"cpu": "8"}}}}}}
     monkeypatch.setattr(k8s, "get_json", lambda *a: pods if a[0] == "pods" else spec)
     m = Model(name="m", namespace="ns", kind="LLMInferenceService", node=node)
-    assert cli._upgrade_credit(m, {BALLOON: "vllm-balloon"}, "8") == credited
+    assert cli._upgrade_credit(m, {BALLOON: "model-balloon"}, "8") == credited
 
 
 def test_failed_retire_aborts_and_keeps_the_routes(monkeypatch):
@@ -1146,3 +1041,400 @@ def test_switching_to_a_fixed_count_is_a_scaling_only_change():
     live = yaml.safe_load("spec:\n" + renderer._llmisvc_replicas(auto))["spec"]
     fixed = Model(name="m", namespace="ns", kind="LLMInferenceService", replicas="1")
     assert renderer._llmisvc_replicas(renderer.live_scaling(fixed, live)) == renderer._llmisvc_replicas(auto)
+
+
+# ── deploy failures: checks before the download, fast failure after the apply ──
+
+def _quiet_deploy(monkeypatch, steps, ready=""):
+    """deploy() with the cluster steps recorded and the wait answering `ready` ('' = Ready)."""
+    monkeypatch.setattr(cli, "_require_autoscaling", lambda m: None)
+    monkeypatch.setattr(cli, "_owned_inference_service", lambda m: None)
+    monkeypatch.setattr(k8s, "ensure_storage", lambda *a: steps.append("storage"))
+    monkeypatch.setattr(cli, "download_weights", lambda *a: steps.append("download"))
+    monkeypatch.setattr(cli, "_install_runtime", lambda m: None)
+    monkeypatch.setattr(k8s, "apply", lambda manifest, ssa: steps.append("apply"))
+    monkeypatch.setattr(routing, "register", lambda m: None)
+    monkeypatch.setattr(routing, "print_endpoints", lambda m: None)
+    monkeypatch.setattr(cli, "on_ready", lambda m: steps.append("ready"))
+    monkeypatch.setattr(cli, "_wait_ready", lambda m, t: ready)
+    monkeypatch.setattr(cli, "_remove", lambda m, wait, timeout: steps.append("rollback"))
+
+
+@pytest.mark.parametrize("scaling_only, forced, running", [
+    (True, False, 2),   # scaling-only: the running replicas keep their place
+    (False, False, 0),  # any other change: every replica is checked
+    (True, True, 0),    # MM_FORCE_REDEPLOY runs no diff, so nothing is known to have changed
+])
+def test_changed_spec_runs_the_gate_then_applies(deploy_env, monkeypatch, scaling_only, forced, running):
+    steps, asked = [], []
+    if forced:
+        monkeypatch.setenv("MM_FORCE_REDEPLOY", "1")
+    monkeypatch.setattr(k8s, "succeeds", lambda *a: True)  # deployed; the diff (rc 1) reports a change
+    monkeypatch.setattr(cli, "_only_scaling_changed", lambda m, render: asked.append(m.name) or scaling_only)
+    monkeypatch.setattr(cli, "_running_replicas", lambda m: 2)
+    monkeypatch.setattr(cli, "preflight_gate", lambda *a, running=0, amx=False: steps.append(f"gate {running}"))
+    _quiet_deploy(monkeypatch, steps)
+    cli.deploy(cli.parse_args(["deploy", "qwen3-0-6b", "--max-replicas", "3", "--wait"]), "qwen3-0-6b")
+    assert steps == [f"gate {running}", "storage", "download", "apply", "ready"]
+    assert bool(asked) == (not forced)
+
+
+def test_upgrade_credit_reaches_the_gate(deploy_env, monkeypatch):
+    # Whatever the policy: the old InferenceService's pods go before the new ones start.
+    steps = []
+    monkeypatch.setattr(k8s, "succeeds", lambda *a: False)
+    monkeypatch.setattr(cli, "_upgrade_credit", lambda m, annotations, cpu: 1)
+    monkeypatch.setattr(cli, "preflight_gate", lambda *a, running=0, amx=False: steps.append(f"gate {running}"))
+    _quiet_deploy(monkeypatch, steps)
+    monkeypatch.setattr(cli, "_retire_inference_service", lambda m: None)
+    cli.deploy(cli.parse_args(["deploy", "qwen3-5-2b-ovms", "--wait"]), "qwen3-5-2b-ovms")
+    assert steps[0] == "gate 1"
+
+
+@pytest.mark.parametrize("existed, rolled_back", [(False, True), (True, False)])
+def test_failed_wait_exits_1_and_rolls_back_only_a_new_model(deploy_env, monkeypatch, capsys, existed, rolled_back):
+    steps = []
+    monkeypatch.setattr(k8s, "succeeds", lambda *a: existed)
+    monkeypatch.setattr(cli, "_only_scaling_changed", lambda m, render: False)
+    monkeypatch.setattr(cli, "preflight_gate", lambda *a, **k: None)
+    _quiet_deploy(monkeypatch, steps, ready="pod p cannot be scheduled: 0/2 nodes are available")
+    with pytest.raises(SystemExit) as exit_:
+        cli.deploy(cli.parse_args(["deploy", "qwen3-0-6b", "--wait"]), "qwen3-0-6b")
+    assert exit_.value.code == 1
+    assert ("rollback" in steps) == rolled_back
+    err = capsys.readouterr().err
+    assert "cannot be scheduled" in err and ("rolled back" in err) == rolled_back
+
+
+def test_wait_ready_stops_on_a_stuck_pod(monkeypatch):
+    monkeypatch.setenv("MM_STUCK_GRACE", "0")
+    monkeypatch.setattr(cli, "workload_ready", lambda m: "False")
+    monkeypatch.setattr(cli.time, "sleep", lambda _: None)
+    pod = {"metadata": {"name": "p"}, "status": {"conditions": [
+        {"type": "PodScheduled", "status": "False", "reason": "Unschedulable", "message": "0/2 nodes: Insufficient memory"}]}}
+    monkeypatch.setattr(k8s, "get_json", lambda *a: {"items": [pod]})
+    assert cli._wait_ready(Model(name="m", namespace="n"), 600) == \
+        "pod p cannot be scheduled: 0/2 nodes: Insufficient memory"
+
+
+class _Gate(policy.BestEffort):
+    """A policy that records the replica counts it is asked to place."""
+    name = label = "test"
+
+    def __init__(self, counts_running=True, errors=()):
+        self.asked, self.counts_running_pods, self.errors = [], counts_running, list(errors)
+
+    def preflight(self, m, tp):
+        self.asked.append(m.replicas)
+        return self.errors
+
+
+@pytest.mark.parametrize("running, checked", [(0, ["4"]), (3, ["1"]), (4, [])])
+def test_gate_checks_every_replica_up_to_max(monkeypatch, running, checked):
+    requested = []
+    monkeypatch.setattr(policy, "_request_errors", lambda m, cpu, amx: requested.append(m.replicas) or [])
+    gate = _Gate()
+    m = Model(name="m", namespace="n", cpu="8", replicas="1", min_replicas="1", max_replicas="4")
+    policy.preflight_gate(gate, m, 1, "8", running=running)
+    assert gate.asked == checked and requested == checked
+    assert m.replicas == "1"  # checked on a copy
+
+
+def test_gate_counts_every_replica_for_an_allocatable_policy(monkeypatch):
+    # kubelet-static checks total allocatable, so the running replicas count too; free-capacity checks do not.
+    requested = []
+    monkeypatch.setattr(policy, "_request_errors", lambda m, cpu, amx: requested.append(m.replicas) or [])
+    gate = _Gate(counts_running=False)
+    policy.preflight_gate(gate, Model(name="m", namespace="n", cpu="8", replicas="1", min_replicas="1",
+                                      max_replicas="3"), 1, "8", running=2)
+    assert gate.asked == ["3"] and requested == ["1"]
+
+
+@pytest.mark.parametrize("mode, aborted", [("", True), ("warn", False)])
+def test_gate_aborts_when_the_max_does_not_fit(monkeypatch, capsys, mode, aborted):
+    monkeypatch.setenv("MM_PREFLIGHT", mode)
+    monkeypatch.setattr(policy, "_request_errors", lambda m, cpu, amx: [])
+    m = Model(name="m", namespace="n", cpu="8", replicas="1", min_replicas="1", max_replicas="3")
+    if aborted:
+        with pytest.raises(SystemExit):
+            policy.preflight_gate(_Gate(errors=["no room"]), m, 1, "8")
+    else:
+        policy.preflight_gate(_Gate(errors=["no room"]), m, 1, "8")
+    assert "cannot place 3 replica(s) (autoscaling up to 3)" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("node_cpus, tp, short", [
+    ([16], 1, True),       # 2 slots for 3 replicas
+    ([8, 8], 1, True),     # 1 slot per node
+    ([16, 8], 1, False),   # 2 + 1 slots
+    ([24], 2, False),      # TP splits the 8 CPUs a pod requests, it does not multiply them
+])
+def test_kubelet_static_replica_shortfall_is_an_error(monkeypatch, node_cpus, tp, short):
+    nodes = {"items": [{"status": {"allocatable": {"cpu": str(c)}}, "spec": {}} for c in node_cpus]}
+    monkeypatch.setattr(k8s, "get_json", lambda *args: nodes)
+    monkeypatch.setattr(policy, "probe_node", lambda node="": "")
+    errors = policy.KubeletStatic().preflight(Model(name="m", namespace="n", cpu="8", replicas="3"), tp)
+    assert bool(errors) == short and (not short or "would stay Pending" in errors[0])
+
+
+@pytest.mark.parametrize("quantity, size", [("16Gi", 16 * 2**30), ("512Mi", 512 * 2**20), ("2G", 2 * 10**9),
+                                            ("1e9", 10**9), ("1048576", 2**20), ("1.5Gi", 3 * 2**29), ("x", 0)])
+def test_mem_bytes(quantity, size):
+    assert policy.mem_bytes(quantity) == size
+
+
+def _node(name, cpu, memory, labels=None, taint=False):
+    return {"metadata": {"name": name, "labels": labels or {}},
+            "spec": {"taints": [{"effect": "NoSchedule"}]} if taint else {},
+            "status": {"allocatable": {"cpu": cpu, "memory": memory}}}
+
+
+def _pod(node, cpu, memory):
+    return {"spec": {"nodeName": node, "containers": [{"resources": {"requests": {"cpu": cpu, "memory": memory}}}]}}
+
+
+@pytest.mark.parametrize("replicas, amx, fits", [
+    ("2", False, True),    # a: 64 CPU / 32Gi free -> 2 by memory; b: tainted
+    ("3", False, False),
+    ("1", True, False),    # only b has AMX, and it is tainted
+])
+def test_request_check_counts_free_cpu_and_memory_per_node(monkeypatch, replicas, amx, fits):
+    nodes = {"items": [_node("a", "96", "64Gi"),
+                       _node("b", "96", "512Gi", labels={policy.AMX_LABEL: "true"}, taint=True)]}
+    pods = {"items": [_pod("a", "32", "32Gi"), _pod("", "8", "8Gi")]}  # an unscheduled pod takes nothing
+    monkeypatch.setattr(k8s, "get_json", lambda *a: pods if a[0] == "pods" else nodes)
+    errors = policy._request_errors(Model(name="m", namespace="n", memory="16Gi", replicas=replicas), "8", amx)
+    assert (errors == []) == fits
+    assert fits or "would stay Pending" in errors[0]
+
+
+def test_request_check_skips_with_a_warning_when_unreadable(monkeypatch, capsys):
+    monkeypatch.setattr(k8s, "get_json", lambda *a: None)
+    assert policy._request_errors(Model(name="m", namespace="n", memory="16Gi", replicas="1"), "8", False) == []
+    assert "skipping the CPU/memory request check" in capsys.readouterr().err
+
+
+# ── stuck pods ──
+
+def _waiting(reason, restarts=0, message=""):
+    return {"metadata": {"name": "p"}, "status": {"containerStatuses": [
+        {"name": "main", "restartCount": restarts, "state": {"waiting": {"reason": reason, "message": message}},
+         "lastState": {"terminated": {"exitCode": 137, "reason": "OOMKilled"}}}]}}
+
+
+@pytest.mark.parametrize("pod, reason, final", [
+    (_waiting("ImagePullBackOff", message="not found"), "container main: ImagePullBackOff: not found", False),
+    (_waiting("CrashLoopBackOff", restarts=3), "container main keeps crashing (3 restarts, last exit 137 OOMKilled)",
+     True),
+    (_waiting("CrashLoopBackOff", restarts=1), "", False),  # may still come up
+    (_waiting("ContainerCreating"), "", False),
+    ({"status": {"phase": "Pending"}}, "", False),
+])
+def test_stuck_blocker(pod, reason, final):
+    from core import stuck
+    assert stuck.blocker(pod) == (reason, final)
+
+
+def test_stuck_waits_out_the_grace(monkeypatch):
+    from core import stuck
+    clock = [0.0]
+    monkeypatch.setattr(stuck.time, "monotonic", lambda: clock[0])
+    monkeypatch.setenv("MM_STUCK_GRACE", "60")
+    watch, pod = stuck.Watch(), _waiting("ErrImagePull")
+    assert watch.stuck([pod]) == ""
+    clock[0] = 59
+    assert watch.stuck([pod]) == ""
+    clock[0] = 60
+    assert watch.stuck([pod]).startswith("pod p container main: ErrImagePull")
+    watch.stuck([])  # cleared: a new occurrence starts its grace again
+    assert watch.stuck([pod]) == ""
+
+
+@pytest.mark.parametrize("job, pods, want", [
+    ({"status": {"succeeded": 1}}, [], ""),
+    ({"status": {"conditions": [{"type": "Failed", "status": "True"}]}}, [], "Failed"),
+    ({"status": {}}, [_waiting("ImagePullBackOff")], "pod p container main: ImagePullBackOff: "),
+])
+def test_download_wait_stops_on_success_failure_or_a_stuck_pod(monkeypatch, job, pods, want):
+    monkeypatch.setenv("MM_STUCK_GRACE", "0")
+    monkeypatch.setattr(download.time, "sleep", lambda _: None)
+    monkeypatch.setattr(k8s, "get_json", lambda *a: job if a[0] == "job" else {"items": pods})
+    assert download._wait_job(Model(name="m", namespace="n"), "download-m") == want
+
+
+def test_download_wait_times_out(monkeypatch):
+    clock = iter(range(0, 10**6, 4000))
+    monkeypatch.setattr(download.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(download.time, "sleep", lambda _: None)
+    monkeypatch.setattr(k8s, "get_json", lambda *a: {"status": {}} if a[0] == "job" else {"items": []})
+    assert download._wait_job(Model(name="m", namespace="n"), "download-m") == f"not finished after {download.TIMEOUT}s"
+
+
+# ── upgrade: the old InferenceService's pods go before the apply ──
+
+def test_retire_waits_for_the_old_pods(monkeypatch):
+    old = Model(name="m", namespace="ns", kind="InferenceService")
+    monkeypatch.setattr(cli, "_owned_inference_service", lambda m: old)
+    monkeypatch.setattr(routing, "deregister", lambda m: None)
+    monkeypatch.setattr(k8s, "run", lambda *a, stdin=None: subprocess.CompletedProcess(a, 0, "", ""))
+    left = ["pod/a", "pod/a", ""]
+    monkeypatch.setattr(k8s, "out", lambda *a: left.pop(0))
+    monkeypatch.setattr(cli.time, "sleep", lambda _: None)
+    cli._retire_inference_service(Model(name="m", namespace="ns", kind="LLMInferenceService"))
+    assert left == []
+
+
+def test_retire_aborts_when_the_old_pods_stay(monkeypatch):
+    old = Model(name="m", namespace="ns", kind="InferenceService")
+    monkeypatch.setattr(cli, "_owned_inference_service", lambda m: old)
+    monkeypatch.setattr(routing, "deregister", lambda m: None)
+    monkeypatch.setattr(k8s, "run", lambda *a, stdin=None: subprocess.CompletedProcess(a, 0, "", ""))
+    monkeypatch.setattr(k8s, "out", lambda *a: "pod/a")
+    clock = iter(range(0, 10**6, 100))
+    monkeypatch.setattr(cli.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(cli.time, "sleep", lambda _: None)
+    with pytest.raises(SystemExit):
+        cli._retire_inference_service(Model(name="m", namespace="ns", kind="LLMInferenceService"))
+
+
+# ── NRI: real free CPUs per NUMA node, on the NUMA sets the node's BalloonsPolicy defines ──
+
+CONTIGUOUS = '{"0": "0-3,8-11", "1": "4-7,12-15"}'
+
+
+def _leaf(name, numa):
+    return {"name": name, "preferCloseToDevices": [f"/sys/devices/system/node/node{numa}"]}
+
+
+def _tp_policy(*extra):
+    """Two NUMA nodes on two packages, as the role generates it: tp1 takes one, tp2 takes both."""
+    return [_leaf("pkg0node0", 0), _leaf("pkg1node1", 1),
+            {"name": "model-balloon-tp1", "componentCreation": "balance-balloons",
+             "components": [{"balloonType": "pkg0node0"}, {"balloonType": "pkg1node1"}]},
+            {"name": "crosspkgcomb0-tp2", "componentCreation": "all",
+             "components": [{"balloonType": "pkg0node0"}, {"balloonType": "pkg1node1"}]},
+            {"name": "model-balloon-tp2", "componentCreation": "balance-balloons",
+             "components": [{"balloonType": "crosspkgcomb0-tp2"}]}, *extra]
+
+
+def _nri_cluster(monkeypatch, balloons, annotation=CONTIGUOUS, types=None, reserved="cpuset:8-15"):
+    """w1: the NUMA CPU lists the role published, `balloons` = cpusets NRI reports, `types` = balloonTypes."""
+    nrt = {"zones": [{"name": f"model-balloon-tp1[{i}]", "type": "balloon", "attributes": [{"name": "cpuset", "value": c}]}
+                     for i, c in enumerate(balloons)] + [
+        {"name": "reserved[0]", "type": "balloon", "attributes": [{"name": "cpuset", "value": "8-9"}]}]}
+    policy = {"spec": {"reservedResources": {"cpu": reserved}, "balloonTypes": _tp_policy() if types is None else types}}
+
+    def kubectl(*args):
+        line = " ".join(args)
+        if "numa-cpus" in line:
+            return annotation
+        if "reservedResources" in line:
+            return reserved
+        if args[:2] == ("get", nri_policy._NRT_CRD):
+            return json.dumps(nrt)
+        if args[:2] == ("get", nri_policy._BALLOONSPOLICY_CRD) and args[-1] == "json":
+            return json.dumps(policy)
+        if "nri\\.intel\\.com/numa-nodes" in line:
+            return "2"
+        if "nri\\.intel\\.com/physical-cpus" in line:
+            return "8"
+        if "capacity.cpu" in line:
+            return "16"
+        return ""
+    monkeypatch.setattr(nri_policy, "_kubectl", kubectl)
+
+
+def test_per_numa_free_counts_each_balloon_where_it_is(monkeypatch):
+    # Both busy cores are on NUMA 0: the even split would have said 3 and 3.
+    _nri_cluster(monkeypatch, ["0", "1"])
+    assert nri_policy._per_numa_free("w1", in_use=2) == {0: 2, 1: 4}
+
+
+def test_per_numa_free_takes_unreported_pods_from_the_freest_node(monkeypatch):
+    _nri_cluster(monkeypatch, ["0"])
+    assert nri_policy._per_numa_free("w1", in_use=3) == {0: 3, 1: 2}  # 2 CPUs requested but not in a balloon yet
+
+
+def test_per_numa_free_counts_a_spilled_balloon(monkeypatch):
+    # A balloon on reserved siblings: its request is fully accounted, the reserved CPUs were never free.
+    _nri_cluster(monkeypatch, ["2-3,10-11"])
+    assert nri_policy._per_numa_free("w1", in_use=4) == {0: 2, 1: 4}
+
+
+def test_per_numa_free_with_interleaved_numbering(monkeypatch):
+    # NUMA 0 = even CPUs, NUMA 1 = odd; no layout is assumed, the published lists decide.
+    _nri_cluster(monkeypatch, ["0,2"], annotation='{"0": "0,2,4,6,8,10,12,14", "1": "1,3,5,7,9,11,13,15"}')
+    assert nri_policy._per_numa_free("w1", in_use=2) == {0: 2, 1: 4}
+
+
+def test_no_published_layout_fails_the_placement(monkeypatch):
+    # No layout is assumed: the node fits nothing until the role publishes its NUMA CPU lists.
+    _nri_cluster(monkeypatch, ["0"], annotation="")
+    monkeypatch.setattr(nri_policy, "_balloon_pods_cpu_on_node", lambda node: 1)
+    assert nri_policy._per_numa_free("w1", in_use=1) is None
+    fits, slots, detail = nri_policy._node_capacity_report("w1", 2, 1, 1)
+    assert (fits, slots) == (False, 0) and "re-run the nri_cpu_balloons role" in detail
+
+
+def test_missing_balloon_type_fails_the_placement(monkeypatch):
+    _nri_cluster(monkeypatch, [], types=[_leaf("pkg0node0", 0)])  # no model-balloon-tp1
+    monkeypatch.setattr(nri_policy, "_balloon_pods_cpu_on_node", lambda node: 0)
+    fits, slots, detail = nri_policy._node_capacity_report("w1", 2, 1, 1)
+    assert (fits, slots) == (False, 0) and "balloon type 'model-balloon-tp1'" in detail
+
+
+@pytest.mark.parametrize("types, balloon, want", [
+    (_tp_policy(), "model-balloon-tp1", [(0,), (1,)]),
+    (_tp_policy(), "model-balloon-tp2", [(0, 1)]),
+    # SNC2 on two sockets: tp2 stays within a package (localpkg), as the role generates it.
+    ([_leaf(f"pkg{p}node{n}", n) for p, n in ((0, 0), (0, 1), (1, 2), (1, 3))] + [
+        {"name": "localpkgcomb0-tp2", "components": [{"balloonType": "pkg0node0"}, {"balloonType": "pkg0node1"}]},
+        {"name": "localpkgcomb1-tp2", "components": [{"balloonType": "pkg1node2"}, {"balloonType": "pkg1node3"}]},
+        {"name": "model-balloon-tp2", "componentCreation": "balance-balloons",
+         "components": [{"balloonType": "localpkgcomb0-tp2"}, {"balloonType": "localpkgcomb1-tp2"}]}],
+     "model-balloon-tp2", [(0, 1), (2, 3)]),
+    ([{"name": "model-balloon-tp1", "components": [{"balloonType": "nowhere"}]}], "model-balloon-tp1", None),
+    ([{"name": "model-balloon-tp1"}], "model-balloon-tp1", None),  # a leaf close to no NUMA node
+    (_tp_policy(), "model-balloon-tp4", None),
+])
+def test_tp_numa_sets_follow_the_balloon_policy(monkeypatch, types, balloon, want):
+    _nri_cluster(monkeypatch, [], types=types)
+    assert nri_policy._tp_numa_sets("w1", balloon) == want
+
+
+@pytest.mark.parametrize("free, sets, cpu, want, placed", [
+    ({0: 4, 1: 4}, [(0,), (1,)], 3, 3, 2),
+    ({0: 4, 1: 0, 2: 4, 3: 0}, [(0, 1), (2, 3)], 4, 1, 0),  # spread over NUMA nodes would have said 2
+    ({0: 8, 1: 8, 2: 2, 3: 2}, [(0, 1), (2, 3)], 8, 3, 2),
+    ({0: 6, 1: 2}, [(0,), (1,)], 2, 9, 4),
+])
+def test_place_on_numa_sets(free, sets, cpu, want, placed):
+    assert nri_policy._place(dict(free), sets, cpu, want) == placed
+
+
+def test_capacity_report_uses_the_real_numa_placement(monkeypatch):
+    # 3-core replicas: NUMA 0 has 2 free, NUMA 1 has 4, so one fits (the even split said 0 or 2).
+    _nri_cluster(monkeypatch, ["0-1"])
+    monkeypatch.setattr(nri_policy, "_balloon_pods_cpu_on_node", lambda node: 2)
+    fits, slots, detail = nri_policy._node_capacity_report("w1", 3, 1, 2)
+    assert (fits, slots) == (False, 1) and "per-NUMA free=[2, 4]" in detail
+
+
+def test_auto_cpu_takes_the_freest_numa_set(monkeypatch):
+    _nri_cluster(monkeypatch, ["0-1"])
+    monkeypatch.setattr(nri_policy, "_balloon_pods_cpu_on_node", lambda node: 2)
+    monkeypatch.setattr(nri_policy, "_schedulable_nri_nodes", lambda tp: ["w1"])
+    assert nri_policy.auto_cpu(1) == 4 and nri_policy.auto_cpu(2) == 4  # tp2: 2 per NUMA node x 2
+
+
+@pytest.mark.parametrize("cpu, tp, fits", [(4, 1, True), (5, 1, False), (8, 2, True), (9, 2, False)])
+def test_largest_replica_is_the_best_numa_set(monkeypatch, cpu, tp, fits):
+    # Each NUMA node has 4 non-reserved CPUs: tp1 holds 4, tp2 (both nodes) holds 8.
+    _nri_cluster(monkeypatch, [])
+    largest = nri_policy._largest_replica("w1", tp)
+    assert (cpu <= largest) == fits
+
+
+def test_largest_replica_unknown_without_a_layout(monkeypatch):
+    _nri_cluster(monkeypatch, [], annotation="")
+    assert nri_policy._largest_replica("w1", 1) is None

@@ -128,7 +128,7 @@ llm_services_mm_image: "docker.io/alpine/k8s:1.36.5@sha256:094adf64cdc4827377cdb
 llm_services_mm_deployer_groups: ["{{ headlamp_oidc_prefix | default('oidc:') }}{{ keycloak_platform_admin_group | default('platform-admins') }}"]
 # Finished Jobs (and their logs) are kept this long for the Models page.
 llm_services_mm_job_ttl: 86400
-llm_services_mm_job_timeout: 3600     # seconds; weights download + model load
+llm_services_mm_job_timeout: 8400     # seconds; above model-manager's own limits (download 7200 + Ready 900 + rollback)
 
 # =============================================================================
 # Inference engine observability

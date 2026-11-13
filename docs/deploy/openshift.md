@@ -33,7 +33,7 @@ detects. Nothing in `global_config.yaml` or `models.yaml` changes between platfo
 | `kserve` | **Checks** that OpenShift AI is installed: a DataScienceCluster with KServe `Managed`, the KServe controllers in `redhat-ods-applications`, and the LLMInferenceService and InferencePool CRDs. It installs nothing. Then it sets up the inference Gateway `openshift-ingress/openshift-ai-inference`: it creates the Gateway if it is missing, issues it a certificate for `inference.<domain>` from the platform CA (`gateway_tls_mode: custom` copies the operator's certificate instead), publishes it through a passthrough Route on `inference.<domain>`, and adds a Gateway-wide Keycloak `AuthPolicy` (Connectivity Link) when `auth_type: jwt`. Teardown does nothing. |
 | `envoy_ai_gateway`, `agentgateway` | Skipped. Models are routed by OpenShift AI's inference Gateway at `/<namespace>/<model>/v1/...`. There is no unified `/v1` endpoint (AIGatewayRoute). |
 | `keycloak_config` | Unchanged, except that `kcadm` keeps its session in `/tmp`, because RHBK's `HOME=/` is not writable for the UID that the SCC assigns. |
-| `nri_cpu_balloons` (platform repo) | Grants the SCC, and selects OpenShift AI model pods into `vllm-balloon-tp1` by their `kserve.io/component=workload` label. v1alpha1 cannot annotate pods (see below). |
+| `nri_cpu_balloons` (platform repo) | Grants the SCC, and selects OpenShift AI model pods into `model-balloon-tp1` by their `kserve.io/component=workload` label. v1alpha1 cannot annotate pods (see below). |
 | `llm_services` | Waits for the KServe controller in `redhat-ods-applications`. Gives the model-store PVC `ReadWriteOnce` access when the StorageClass is RWO-only (`storage_custom_rwx: false`, e.g. LVMS). Passes `MM_PLATFORM` and the inference Gateway to `model-manager`. |
 
 ## Deploy a model
@@ -109,7 +109,7 @@ Response codes: no token or an invalid one gives `401`, and a valid one `200`.
 | Gap | Today |
 |-----|-------|
 | OpenVINO models | Not supported: OpenShift AI's `LLMInferenceService` template starts vLLM itself, so model-manager stops an OpenVINO deploy there. |
-| TP2+ balloons | On v1alpha1 every model pod matches by label into `vllm-balloon-tp1`, so models with more than one NUMA node per replica don't get their own balloon type. |
+| TP2+ balloons | On v1alpha1 every model pod matches by label into `model-balloon-tp1`, so models with more than one NUMA node per replica don't get their own balloon type. |
 | LiteLLM, vLLM Semantic Router | Not supported: both reach the models through the Envoy AI Gateway, which OpenShift does not get. The install stops with `auth_type: litellm_vkey`, `litellm_enabled` or `vllm_sr_enabled`. |
 | Unified `/v1` endpoint | Not available, because there is no AI gateway. Clients (e.g. eRAG) need the per-model URL. |
 | Token script fallback | When the router can't be reached, the port-forward fallback fails: RHBK serves plain HTTP on `8080`. |

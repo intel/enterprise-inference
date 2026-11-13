@@ -16,7 +16,8 @@ from pathlib import Path
 from . import __version__, k8s, platform, renderer, routing
 from .config import MM_DIR, Catalog, Model, is_uint, mm_path, pick, resolve, resolve_autoscaling, text, truthy
 from .download import download_weights
-from .policy import ANN, preflight_gate, resolve_auto_cpu, resolve_policy, warn_max_unplaceable, whole_cpus
+from .policy import ANN, mem_bytes, preflight_gate, resolve_auto_cpu, resolve_policy, whole_cpus
+from .stuck import Watch
 from .ui import BOLD, CYAN, DIM, GREEN, RESET, YELLOW, abort, fmt_duration, info, ok, warn
 
 USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubernetes
@@ -254,11 +255,16 @@ def on_ready(m: Model) -> None:
     routing.litellm_register(m)
 
 
-def _wait_ready(m: Model, timeout: int) -> bool:
-    start, last_beat, last_msg = time.monotonic(), 0.0, ""
+def _wait_ready(m: Model, timeout: int) -> str:
+    """'' once m is Ready; else why not: a pod that cannot run, or the timeout."""
+    start, last_beat, last_msg, watch = time.monotonic(), 0.0, "", Watch()
     while time.monotonic() - start < timeout:
         if workload_ready(m) == "True":
-            return True
+            return ""
+        pods = pick(k8s.get_json("pods", "-n", m.namespace, "-l", f"app.kubernetes.io/name={m.name}"), "items", [])
+        stuck = watch.stuck(pods)
+        if stuck:
+            return stuck
         elapsed = time.monotonic() - start
         if elapsed - last_beat >= 15:  # heartbeat, so a slow load does not look stuck
             msg = pod_progress(m)
@@ -267,7 +273,7 @@ def _wait_ready(m: Model, timeout: int) -> bool:
                 last_msg = msg
             last_beat = elapsed
         time.sleep(5)
-    return False
+    return f"timed out after {timeout}s"
 
 
 def _install_runtime(m: Model) -> None:
@@ -384,7 +390,8 @@ def deploy(o: Options, target: str) -> None:
 
     # Unchanged spec: skip pre-flight and apply (the running pods would count against their own cores).
     action, changed = "apply", False
-    if not truthy(os.environ.get("MM_FORCE_REDEPLOY", "")) and k8s.succeeds("get", m.kind, m.name, "-n", m.namespace):
+    existed = k8s.succeeds("get", m.kind, m.name, "-n", m.namespace)
+    if existed and not truthy(os.environ.get("MM_FORCE_REDEPLOY", "")):
         rc = k8s.run("diff", *k8s.SSA, "-f", "-", stdin=manifest).returncode
         if rc == 0:
             action = "skip"
@@ -403,19 +410,17 @@ def deploy(o: Options, target: str) -> None:
         def render(model: Model) -> str:
             return renderer.manifest(model, catalog, o, annotations, cpu, cli_args)
 
-        if changed and policy.counts_running_pods and _only_scaling_changed(m, render):
-            info(f"  Only the replica count or autoscaling changed: the running pods stay, and {policy.name} would "
-                 "count their cores as taken, so only the replicas beyond them are checked (warning only).")
-            warn_max_unplaceable(policy, m, tp, running=_running_replicas(m))
+        if changed and _only_scaling_changed(m, render):
+            running = _running_replicas(m)
+            info("  Only the replica count or autoscaling changed: the running pods stay, so only the replicas "
+                 "beyond them are checked.")
         else:
-            # An upgrade removes the old InferenceService before the new pods start, so its cores are free for them.
-            running = _upgrade_credit(m, annotations, cpu) if policy.counts_running_pods else 0
+            # An upgrade removes the old InferenceService before the new pods start, so its CPUs are free for them.
+            running = _upgrade_credit(m, annotations, cpu)
             if running:
                 info(f"  The previous InferenceService/{m.name} is removed before the new pods start: its {running} "
-                     "running pods' cores are counted as free.")
-            preflight_gate(policy, m, tp, running=running)
-            if m.autoscaled:
-                warn_max_unplaceable(policy, m, tp, running=running)
+                     "running pods' CPUs and memory are counted as free.")
+        preflight_gate(policy, m, tp, cpu, running=running, amx=catalog.require_amx)
         k8s.ensure_storage(m.namespace, catalog.pvc)
         download_weights(m, catalog, cli_args)
         if m.kind == "InferenceService":
@@ -428,11 +433,11 @@ def deploy(o: Options, target: str) -> None:
     timeout = int(o.wait_timeout or 900)  # model load + warmup is slow
     if o.wait:
         info(f"Waiting for {m.name} to become Ready (timeout: {timeout}s)...")
-        if _wait_ready(m, timeout):
+        problem = _wait_ready(m, timeout)
+        if not problem:
             on_ready(m)
             return routing.print_endpoints(m)
-        warn(f"{m.name} did not become Ready within {timeout}s")
-        warn(f"  Check progress: kubectl logs -n {m.namespace} -l app.kubernetes.io/name={m.name} -f")
+        _deploy_failed(m, problem, rollback=action == "apply" and not existed)
     else:
         time.sleep(3)
         if workload_ready(m) == "True":
@@ -450,6 +455,18 @@ def deploy(o: Options, target: str) -> None:
             info(f"  Reconcile log: {log}")
             info("  (or re-run with --wait to block until it is Ready)")
     routing.print_endpoints(m)
+
+
+def _deploy_failed(m: Model, problem: str, rollback: bool) -> None:
+    """Exit 1 with the reason. A model this deploy created is removed first, so nothing is left Pending."""
+    warn(f"{m.name} is not Ready: {problem}")
+    if rollback:
+        info(f"Rolling back: removing {m.name}, which this deploy created.")
+        _remove(m, wait=True, timeout=UNDEPLOY_WAIT)
+        k8s.delete("job", f"download-{m.name}", m.namespace, quiet=True)  # its weights stay on the PVC
+        abort(f"Deploy of {m.name} failed and was rolled back: {problem}")
+    abort(f"Deploy of {m.name} failed: {problem}. It was already deployed, so it is left as it is; check: "
+          f"kubectl get pods -n {m.namespace} -l app.kubernetes.io/name={m.name}")
 
 
 def reconcile(o: Options, target: str) -> None:
@@ -499,16 +516,17 @@ def _owned_inference_service(m: Model) -> Model | None:
 
 
 def _upgrade_credit(m: Model, annotations: dict, cpu: str) -> int:
-    """Running pods of the InferenceService m replaces whose cores a new replica can take: the same NRI balloon
-    (which follows tp) and at least as many CPUs. Any other change gets the full check."""
+    """Running pods of the InferenceService m replaces whose place a new replica can take: the same NRI balloon
+    (which follows tp) and at least as many CPUs and as much memory. Any other change gets the full check."""
     old = _owned_inference_service(m)
     if old is None:
         return 0
     predictor = pick(pick(k8s.get_json("InferenceService", m.name, "-n", m.namespace) or {}, "spec", {}), "predictor", {})
-    old_cpu = text(pick(pick(pick(pick(predictor, "model", {}), "resources", {}), "requests", {}), "cpu"))
+    requests = pick(pick(pick(predictor, "model", {}), "resources", {}), "requests", {})
     balloon = f"{ANN}/balloon"
     if pick(pick(predictor, "annotations", {}), balloon) != annotations.get(balloon) or \
-            whole_cpus(old_cpu, floor=True) < whole_cpus(cpu):
+            whole_cpus(text(pick(requests, "cpu")), floor=True) < whole_cpus(cpu) or \
+            mem_bytes(text(pick(requests, "memory"))) < mem_bytes(m.memory):
         return 0
     return _running_replicas(old, m.node)  # cores freed on another node don't help a pinned deploy
 
@@ -524,6 +542,13 @@ def _retire_inference_service(m: Model) -> None:
     if r.returncode:
         abort(f"Could not remove the previous InferenceService/{m.name}: {r.stderr.strip()}")
     routing.deregister(old)
+    selector = f"serving.kserve.io/inferenceservice={m.name}"
+    deadline = time.monotonic() + UNDEPLOY_WAIT
+    while k8s.out("get", "pods", "-n", m.namespace, "-l", selector, "-o", "name"):  # their CPUs go to the new pods
+        if time.monotonic() > deadline:
+            abort(f"The previous InferenceService/{m.name}'s pods are still terminating after {UNDEPLOY_WAIT}s; "
+                  f"re-run the deploy once they are gone: kubectl get pods -n {m.namespace} -l {selector}")
+        time.sleep(3)
 
 
 def undeploy(o: Options, target: str) -> None:
@@ -539,14 +564,18 @@ def undeploy(o: Options, target: str) -> None:
         abort(f"No catalog entry or deployed resource named '{target}' found.")
     info(f"Undeploying {m.name}")
     _retire_inference_service(m)  # first: it reads the old routes to know which to delete
+    _remove(m, o.wait, int(o.wait_timeout or UNDEPLOY_WAIT))
+
+
+def _remove(m: Model, wait: bool, timeout: int) -> None:
+    """Delete m, its chat template and routes; with `wait`, until its pods are gone."""
     k8s.delete(m.kind, m.name, m.namespace)
     k8s.delete("configmap", f"{m.name}-chat-template", m.namespace, quiet=True)
     routing.deregister(m)
     routing.litellm_deregister(m.name)
-    if not o.wait:
+    if not wait:
         return ok(f"{m.name} undeployed")
     # The CR delete returns at once; pods keep their pinned CPUs until graceful shutdown completes.
-    timeout = int(o.wait_timeout or UNDEPLOY_WAIT)
     info(f"Waiting for {m.name} pods to terminate (timeout: {timeout}s)...")
     start = last_beat = time.monotonic()
     while time.monotonic() - start < timeout:

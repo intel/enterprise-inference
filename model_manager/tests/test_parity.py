@@ -29,6 +29,7 @@ def _ready(cond: str) -> str:
 
 
 DOWNLOAD = [[r"get pvc model-store .*phase", 0, "Bound"],
+            [r"get job download-\S+ -n \S+ -o json$", 0, json.dumps({"status": {"succeeded": 1}})],
             [r"get pods -n \S+ -l job-name=download-", 0, "dl-pod"]]
 POOL = [[r"get inferencepool", 0, ""],
         [r"refs\[0\]\.name", 0, "ai-gateway"], [r"refs\[0\]\.namespace", 0, "llm-inference"]]
@@ -81,6 +82,33 @@ KUBELET_PER_POD = (r"allocatable CPUs \(cpu=(\d+) x tp=\d+\)", r"allocatable CPU
 # OVMS deploys as an LLMInferenceService routed through the KServe scheduler (epp), no longer as
 # an InferenceService with a direct route. The legacy OVMS deploy cases (ovms-nri, deploy-ovms-wait,
 # fx-servers-sorted-default) have no counterpart there; test_units covers what they checked.
+# A --wait that times out exits 1 and removes the model this deploy created (legacy exited 0 and left it).
+WAIT_FAILS = [
+    (r"^# rc: 0$", "# rc: 1"),
+    (r"^\n  ─+\n  Model:(?:.*\n)*?    https://inference\.example\.com/v1/chat/completions\n\n",
+     ("[INFO ]  Rolling back: removing qwen3-0-6b, which this deploy created.\n"
+      "[INFO ]  Waiting for qwen3-0-6b pods to terminate (timeout: 180s)...\n"
+      "[  OK ]  qwen3-0-6b undeployed (all pods terminated, CPUs released)\n")),
+    (r"^\[WARN \]  qwen3-0-6b did not become Ready within 1s\n\[WARN \]    Check progress: .*\n",
+     ("[WARN ]  qwen3-0-6b is not Ready: timed out after 1s\n"
+      "[ERROR]  Deploy of qwen3-0-6b failed and was rolled back: timed out after 1s\n")),
+    (r"\Z", ("$ kubectl delete LLMInferenceService qwen3-0-6b -n llm-inference --ignore-not-found\n"
+             "$ kubectl delete configmap qwen3-0-6b-chat-template -n llm-inference --ignore-not-found\n"
+             "$ kubectl delete aigatewayroute aigw-qwen3-0-6b -n llm-inference --ignore-not-found\n"
+             "$ kubectl delete job download-qwen3-0-6b -n llm-inference --ignore-not-found\n"))]
+# The pre-flight names what it checks, and also checks CPU/memory requests against the nodes the model can use.
+KUBELET_REQUESTS = [
+    (r"^\[WARN \]  kubelet-static pre-flight issues detected:$",
+     "[WARN ]  kubelet-static pre-flight: llama3-8b-awq cannot place 1 replica(s):"),
+    (r"^(\[WARN \]    - No schedulable node has 16 allocatable CPUs.*\n)",
+     (r"\1[WARN ]    - 1 replica(s) requesting 16 CPU and 32Gi each: the nodes it can use have room for 0 "
+      "(free: no schedulable node with AMX); the rest would stay Pending.\n"))]
+# One NRI policy, the role's: engine-neutral model-balloon-tp<N> types, and siblings reserved, so a CPU request
+# is physical cores and never doubled (legacy had vllm-balloon, vllm-balloon-tp<N> and a hideHyperthreads mode).
+BALLOON_TP = (r"vllm-balloon-tp(\d)", r"model-balloon-tp\1")
+BALLOON_TP1 = (r"vllm-balloon\b(?!-)", "model-balloon-tp1")
+BALLOON_TP2 = (r"vllm-balloon\b(?!-)", "model-balloon-tp2")
+NO_HT_DOUBLING = [(r'^(            cpu: )"16"$', r'\1"8"'), (r"^\[INFO \]  NRI: Effective CPU 8 → 16 \(hideHyperthreads active\)\n", "")]
 OVMS_KIND = (r"^\$ kubectl delete InferenceService qwen3-5-2b-ovms ",
              "$ kubectl delete LLMInferenceService qwen3-5-2b-ovms ")
 OVMS_AIGATEWAY_ROUTE = (r"^\$ kubectl delete (aiservicebackend|backend) qwen3-5-2b-ovms .*\n", "")
@@ -103,11 +131,42 @@ def nri_node(in_use: int) -> list:
     return [[r"^get nodes -o json$", 0, json.dumps({"items": [node]})],
             [r"^get pods -A --field-selector spec\.nodeName=w1 -o json$", 0, json.dumps({"items": [pod]})],
             [r"numa-nodes\}$", 0, "2"], [r"physical-cpus\}$", 0, "64"], [r"allocatable\.cpu\}$", 0, "126"],
-            [r"capacity\.cpu\}$", 0, "128"], [r"reservedResources\.cpu\}$", 0, "cpuset:64-127"]]
+            [r"capacity\.cpu\}$", 0, "128"], [r"reservedResources\.cpu\}$", 0, "cpuset:64-127"],
+            [r"^get noderesourcetopologies\S* w1 -o json$", 0, json.dumps(_nrt(in_use))],
+            [r"numa-cpus\}$", 0, '{"0": "0-31,64-95", "1": "32-63,96-127"}'],
+            [r"^get balloonspolicies\.config\.nri node\.w1 -n kube-system -o json$", 0, json.dumps(NRI_POLICY)]]
+
+
+def _leaf(name: str, numa: int) -> dict:
+    return {"name": name, "preferCloseToDevices": [f"/sys/devices/system/node/node{numa}"]}
+
+
+# The role's types for a 2-socket node with one NUMA node each: tp1 takes one, tp2 takes both.
+NRI_POLICY = {"spec": {"balloonTypes": [
+    _leaf("pkg0node0", 0), _leaf("pkg1node1", 1),
+    {"name": "model-balloon-tp1", "componentCreation": "balance-balloons",
+     "components": [{"balloonType": "pkg0node0"}, {"balloonType": "pkg1node1"}]},
+    {"name": "crosspkgcomb0-tp2", "components": [{"balloonType": "pkg0node0"}, {"balloonType": "pkg1node1"}]},
+    {"name": "model-balloon-tp2", "componentCreation": "balance-balloons",
+     "components": [{"balloonType": "crosspkgcomb0-tp2"}]}]}}
+
+
+def _nrt(in_use: int) -> dict:
+    """NRI's report for nri_node: the in-use balloon CPUs split evenly over its two NUMA nodes (0-31, 32-63)."""
+    half = min(32, in_use // 2)
+    cpus = ",".join(f"{lo}-{lo + half - 1}" for lo in (0, 32)) if half else ""
+    return {"zones": [{"name": "vllm-balloon[0]", "type": "balloon", "attributes": [{"name": "cpuset", "value": cpus}]}]}
+
+
+# Room for any model, so the request check (new; legacy had none) passes quietly; case rules match first.
+ROOMY = [[r"^get pods -A --field-selector status\.phase!=Succeeded,status\.phase!=Failed -o json$", 0, '{"items": []}'],
+         [r"^get nodes -o json$", 0, json.dumps({"items": [{"metadata": {"name": "big", "labels": {
+             "feature.node.kubernetes.io/cpu-cpuid.AMXBF16": "true"}}, "spec": {},
+             "status": {"allocatable": {"cpu": "1000", "memory": "4Ti"}}}]})]]
 
 
 def case(name, *args, env=None, k8s=(), catalog=None, deviations=()):
-    return pytest.param({"args": args, "env": env or {}, "k8s": list(k8s), "catalog": catalog,
+    return pytest.param({"args": args, "env": env or {}, "k8s": list(k8s) + ROOMY, "catalog": catalog,
                          "deviations": deviations}, id=name)
 
 
@@ -117,7 +176,7 @@ CASES = [
     case("qwen-nri-advanced", "deploy", "qwen3-0-6b", "--dry-run", "--tp", "2", "--server-version", "0.19.1",
          "--arg", "--max-model-len=4096", "--arg", "--max-num-seqs", "--arg", "64", "--env", "FOO=bar",
          "--env", "VLLM_CPU_KVCACHE_SPACE=20", "--label", "team=ml", "--label", "example.com/owner=",
-         "--node", "w1", "--replicas", "2", env={**NRI, "MM_NRI_MODE": "advanced", "MM_NRI_HIDE_HT": "true"}),
+         "--node", "w1", "--replicas", "2", env=NRI, deviations=[BALLOON_TP, *NO_HT_DOUBLING]),
     case("llama-kubelet-static", "deploy", "llama3-8b-awq", "--dry-run", "--cpu", "7",
          env={"MM_CPU_POLICY": "kubelet-static"}, k8s=STATIC),
     case("llama-kubelet-millicpu", "deploy", "llama3-8b-awq", "--dry-run", "--cpu", "7500m", "--tp", "2",
@@ -152,12 +211,12 @@ CASES = [
     case("fx-template-file-missing", "deploy", "tmpl-file-missing", "--dry-run", env=BE, catalog=FIXTURE),
     case("fx-cpu-auto-best-effort", "deploy", "auto-cpu", "--dry-run", env=BE, catalog=FIXTURE),
     case("fx-cpu-auto-nri", "deploy", "auto-cpu", "--dry-run", "--tp", "2", env=NRI, catalog=FIXTURE,
-         k8s=nri_node(8)),
+         k8s=nri_node(8), deviations=[BALLOON_TP2]),
     case("fx-cpu-auto-nri-full", "deploy", "auto-cpu", "--dry-run", env=NRI, catalog=FIXTURE, k8s=nri_node(124)),
     case("fx-cpu-auto-keep-live", "deploy", "auto-cpu", "--dry-run", env=NRI, catalog=FIXTURE,
-         k8s=LIVE_AUTO_CPU + nri_node(8)),
+         k8s=LIVE_AUTO_CPU + nri_node(8), deviations=[BALLOON_TP1]),
     case("fx-cpu-auto-override", "deploy", "auto-cpu", "--dry-run", "--cpu", "10", env=NRI, catalog=FIXTURE,
-         k8s=nri_node(8)),
+         k8s=nri_node(8), deviations=[BALLOON_TP1]),
     case("fx-version-not-allowed", "deploy", "multi", "--server", "vllm", "--server-version", "0.30.0",
          "--dry-run", env=BE, catalog=FIXTURE),
     case("fx-category-detected", "deploy", "nocat", "--dry-run",
@@ -189,7 +248,8 @@ CASES = [
     case("deploy-detached", "deploy", "qwen3-0-6b", env=BE, k8s=DOWNLOAD + POOL + QWEN_READY,
          deviations=[NO_LITELLM_URL]),
     case("deploy-not-ready-reconciler", "deploy", "qwen3-0-6b", "--wait-timeout", "1", env=BE, k8s=DOWNLOAD),
-    case("deploy-wait-timeout", "deploy", "qwen3-0-6b", "--wait", "--wait-timeout", "1", env=BE, k8s=DOWNLOAD),
+    case("deploy-wait-timeout", "deploy", "qwen3-0-6b", "--wait", "--wait-timeout", "1", env=BE, k8s=DOWNLOAD,
+         deviations=WAIT_FAILS),
     case("redeploy-unchanged", "deploy", "qwen3-0-6b", env={**BE, "MM_FORCE_REDEPLOY": "0"},
          k8s=QWEN_EXISTS + POOL + QWEN_READY, deviations=[NO_LITELLM_URL]),
     case("redeploy-diff-error-ready", "deploy", "qwen3-0-6b", env=BE,
@@ -204,7 +264,7 @@ CASES = [
         [r"get LLMInferenceService specdec -n ns1 -o json$", 0, _ready("MainWorkloadReady")]],
          deviations=[NO_LITELLM_URL]),
     case("kubelet-static-preflight-blocks", "deploy", "llama3-8b-awq", env={"MM_CPU_POLICY": "kubelet-static"},
-         k8s=STATIC + SMALL_NODES, deviations=[KUBELET_PER_POD]),
+         k8s=STATIC + SMALL_NODES, deviations=[KUBELET_PER_POD, *KUBELET_REQUESTS]),
     case("undeploy-embed", "undeploy", "bge-base-en"),
     case("undeploy-ovms", "undeploy", "qwen3-5-2b-ovms", deviations=[OVMS_KIND, OVMS_AIGATEWAY_ROUTE]),
     case("undeploy-live-alias", "undeploy", "qwen-alt", k8s=[
