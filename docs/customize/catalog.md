@@ -89,6 +89,7 @@ models:
 | `category` | Workload class — `llm`, `embed`, `rerank`, or `vlm`. Drives default args, CPU, and memory |
 | `cpu` / `memory` | Resource requests (default: from the category). `cpu: auto` sizes CPU to a NUMA node — see [below](#cpu-auto) |
 | `replicas` | Replica count (default: 1) |
+| `autoscaling` | `{min_replicas, max_replicas, scale_target}`: autoscale with KEDA between the two counts (default min: 1), scaling up when waiting requests per replica exceed `scale_target` (default: 2). Replaces `replicas`. vLLM models only; needs `keda_enabled: true` and KServe 0.21 (`envoy_gateway_upgrade: true`) |
 | `tp` | Tensor parallelism — split the model across N CPU sockets |
 | `namespace` | Target namespace (default: `llm-inference`) |
 | `node` | Pin to a specific node |

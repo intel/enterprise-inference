@@ -67,6 +67,18 @@ HELP_LIST = [
 ]
 # --id became --hfid (--id kept as a deprecated alias).
 HFID = (r"or --id <hf/repo>", "or --hfid <hf/repo>")
+# Autoscaling (KEDA) options are new.
+HELP_SCALING = [
+    (r"^  --replicas N         Replica count \(default: 1\)$",
+     "  --replicas N         Fixed replica count (default: 1); turns autoscaling off\n"
+     "  --min-replicas N     Autoscaling (KEDA, vLLM): fewest replicas (default: 1)\n"
+     "  --max-replicas N     Autoscaling: most replicas; above --min-replicas turns it on\n"
+     "  --scale-target N     Autoscaling: waiting requests per replica that trigger a scale-up (default: 2)"),
+    (r"^(  kubectl patch llminferenceservice .*)\n",
+     r"\1  # fixed count only\n  kubectl get scaledobject,hpa -n llm-inference          # autoscaled models\n"),
+]
+# A kubelet-static pod requests cpu CPUs; tensor parallelism splits them, it does not multiply them.
+KUBELET_PER_POD = (r"allocatable CPUs \(cpu=(\d+) x tp=\d+\)", r"allocatable CPUs (cpu=\1)")
 HELP_HFID = [
     (r"^  deploy <model>\|--id <hf/repo>   ", "  deploy <model>|--hfid <hf/repo> "),
     (r"^  --id <hf/repo>       Ad-hoc deploy any HuggingFace model$",
@@ -151,9 +163,9 @@ CASES = [
     case("fx-bad-env", "deploy", "badenv", "--dry-run", env=BE, catalog=FIXTURE),
     case("fx-bad-template", "deploy", "badtpl", "--dry-run", env=BE, catalog=FIXTURE),
     # CLI surface and validation errors.
-    case("no-args", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID]),
-    case("help", "--help", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID]),
-    case("help-command", "help", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID]),
+    case("no-args", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_SCALING]),
+    case("help", "--help", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_SCALING]),
+    case("help-command", "help", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_SCALING]),
     case("version", "version"),
     case("version-flag", "-v"),
     case("unknown-option", "deploy", "qwen3-0-6b", "--bogus"),
@@ -191,7 +203,7 @@ CASES = [
         [r"get LLMInferenceService specdec -n ns1 -o json$", 0, _ready("MainWorkloadReady")]],
          deviations=[NO_LITELLM_URL]),
     case("kubelet-static-preflight-blocks", "deploy", "llama3-8b-awq", env={"MM_CPU_POLICY": "kubelet-static"},
-         k8s=STATIC + SMALL_NODES),
+         k8s=STATIC + SMALL_NODES, deviations=[KUBELET_PER_POD]),
     case("undeploy-embed", "undeploy", "bge-base-en"),
     case("undeploy-ovms", "undeploy", "qwen3-5-2b-ovms"),
     case("undeploy-live-alias", "undeploy", "qwen-alt", k8s=[

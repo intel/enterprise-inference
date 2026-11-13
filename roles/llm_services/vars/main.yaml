@@ -31,6 +31,7 @@ __llm_mm_env_common:
   # only picks who authorizes the external API (Keycloak JWT or LiteLLM keys).
   MM_LITELLM_KSERVE_URL: "{{ _llm_ai_gateway_url }}"
   MM_PLATFORM: "{{ cluster_distribution | default('kubernetes') }}"
+  MM_PROMETHEUS_URL: "http://kube-prometheus-stack-prometheus.{{ observability_namespace | default('monitoring') }}.svc.cluster.local:9090"
   MM_EG_GATEWAY_NAME: "{{ gateway_name | default('eg-gateway') }}"
   MM_EG_GATEWAY_NS: "{{ gateway_namespace | default('envoy-gateway-system') }}"
   # API host and path in the endpoint hints model-manager prints; path mode

@@ -1,6 +1,7 @@
 """Serving manifests rendered from templates/ ({{KEY}} placeholders)."""
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -111,6 +112,36 @@ def _annotations(annotations: dict, kind: str) -> str:
         f"{pad}  {k}: {quote(v) if v.isdigit() or v in ('true', 'false') else v}\n" for k, v in annotations.items())
 
 
+# Standalone default; the install always sets MM_PROMETHEUS_URL from observability_namespace.
+PROMETHEUS_URL = "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
+
+
+def _llmisvc_replicas(m: Model) -> str:
+    """spec.replicas, or spec.scaling with a KEDA trigger on vLLM's waiting queue (KServe makes the ScaledObject).
+    The CRD rejects both together."""
+    if not m.autoscaled:
+        return f"  replicas: {m.replicas}"
+    query = f'sum(vllm:num_requests_waiting{{namespace="{m.namespace}",model="{m.name}"}})'
+    return "\n".join([
+        "  scaling:", f"    minReplicas: {m.min_replicas}", f"    maxReplicas: {m.max_replicas}", "    keda:",
+        "      pollingInterval: 15", "      triggers:", "        - type: prometheus", "          metadata:",
+        f"            serverAddress: {quote(os.environ.get('MM_PROMETHEUS_URL') or PROMETHEUS_URL)}",
+        f"            query: {quote(query)}", f"            threshold: {quote(m.scale_target)}"])
+
+
+def live_scaling(m: Model, spec: dict) -> Model:
+    """m with the live spec's replica count or autoscaling range: the inverse of _llmisvc_replicas (and of an
+    InferenceService's predictor.minReplicas)."""
+    if m.kind != "LLMInferenceService":
+        return dataclasses.replace(m, replicas=text(pick(pick(spec, "predictor", {}), "minReplicas", m.replicas)))
+    scaling = pick(spec, "scaling", {})
+    trigger = (pick(pick(scaling, "keda", {}), "triggers", []) or [{}])[0]
+    return dataclasses.replace(m, replicas=text(pick(spec, "replicas", m.replicas)),
+                               min_replicas=text(pick(scaling, "minReplicas")),
+                               max_replicas=text(pick(scaling, "maxReplicas")),
+                               scale_target=text(pick(pick(trigger, "metadata", {}), "threshold")))
+
+
 def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_args: list[str]) -> str:
     """The LLMInferenceService / InferenceService for m. cli_args already carries any --tp injection."""
     args = engine_args(m)
@@ -130,7 +161,7 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
         inline = inline_chat_template(m)
         gateway, gateway_ns = gateway_ref()
         return platform.adapt_llmisvc(render(
-            template("llm-inference-service.yaml"), **common, IMAGE=m.image,
+            template("llm-inference-service.yaml"), **common, IMAGE=m.image, SCALING=_llmisvc_replicas(m),
             GATEWAY_NAME=gateway, GATEWAY_NAMESPACE=gateway_ns,
             CHAT_TEMPLATE_MOUNT=(f"        volumeMounts:\n          - name: chat-template\n"
                                  f"            mountPath: {CHAT_TEMPLATE_DIR}\n            readOnly: true\n") if inline else "",
