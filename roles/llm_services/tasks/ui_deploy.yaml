@@ -278,6 +278,10 @@
         - apiGroups: [config.nri]
           resources: [balloonspolicies]
           verbs: [get, list]
+        # NRI's per-NUMA balloon placement, for the CPU pre-flight.
+        - apiGroups: [topology.node.k8s.io]
+          resources: [noderesourcetopologies]
+          verbs: [get, list]
         - apiGroups: [storage.k8s.io]
           resources: [storageclasses]
           verbs: [get]

@@ -94,7 +94,8 @@ WAIT_FAILS = [
       "[ERROR]  Deploy of qwen3-0-6b failed and was rolled back: timed out after 1s\n")),
     (r"\Z", ("$ kubectl delete LLMInferenceService qwen3-0-6b -n llm-inference --ignore-not-found\n"
              "$ kubectl delete configmap qwen3-0-6b-chat-template -n llm-inference --ignore-not-found\n"
-             "$ kubectl delete aigatewayroute aigw-qwen3-0-6b -n llm-inference --ignore-not-found\n"))]
+             "$ kubectl delete aigatewayroute aigw-qwen3-0-6b -n llm-inference --ignore-not-found\n"
+             "$ kubectl delete job download-qwen3-0-6b -n llm-inference --ignore-not-found\n"))]
 # The pre-flight names what it checks, and also checks CPU/memory requests against the nodes the model can use.
 KUBELET_REQUESTS = [
     (r"^\[WARN \]  kubelet-static pre-flight issues detected:$",

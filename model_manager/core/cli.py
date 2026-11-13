@@ -463,6 +463,7 @@ def _deploy_failed(m: Model, problem: str, rollback: bool) -> None:
     if rollback:
         info(f"Rolling back: removing {m.name}, which this deploy created.")
         _remove(m, wait=True, timeout=UNDEPLOY_WAIT)
+        k8s.delete("job", f"download-{m.name}", m.namespace, quiet=True)  # its weights stay on the PVC
         abort(f"Deploy of {m.name} failed and was rolled back: {problem}")
     abort(f"Deploy of {m.name} failed: {problem}. It was already deployed, so it is left as it is; check: "
           f"kubectl get pods -n {m.namespace} -l app.kubernetes.io/name={m.name}")

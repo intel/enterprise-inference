@@ -80,6 +80,11 @@ def _script(m: Model, cli_args: list[str]) -> str:
         "@NAME@", m.name).replace("@DIR@", f"/models/{m.name}")
 
 
+def _redact(line: str) -> str:
+    """A log line without credentials in URLs (a proxy can carry them)."""
+    return re.sub(r"(://)[^/@\s]+@", r"\1***@", line)
+
+
 def _wait_job(m: Model, job: str) -> str:
     """'' once the Job completes; 'Failed' when it failed; else why its pod is stuck, or that it timed out."""
     deadline, watch = time.monotonic() + TIMEOUT, Watch()
@@ -145,14 +150,15 @@ def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
             logs.terminate()
     if not failed:
         return ok(f"Download complete: {m.name}")
+    tail = k8s.out("logs", "-l", f"job-name={job}", "-n", m.namespace, "--tail=20") if failed == "Failed" else ""
+    k8s.run("delete", "job", job, "-n", m.namespace, "--ignore-not-found")  # nothing of a failed deploy stays
     if failed != "Failed":
-        k8s.run("delete", "job", job, "-n", m.namespace, "--ignore-not-found")
         abort(f"Download of {m.model_id} cannot run: {failed}. Nothing was deployed.")
-    tail = k8s.out("logs", "-l", f"job-name={job}", "-n", m.namespace, "--tail=20")
     if re.search(r"401|access denied|gated|authorization", tail, re.I):
         draft = f" or its draft '{m.draft_model_id}'" if m.draft_model_id else ""
         abort(f"Download failed: model '{m.model_id}'{draft} requires authentication. Set HF_TOKEN with an "
               "authorized token.")
     if re.search(r"ConnectError|ConnectionError|timeout", tail, re.I):
         abort("Download failed: network error reaching HuggingFace. Check proxy settings.")
-    abort(f"Download job failed. Check logs: kubectl logs -l job-name={job} -n {m.namespace}")
+    last = [_redact(line) for line in tail.splitlines()[-3:]]
+    abort(f"Download of {m.model_id} failed; nothing was deployed. Its last log lines:\n  " + "\n  ".join(last or ["(none)"]))

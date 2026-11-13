@@ -348,7 +348,8 @@ def preflight_gate(policy: BestEffort, m: Model, tp: int, cpu: str, running: int
     probe = dataclasses.replace(m, replicas=str(extra))
     # A policy that checks allocatable, not free, capacity counts every replica, running ones too.
     placed = probe if policy.counts_running_pods else dataclasses.replace(m, replicas=str(total))
-    errors = policy.preflight(placed, tp) + _request_errors(probe, cpu, amx)
+    placement = policy.preflight(placed, tp)
+    errors = placement + _request_errors(probe, cpu, amx)
     if not errors:
         return
     what = f"{extra} replica(s)" + (f" beyond the {running} running" if running else "") + \
@@ -358,4 +359,4 @@ def preflight_gate(policy: BestEffort, m: Model, tp: int, cpu: str, running: int
         warn(f"  - {e}")
     if "warn" in (os.environ.get("MM_PREFLIGHT"), os.environ.get("MM_NRI_PREFLIGHT")):
         return warn(f"{policy.name} pre-flight failed but MM_PREFLIGHT=warn — proceeding anyway.")
-    abort(policy.failure(placed, tp))
+    abort(policy.failure(placed, tp) if placement else BestEffort.failure(policy, probe, tp))

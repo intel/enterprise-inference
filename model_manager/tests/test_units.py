@@ -1352,3 +1352,29 @@ def test_capacity_report_uses_the_real_numa_placement(monkeypatch):
     monkeypatch.setattr(nri_policy, "_balloon_pods_cpu_on_node", lambda node: 2)
     fits, slots, _ = nri_policy._node_capacity_report("w1", 3, 1, 2)
     assert (fits, slots) == (False, 1)
+
+
+def test_failed_download_deletes_its_job_and_shows_the_log(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(download, "_wait_job", lambda m, job: "Failed")
+    monkeypatch.setattr(download, "_curl_ok", lambda *_: True)
+    monkeypatch.setattr(download.time, "sleep", lambda _: None)
+    monkeypatch.setattr(k8s, "out", lambda *a: "fetching via http://user:secret@proxy:911\nOSError: 404 not found"
+                        if a[0] == "logs" else "")
+    monkeypatch.setattr(k8s, "run", lambda *a, stdin=None: calls.append(a) or subprocess.CompletedProcess(a, 0, "", ""))
+    monkeypatch.setattr(k8s, "apply", lambda *a, **k: None)
+    m = Model(name="m", namespace="n", model_id="org/m", runtime="vllm", runtime_image="img", cpu="8", memory="8Gi")
+    with pytest.raises(SystemExit):
+        download.download_weights(m, Catalog(cli.MM_DIR / "models.yaml"), [])
+    assert ("delete", "job", "download-m", "-n", "n", "--ignore-not-found") in calls[1:]
+    err = capsys.readouterr().err
+    assert "OSError: 404 not found" in err and "secret" not in err and "://***@proxy" in err
+
+
+def test_memory_shortfall_names_the_request_check(monkeypatch, capsys):
+    # The placement check passed, so the abort must not blame the CPU policy.
+    monkeypatch.setattr(policy, "_request_errors", lambda m, cpu, amx: ["no memory"])
+    with pytest.raises(SystemExit):
+        policy.preflight_gate(_Gate(), Model(name="m", namespace="n", cpu="8", memory="600Gi", replicas="1"), 1, "8")
+    err = capsys.readouterr().err
+    assert "Pre-flight failed: cannot place m (cpu=8 memory=600Gi replicas=1)" in err
