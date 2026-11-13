@@ -386,6 +386,24 @@ def test_the_download_job_is_pinned_to_the_fitting_nodes():
     assert [t["matchFields"][0]["values"] for t in values["nodeSelectorTerms"]] == [["123"], ["true"]]
 
 
+def test_the_rendered_download_job_carries_the_pin_and_the_toleration(monkeypatch):
+    monkeypatch.setenv("MM_CONFIG", str(cli.MM_DIR / "models.yaml"))
+    monkeypatch.setenv("MM_ACCEL_RESOURCE", "nvidia.com/gpu")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    applied = []
+    monkeypatch.setattr(k8s, "apply", lambda manifest, **kw: applied.append(manifest))
+    monkeypatch.setattr(k8s, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""))
+    monkeypatch.setattr(k8s, "out", lambda *a, **k: "")
+    monkeypatch.setattr(download, "_curl_ok", lambda *a: True)
+    monkeypatch.setattr(download, "hf_model_info", lambda *a: {})
+    catalog = Catalog.load()
+    download.download_weights(config.resolve(catalog, "qwen3-0-6b-cuda", cli.Options()), catalog, [], ("n0", "123"))
+    spec = next(d for d in map(yaml.safe_load, applied) if d["kind"] == "Job")["spec"]["template"]["spec"]
+    terms = spec["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
+    assert terms == [{"matchFields": [{"key": "metadata.name", "operator": "In", "values": [n]}]} for n in ("n0", "123")]
+    assert spec["tolerations"] == [{"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}]
+
+
 def test_gpu_preflight_ignores_the_preferred_node(monkeypatch):
     assert preflight(monkeypatch, _nodes(None, 8), node="n0") == []
 
