@@ -379,11 +379,11 @@ def test_model_store_reads_the_pvc_deploy_names(monkeypatch):
 def test_the_download_job_is_pinned_to_the_fitting_nodes():
     pod = yaml.safe_load("spec:" + download._node_affinity(("n0", "n1")).replace("\n      ", "\n  "))
     terms = pod["spec"]["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
-    assert terms == [{"matchFields": [{"key": "metadata.name", "operator": "In", "values": ["n0", "n1"]}]}]
+    assert terms == [{"matchFields": [{"key": "metadata.name", "operator": "In", "values": [n]}]} for n in ("n0", "n1")]
     assert download._node_affinity(()) == ""
     numeric = yaml.safe_load("spec:" + download._node_affinity(("123", "true")).replace("\n      ", "\n  "))
     values = numeric["spec"]["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
-    assert values["nodeSelectorTerms"][0]["matchFields"][0]["values"] == ["123", "true"]
+    assert [t["matchFields"][0]["values"] for t in values["nodeSelectorTerms"]] == [["123"], ["true"]]
 
 
 def test_gpu_preflight_ignores_the_preferred_node(monkeypatch):

@@ -80,13 +80,15 @@ def _script(m: Model, cli_args: list[str]) -> str:
 
 
 def _node_affinity(nodes: tuple) -> str:
-    """Pin the Job to these nodes, so a volume that binds on first use lands where the GPU pod can mount it."""
+    """Pin the Job to these nodes, so a volume that binds on first use lands where the GPU pod can mount it.
+    One term per node: the API takes a single value in a node field selector, and terms are ORed."""
     if not nodes:
         return ""
     return ("\n      affinity:\n        nodeAffinity:\n          requiredDuringSchedulingIgnoredDuringExecution:\n"
-            "            nodeSelectorTerms:\n              - matchFields:\n                  - key: metadata.name\n"
-            "                    operator: In\n                    values:\n"
-            + "".join(f"                      - {quote(n)}\n" for n in nodes).rstrip("\n"))
+            "            nodeSelectorTerms:" + "".join(
+                "\n              - matchFields:\n                  - key: metadata.name\n"
+                f"                    operator: In\n                    values:\n                      - {quote(n)}"
+                for n in nodes))
 
 
 def download_weights(m: Model, catalog: Catalog, cli_args: list[str], nodes: tuple) -> None:
