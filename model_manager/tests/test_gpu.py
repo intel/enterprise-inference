@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -19,7 +20,7 @@ import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from core import cli, config, download, k8s, policy, renderer  # noqa: E402
+from core import cli, config, download, k8s, policy, renderer, routing  # noqa: E402
 from core.config import Catalog, Model  # noqa: E402
 from core.renderer import gpu_vendor  # noqa: E402
 from test_parity import BE, DOWNLOAD, GOLDEN, MM, NO_LITELLM_URL, NRI, POOL, _ready, case, run  # noqa: E402
@@ -325,14 +326,25 @@ def test_a_terminating_pod_holds_gpus_but_is_not_a_replica(monkeypatch):
     assert preflight(monkeypatch, _nodes(8, 8), pods, rolls=False, replicas="2")[0].startswith("No node has 8 free")
 
 
-@pytest.mark.parametrize("live, diff_rc, rolls", [("2", 0, False), ("2", 1, True), ("", 0, True), ("1", 0, False)])
-def test_rolls_pods_when_more_than_the_replicas_changes(monkeypatch, live, diff_rc, rolls):
-    monkeypatch.setenv("MM_CONFIG", str(cli.MM_DIR / "models.yaml"))
-    monkeypatch.setenv("MM_ACCEL_RESOURCE", "nvidia.com/gpu")
-    m = config.resolve(Catalog.load(), "qwen3-0-6b-cuda", cli.Options(replicas="1"))
-    monkeypatch.setattr(k8s, "out", lambda *a: live)
-    monkeypatch.setattr(k8s, "run", lambda *a, **k: type("R", (), {"returncode": diff_rc})())
-    assert cli._rolls_pods(m, Catalog.load(), cli.Options(), {}, "8", []) is rolls
+@pytest.mark.parametrize("scaling_only, rolls", [(True, False), (False, True)])
+def test_gpu_pods_roll_unless_only_the_scaling_changed(monkeypatch, scaling_only, rolls):
+    for k, v in {**GPU, "MM_PLATFORM": "kubernetes", "MM_LLMISVC_API_VERSION": "v1alpha2",
+                 "MM_CONFIG": str(cli.MM_DIR / "models.yaml")}.items():
+        monkeypatch.setenv(k, v)
+    seen = []
+    monkeypatch.setattr(k8s, "succeeds", lambda *a: True)
+    monkeypatch.setattr(k8s, "run", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", ""))  # the diff: changed
+    monkeypatch.setattr(cli, "_only_scaling_changed", lambda m, render: scaling_only)
+    monkeypatch.setattr(cli, "preflight_gate", lambda gate, *a, running=0: seen.append(gate.rolls))
+    monkeypatch.setattr(k8s, "ensure_storage", lambda *a: None)
+    monkeypatch.setattr(cli, "download_weights", lambda *a: None)
+    monkeypatch.setattr(cli, "_retire_inference_service", lambda m: None)
+    monkeypatch.setattr(k8s, "apply", lambda manifest, ssa: None)
+    monkeypatch.setattr(routing, "register", lambda m: None)
+    monkeypatch.setattr(routing, "print_endpoints", lambda m: None)
+    monkeypatch.setattr(cli, "_wait_ready", lambda m, t: False)
+    cli.deploy(cli.parse_args(["deploy", "qwen3-0-6b-cuda", "--replicas", "2", "--wait"]), "qwen3-0-6b-cuda")
+    assert seen == [rolls]
 
 
 def test_node_matches_required_terms():

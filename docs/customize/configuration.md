@@ -249,8 +249,8 @@ false`. A name `env/<env>/models.yaml` lacks is taken from the shipped
 with `model_deploy_strict: true`.
 
 `llm_services_deploy_runtimes` deploys `files/runtimes/*.yaml` as namespace-scoped
-`ServingRuntime`s. These are needed for `InferenceService` CRs (OpenVINO);
-`LLMInferenceService` CRs (vLLM) ignore them.
+`ServingRuntime`s. These are needed for `InferenceService` CRs only;
+`LLMInferenceService` CRs (vLLM, OpenVINO) ignore them.
 
 `model_deploy_flags` is appended to each `model-manager deploy <name> --wait` invocation
 during auto-deploy — e.g. `"--wait-timeout 1800"` to allow longer for large models, or

@@ -89,6 +89,7 @@ models:
 | `category` | Workload class — `llm`, `embed`, `rerank`, or `vlm`. Drives default args, CPU, and memory |
 | `cpu` / `memory` | Resource requests (default: from the category). `cpu: auto` sizes CPU to a NUMA node — see [below](#cpu-auto) |
 | `replicas` | Replica count (default: 1) |
+| `autoscaling` | `{min_replicas, max_replicas, scale_target}`: autoscale with KEDA between the two counts (default min: 1), scaling up when the load per replica exceeds `scale_target`: waiting requests for vLLM (default: 2), in-flight requests for OpenVINO (default: 4). Replaces `replicas`. Needs `keda_enabled: true` and KServe 0.21 (`envoy_gateway_upgrade: true`). The signal and its default are set per runtime (`autoscaling` in `runtimes/<name>/values.yaml`) |
 | `tp` | Tensor parallelism — split the model across N CPU sockets |
 | `namespace` | Target namespace (default: `llm-inference`) |
 | `node` | Pin to a specific node |

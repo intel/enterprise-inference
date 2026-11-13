@@ -9,7 +9,7 @@ metadata:
 spec:
 {{NRI_ANNOTATIONS}}  model:
     uri: {{MODEL_URI}}
-  replicas: {{REPLICAS}}
+{{SCALING}}
   router:
     gateway:
       refs:
@@ -21,7 +21,7 @@ spec:
     containers:
       - name: main
         image: {{IMAGE}}
-        args: {{ARGS}}
+{{COMMAND}}        args: {{ARGS}}
         env: {{ENV}}
 {{CHAT_TEMPLATE_MOUNT}}        resources:
           requests:
@@ -31,20 +31,20 @@ spec:
             memory: {{MEMORY}}{{GPU_RESOURCE}}
         startupProbe:
           httpGet:
-            path: /health
+            path: {{READY_PATH}}
             port: 8000
           failureThreshold: 120
           periodSeconds: 10
         livenessProbe:
           httpGet:
-            path: /health
+            path: {{LIVE_PATH}}
             port: 8000
           failureThreshold: 12
           periodSeconds: 10
           timeoutSeconds: 10
         readinessProbe:
           httpGet:
-            path: /health
+            path: {{READY_PATH}}
             port: 8000
           failureThreshold: 5
           periodSeconds: 10
@@ -55,8 +55,8 @@ spec:
             drop:
             - ALL
           runAsNonRoot: true
-          runAsUser: 1000
-          runAsGroup: 1000
+          runAsUser: {{RUN_AS}}
+          runAsGroup: {{RUN_AS}}
           seccompProfile:
             type: RuntimeDefault
     securityContext:

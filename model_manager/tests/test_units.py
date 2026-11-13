@@ -9,11 +9,12 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from core import cli, config, download, k8s, nri_policy, policy, routing  # noqa: E402
+from core import cli, config, download, k8s, nri_policy, policy, renderer, routing  # noqa: E402
 from core.config import Catalog, Model  # noqa: E402
-from core.policy import _whole_cpus  # noqa: E402
+from core.policy import whole_cpus  # noqa: E402
 from core.renderer import dedupe_args, engine_args  # noqa: E402
 
 
@@ -55,7 +56,7 @@ def test_numeric_catalog_args_are_rendered():
 
 @pytest.mark.parametrize("cpu, whole", [("8", 8), ("7.5", 8), ("7500m", 8), ("0m", 0), ("abc", 0), ("²", 0)])
 def test_whole_cpus(cpu, whole):
-    assert _whole_cpus(cpu) == whole
+    assert whole_cpus(cpu) == whole
 
 
 @pytest.mark.parametrize("hide_ht, tp, want", [("false", 1, 28), ("false", 2, 56), ("true", 1, 14)])
@@ -134,7 +135,8 @@ def test_chat_template_file_absolute_path(tmp_path):
     assert m.chat_template == "{{ messages }}"  # used like inline Jinja, trailing newlines dropped
 
 
-@pytest.mark.parametrize("flag", ["--tp", "--replicas", "--wait-timeout"])
+@pytest.mark.parametrize("flag", ["--tp", "--replicas", "--wait-timeout", "--min-replicas", "--max-replicas",
+                                  "--scale-target"])
 def test_zero_counts_rejected(flag):
     with pytest.raises(SystemExit):
         cli.parse_args(["deploy", "m", flag, "0"])
@@ -265,12 +267,17 @@ def test_empty_host_does_not_resolve():
 
 
 @pytest.mark.parametrize("current, applied", [("", True), ("img:new", False), ("img:old", True)])
-def test_runtime_installed_or_updated_on_image_change(monkeypatch, current, applied):
+def test_runtime_installed_or_updated_on_image_change(monkeypatch, tmp_path, current, applied):
     calls = []
+    (tmp_path / "isvc").mkdir()
+    (tmp_path / "isvc" / "serving-runtime.yaml").write_text(
+        "apiVersion: serving.kserve.io/v1alpha1\nkind: ClusterServingRuntime\nmetadata:\n  name: isvc-runtime\n"
+        "spec:\n  containers:\n    - name: kserve-container\n      image: {{RUNTIME_IMAGE}}\n")
+    monkeypatch.setenv("MM_RUNTIMES", str(tmp_path))
     monkeypatch.setattr(k8s, "out", lambda *a: current)
     monkeypatch.setattr(k8s, "apply", lambda manifest, **kw: calls.append(manifest))
-    m = Model(name="m", namespace="n", kind="InferenceService", runtime="openvino", runtime_image="img:new",
-              rt={"serving_runtime_manifest": "openvino/serving-runtime.yaml", "runtime_name": "openvino-runtime"})
+    m = Model(name="m", namespace="n", kind="InferenceService", runtime="isvc", runtime_image="img:new",
+              rt={"runtime_name": "isvc-runtime"})
     cli._install_runtime(m)
     assert bool(calls) == applied
     assert all("image: img:new" in c for c in calls)
@@ -406,7 +413,11 @@ def test_list_without_cluster_shows_unknown_status(cluster, capsys):
     assert re.search(r"^tmpl-inline .* \?$", out, re.M) and "Deployed" not in out
 
 
-def test_list_marks_unlisted_kind_unknown(cluster, capsys):
+def test_list_marks_unlisted_kind_unknown(cluster, capsys, monkeypatch, tmp_path):
+    catalog = tmp_path / "models.yaml"
+    catalog.write_text(FIXTURE_CATALOG.read_text().replace(
+        "  - name: multi\n", "  - name: multi\n    kind: InferenceService\n", 1))
+    monkeypatch.setenv("MM_CONFIG", str(catalog))
     cluster["failing"] = {"LLMInferenceService"}
     cli.list_models(cli.Options(), "")
     out, err = capsys.readouterr()
@@ -624,3 +635,514 @@ def test_router_ip_node_fallback_needs_host_network(monkeypatch, host_network, w
     answers = {"deploy": host_network, "pods": "10.0.0.5"}
     monkeypatch.setattr(k8s, "out", lambda *a: answers.get(a[1], ""))
     assert platform.router_ip() == want
+
+
+# ── Autoscaling (KEDA) ────────────────────────────────────────────────────────
+
+def _render(monkeypatch, *argv, catalog=None):
+    import yaml
+    from core import renderer
+    monkeypatch.setenv("MM_PLATFORM", "kubernetes")
+    monkeypatch.setenv("MM_LLMISVC_API_VERSION", "v1alpha2")
+    o = cli.parse_args(["deploy", *argv])
+    cat = Catalog(catalog or cli.MM_DIR / "models.yaml")
+    m = config.resolve(cat, o.positional[1] if len(o.positional) > 1 else "", o)
+    config.resolve_autoscaling(m, o)
+    return m, yaml.safe_load(renderer.manifest(m, cat, o, {}, m.cpu, []))
+
+
+def test_autoscaling_renders_keda_scaling_instead_of_replicas(monkeypatch):
+    monkeypatch.setenv("MM_PROMETHEUS_URL", "http://prom:9090")
+    m, doc = _render(monkeypatch, "qwen3-0-6b", "--max-replicas", "3", "--scale-target", "4")
+    assert m.autoscaled and m.replicas == "1"
+    assert "replicas" not in doc["spec"]  # the CRD rejects replicas together with scaling
+    assert doc["spec"]["scaling"] == {"minReplicas": 1, "maxReplicas": 3, "keda": {"pollingInterval": 15, "triggers": [
+        {"type": "prometheus", "metadata": {
+            "serverAddress": "http://prom:9090", "threshold": "4",
+            "query": 'sum(vllm:num_requests_waiting{namespace="llm-inference",model="qwen3-0-6b"})'}}]}}
+
+
+def test_autoscaling_from_catalog_and_fixed_replicas_override(monkeypatch, tmp_path):
+    catalog = tmp_path / "models.yaml"
+    catalog.write_text((cli.MM_DIR / "models.yaml").read_text().replace(
+        "  - name: qwen3-0-6b ",
+        "  - name: qwen3-0-6b\n    autoscaling: {min_replicas: 2, max_replicas: 4, scale_target: 5}\n    x: ", 1))
+    m, doc = _render(monkeypatch, "qwen3-0-6b", catalog=catalog)
+    assert (doc["spec"]["scaling"]["minReplicas"], doc["spec"]["scaling"]["maxReplicas"]) == (2, 4)
+    assert doc["spec"]["scaling"]["keda"]["triggers"][0]["metadata"]["threshold"] == "5"
+    m, doc = _render(monkeypatch, "qwen3-0-6b", "--replicas", "2", catalog=catalog)
+    assert not m.autoscaled and doc["spec"]["replicas"] == 2 and "scaling" not in doc["spec"]
+
+
+def test_equal_min_and_max_is_a_fixed_count(monkeypatch):
+    m, doc = _render(monkeypatch, "qwen3-0-6b", "--min-replicas", "2", "--max-replicas", "2")
+    assert not m.autoscaled and doc["spec"]["replicas"] == 2 and "scaling" not in doc["spec"]
+
+
+@pytest.mark.parametrize("argv", [
+    ["--replicas", "2", "--max-replicas", "3"],
+    ["--replicas", "2", "--scale-target", "4"],
+    ["--min-replicas", "4", "--max-replicas", "3"],
+    ["--min-replicas", "2"],
+    ["--scale-target", "4"],  # a threshold without a maximum would be ignored
+    ["--max-replicas", "0"],
+])
+def test_bad_autoscaling_rejected(monkeypatch, argv):
+    with pytest.raises(SystemExit):
+        _render(monkeypatch, "qwen3-0-6b", *argv)
+
+
+@pytest.mark.parametrize("kind, env", [("InferenceService", "kubernetes"), ("", "openshift")])
+def test_autoscaling_needs_llmisvc_on_kubernetes(monkeypatch, tmp_path, kind, env):
+    catalog = tmp_path / "models.yaml"
+    text = (cli.MM_DIR / "models.yaml").read_text()
+    catalog.write_text(re.sub(r"^(  - name: qwen3-0-6b\b.*\n)", r"\g<1>" + (f"    kind: {kind}\n" if kind else ""),
+                              text, count=1, flags=re.MULTILINE))
+    monkeypatch.setenv("MM_PLATFORM", env)
+    o = cli.parse_args(["deploy", "qwen3-0-6b", "--max-replicas", "3"])
+    m = config.resolve(Catalog(catalog), "qwen3-0-6b", o)  # undeploy resolves too: no checks here
+    with pytest.raises(SystemExit):
+        config.resolve_autoscaling(m, o)
+
+
+@pytest.mark.parametrize("crd, explain, aborts", [(False, True, True), (True, False, True), (True, True, False)])
+def test_autoscaling_needs_keda_and_a_kserve_with_keda_scaling(monkeypatch, crd, explain, aborts):
+    # KServe 0.18's LLMInferenceService has spec.scaling.wva only: the apply would fail on spec.scaling.keda.
+    monkeypatch.setenv("MM_LLMISVC_API_VERSION", "v1alpha1")
+    calls = []
+
+    def run(*args, stdin=None):
+        calls.append(args)
+        ok = crd if args[0] == "get" else explain
+        return subprocess.CompletedProcess(args, 0 if ok else 1, "", "" if ok else "error")
+    monkeypatch.setattr(k8s, "run", run)
+    m = Model(name="m", namespace="n", kind="LLMInferenceService")
+    if aborts:
+        with pytest.raises(SystemExit):
+            cli._require_autoscaling(m)
+    else:
+        cli._require_autoscaling(m)
+    explained = [c for c in calls if c[0] == "explain"]
+    assert not crd or explained[0][:3] == ("explain", "--api-version", "serving.kserve.io/v1alpha1")
+
+
+def test_list_shows_the_autoscaling_range():
+    assert cli._replicas({"scaling": {"minReplicas": 1, "maxReplicas": 3}}, {}) == "1-3"
+    assert cli._replicas({"replicas": 2}, {}) == "2"
+
+
+@pytest.fixture
+def deploy_env(monkeypatch):
+    """deploy() against a cluster where every kubectl call fails (no KEDA, nothing deployed)."""
+    calls = []
+    for k, v in {"MM_PLATFORM": "kubernetes", "MM_LLMISVC_API_VERSION": "v1alpha2", "MM_CPU_POLICY": "best-effort",
+                 "MM_CONFIG": str(cli.MM_DIR / "models.yaml")}.items():
+        monkeypatch.setenv(k, v)
+
+    def run(*args, stdin=None):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 1, "", "NotFound")
+    monkeypatch.setattr(k8s, "run", run)
+    return calls
+
+
+def test_dry_run_needs_no_keda(deploy_env, capsys):
+    cli.deploy(cli.parse_args(["deploy", "qwen3-0-6b", "--max-replicas", "3", "--dry-run"]), "qwen3-0-6b")
+    assert "scaling:" in capsys.readouterr().out
+    assert not any(a[:2] == ("get", "crd") for a in deploy_env)
+
+
+def test_missing_keda_aborts_before_any_change(deploy_env):
+    with pytest.raises(SystemExit):
+        cli.deploy(cli.parse_args(["deploy", "qwen3-0-6b", "--max-replicas", "3"]), "qwen3-0-6b")
+    assert ("get", "crd", "scaledobjects.keda.sh") in deploy_env
+    assert not any(a[0] in ("apply", "create", "delete") for a in deploy_env)
+
+
+@pytest.mark.parametrize("scaling_only, counts_running, forced, gated", [
+    (True, True, False, False),   # NRI would count the running pods' cores as taken: skip its check
+    (False, True, False, True),   # the pods roll: check
+    (True, False, False, True),   # kubelet-static / best-effort count total capacity: keep the max warning
+    (True, True, True, True),     # MM_FORCE_REDEPLOY runs no diff, so nothing is known to have changed
+])
+def test_changed_spec_is_applied_with_or_without_the_preflight(deploy_env, monkeypatch, scaling_only, counts_running,
+                                                               forced, gated):
+    # Whether or not the pre-flight runs, the new spec is applied.
+    steps, asked = [], []
+    if forced:
+        monkeypatch.setenv("MM_FORCE_REDEPLOY", "1")
+    monkeypatch.setattr(k8s, "succeeds", lambda *a: True)  # deployed; the diff (rc 1) reports a change
+    monkeypatch.setattr(policy.BestEffort, "counts_running_pods", counts_running)
+    monkeypatch.setattr(cli, "_require_autoscaling", lambda m: None)
+    monkeypatch.setattr(cli, "_only_scaling_changed", lambda m, render: asked.append(m.name) or scaling_only)
+    monkeypatch.setattr(cli, "_owned_inference_service", lambda m: None)
+    monkeypatch.setattr(cli, "preflight_gate", lambda *a, running=0: steps.append("preflight"))
+    monkeypatch.setattr(cli, "warn_max_unplaceable", lambda *a, running=0: steps.append(f"max check, {running} running"))
+    monkeypatch.setattr(cli, "_running_replicas", lambda m: 2)
+    monkeypatch.setattr(k8s, "ensure_storage", lambda *a: steps.append("storage"))
+    monkeypatch.setattr(cli, "download_weights", lambda *a: steps.append("download"))
+    monkeypatch.setattr(cli, "_install_runtime", lambda m: None)
+    monkeypatch.setattr(k8s, "apply", lambda manifest, ssa: steps.append("apply"))
+    monkeypatch.setattr(routing, "register", lambda m: None)
+    monkeypatch.setattr(routing, "print_endpoints", lambda m: None)
+    monkeypatch.setattr(cli, "_wait_ready", lambda m, t: False)
+    cli.deploy(cli.parse_args(["deploy", "qwen3-0-6b", "--max-replicas", "3", "--wait"]), "qwen3-0-6b")
+    gate = ["preflight", "max check, 0 running"] if gated else ["max check, 2 running"]  # only the extra replicas
+    assert steps == gate + ["storage", "download", "apply"]
+    assert bool(asked) == (counts_running and not forced)  # the live spec is read only when it matters
+
+
+@pytest.mark.parametrize("fits_max, warned", [(True, False), (False, True)])
+def test_max_replicas_only_warns(capsys, fits_max, warned):
+    class Policy:
+        def replica_shortfall(self, m, tp):
+            return "" if fits_max or m.replicas != "3" else "too big"
+    m = Model(name="m", namespace="n", replicas="1", min_replicas="1", max_replicas="3")
+    policy.warn_max_unplaceable(Policy(), m, 1)
+    assert m.replicas == "1"  # checked on a copy
+    assert ("do not all fit" in capsys.readouterr().err) == warned
+
+
+@pytest.mark.parametrize("running, checked", [(0, "4"), (3, "1"), (4, None)])
+def test_max_check_credits_the_running_replicas(capsys, running, checked):
+    # NRI on a scaling-only change: the running replicas hold their cores, so only the rest are checked.
+    asked = []
+
+    class Policy:
+        def replica_shortfall(self, m, tp):
+            asked.append(m.replicas)
+            return "no room"
+    m = Model(name="m", namespace="n", replicas="1", min_replicas="1", max_replicas="4")
+    policy.warn_max_unplaceable(Policy(), m, 1, running=running)
+    assert asked == ([checked] if checked else [])
+    err = capsys.readouterr().err
+    assert ("beyond the 3 running (up to 4)" in err) == (running == 3)
+
+
+def test_running_replicas_counts_pods_holding_cpus(monkeypatch):
+    # As NRI counts cores in use: on a node and Running/Pending; unscheduled and finished pods hold none.
+    pods = {"items": [{"spec": {"nodeName": "w1"}, "status": {"phase": "Running"}},
+                      {"spec": {"nodeName": "w1"}, "status": {"phase": "Pending"}},
+                      {"spec": {}, "status": {"phase": "Pending"}},
+                      {"spec": {"nodeName": "w1"}, "status": {"phase": "Failed"}}]}
+    asked = []
+    monkeypatch.setattr(k8s, "get_json", lambda *a: asked.append(a) or pods)
+    assert cli._running_replicas(Model(name="m", namespace="n", kind="LLMInferenceService")) == 2
+    assert asked[0][-1] == "app.kubernetes.io/name=m,kserve.io/component=workload"
+    monkeypatch.setattr(k8s, "get_json", lambda *a: None)
+    assert cli._running_replicas(Model(name="m", namespace="n")) == 0
+
+
+def test_no_schedulable_node_is_a_shortfall():
+    assert "the schedulable nodes fit 0" in policy._replica_shortfall([], 8, 3)  # every node tainted NoSchedule
+    assert policy._replica_shortfall(None, 8, 3) == ""  # nodes could not be read
+
+
+@pytest.mark.parametrize("node_cpus, tp, warned", [
+    ([8, 8], 1, True),     # 24 CPUs needed, 16 allocatable
+    ([12, 12], 1, True),   # 24 = 24 in total, but each node fits one 8-CPU replica
+    ([16, 8], 1, False),   # 2 + 1 slots
+    ([24], 2, False),      # TP splits the 8 CPUs a pod requests, it does not multiply them
+])
+def test_kubelet_static_max_shortfall_counts_slots_per_node(monkeypatch, capsys, node_cpus, tp, warned):
+    nodes = {"items": [{"status": {"allocatable": {"cpu": str(c)}}, "spec": {}} for c in node_cpus]}
+    monkeypatch.setattr(k8s, "get_json", lambda *args: nodes)
+    m = Model(name="m", namespace="n", cpu="8", replicas="1", min_replicas="1", max_replicas="3")
+    policy.warn_max_unplaceable(policy.KubeletStatic(), m, tp)
+    assert ("3 replicas x 8 CPUs: the schedulable nodes fit" in capsys.readouterr().err) == warned
+
+
+def test_nri_max_shortfall_reported_in_warn_mode(monkeypatch, capsys):
+    # MM_NRI_PREFLIGHT=warn makes the gate pass; the max check still reports the errors.
+    monkeypatch.setattr(nri_policy, "preflight", lambda *a, **k: {"ok": True, "errors": ["no room"]})
+    m = Model(name="m", namespace="n", cpu="8", replicas="1", min_replicas="1", max_replicas="3")
+    assert policy.NriBalloons().preflight(m, 1) == []
+    policy.warn_max_unplaceable(policy.NriBalloons(), m, 1)
+    assert "do not all fit now (no room)" in capsys.readouterr().err
+
+
+def _autoscaled(argv):
+    o = cli.parse_args(["deploy", "qwen3-0-6b", *argv])
+    cat = Catalog(cli.MM_DIR / "models.yaml")
+    m = config.resolve(cat, "qwen3-0-6b", o)
+    config.resolve_autoscaling(m, o)
+    return m, lambda model: renderer.manifest(model, cat, o, {}, model.cpu, [])
+
+
+LIVE_1_3 = {"scaling": {"minReplicas": 1, "maxReplicas": 3, "keda": {"triggers": [{"metadata": {"threshold": "2"}}]}}}
+
+
+@pytest.mark.parametrize("spec, want", [
+    ({"replicas": 2}, ("2", "", "", "")),
+    (LIVE_1_3, ("1", "1", "3", "2")),
+    ({"scaling": {"minReplicas": 1, "maxReplicas": 3, "keda": {"triggers": []}}}, ("1", "1", "3", "")),
+    ({}, ("1", "", "", "")),
+])
+def test_live_scaling_reads_back_the_rendered_range(monkeypatch, spec, want):
+    monkeypatch.setenv("MM_PLATFORM", "kubernetes")
+    m, _ = _autoscaled(["--max-replicas", "4"])
+    live = renderer.live_scaling(m, spec)
+    assert (live.replicas, live.min_replicas, live.max_replicas, live.scale_target) == want
+
+
+def test_live_scaling_of_an_inference_service():
+    m = Model(name="m", namespace="n", kind="InferenceService", replicas="1")
+    assert renderer.live_scaling(m, {"predictor": {"minReplicas": 2}}).replicas == "2"
+    assert renderer.live_scaling(m, {}).replicas == "1"
+
+
+@pytest.mark.parametrize("diff_rc, want", [(0, True), (1, False)])
+def test_only_scaling_changed(monkeypatch, diff_rc, want):
+    # Live 1-3 with threshold 2, redeployed as 1-4: m is re-rendered with the live range and diffed.
+    monkeypatch.setenv("MM_PLATFORM", "kubernetes")
+    m, render = _autoscaled(["--max-replicas", "4"])
+    diffed = []
+
+    def run(*args, stdin=None):
+        if args[0] == "get":
+            return subprocess.CompletedProcess(args, 0, json.dumps({"spec": LIVE_1_3}), "")
+        diffed.append(stdin)
+        return subprocess.CompletedProcess(args, diff_rc, "", "")
+    monkeypatch.setattr(k8s, "run", run)
+    assert cli._only_scaling_changed(m, render) == want
+    assert "maxReplicas: 3" in diffed[0] and re.search(r"threshold: .?2.?\n", diffed[0])
+    assert m.max_replicas == "4"  # compared on a copy
+
+
+def test_only_scaling_changed_needs_a_live_spec(monkeypatch):
+    monkeypatch.setattr(k8s, "get_json", lambda *a: None)
+    assert cli._only_scaling_changed(Model(name="m", namespace="n"), lambda model: "") is False
+
+
+# ── OVMS as an LLMInferenceService (the runtime's own container) ─────────────
+
+def _main(doc):
+    return doc["spec"]["template"]["containers"][0]
+
+
+def test_ovms_renders_an_llmisvc_with_its_own_container(monkeypatch):
+    m, doc = _render(monkeypatch, "qwen3-5-2b-ovms")
+    main = _main(doc)
+    assert doc["kind"] == "LLMInferenceService" and m.routing == "epp" and doc["spec"]["replicas"] == 1
+    assert doc["spec"]["router"]["scheduler"] == {}  # KServe's scheduler routes each request
+    assert main["image"] == "openvino/model_server:2026.4.1" and main["command"] == ["/ovms/bin/ovms"]
+    assert main["args"][:7] == ["--config_path", "/mnt/models/config_all.json", "--rest_port", "8000", "--port",
+                                "9000", "--metrics_enable"]
+    assert "--served-model-name" not in main["args"]  # a vLLM flag
+    # Ready once the graph is loaded, not when the REST port opens.
+    for probe in ("startupProbe", "readinessProbe"):
+        assert main[probe]["httpGet"] == {"path": "/v2/models/qwen3-5-2b-ovms/ready", "port": 8000}
+    assert main["livenessProbe"]["httpGet"]["path"] == "/v2/health/live"
+    assert (main["securityContext"]["runAsUser"], main["securityContext"]["runAsGroup"]) == (5000, 5000)
+
+
+def test_vllm_keeps_kserves_container(monkeypatch):
+    _, doc = _render(monkeypatch, "qwen3-0-6b")
+    main = _main(doc)
+    assert "command" not in main and "--served-model-name" in main["args"]
+    assert {main[p]["httpGet"]["path"] for p in ("startupProbe", "readinessProbe", "livenessProbe")} == {"/health"}
+    assert main["securityContext"]["runAsUser"] == 1000
+
+
+def test_ovms_autoscaling_uses_its_signal(monkeypatch):
+    monkeypatch.setenv("MM_PROMETHEUS_URL", "http://prom:9090")
+    m, doc = _render(monkeypatch, "qwen3-5-2b-ovms", "--max-replicas", "3")
+    assert "replicas" not in doc["spec"] and m.scale_target == "4"  # the runtime's default
+    assert doc["spec"]["scaling"]["keda"]["triggers"][0]["metadata"] == {
+        "serverAddress": "http://prom:9090", "threshold": "4",
+        "query": 'sum(ovms_current_graphs{namespace="llm-inference",model="qwen3-5-2b-ovms"})'}
+
+
+def test_servers_sorted_default_is_an_llmisvc():
+    # was the fx-servers-sorted-default parity case: no default_server picks the first server by name
+    m = config.resolve(Catalog(FIXTURE_CATALOG), "multi", cli.Options())
+    assert (m.runtime, m.kind) == ("openvino", "LLMInferenceService")
+
+
+def test_files_belong_to_the_serving_user():
+    cat = Catalog(cli.MM_DIR / "models.yaml")
+    assert config.resolve(cat, "qwen3-5-2b-ovms", cli.Options()).run_as_user == "5000"
+    assert config.resolve(cat, "qwen3-0-6b", cli.Options()).run_as_user == "1000"
+
+
+def test_vllm_only_features_rejected_for_ovms(monkeypatch, tmp_path):
+    catalog = tmp_path / "models.yaml"
+    catalog.write_text((cli.MM_DIR / "models.yaml").read_text().replace(
+        "  - name: qwen3-5-2b-ovms\n", "  - name: qwen3-5-2b-ovms\n    chat_template: '{{ messages }}'\n", 1))
+    with pytest.raises(SystemExit):
+        _render(monkeypatch, "qwen3-5-2b-ovms", catalog=catalog)
+
+
+def test_ovms_not_on_openshift(monkeypatch):
+    from core import renderer
+    o = cli.parse_args(["deploy", "qwen3-5-2b-ovms"])
+    cat = Catalog(cli.MM_DIR / "models.yaml")
+    m = config.resolve(cat, "qwen3-5-2b-ovms", o)
+    monkeypatch.setenv("MM_PLATFORM", "openshift")
+    with pytest.raises(SystemExit):  # OpenShift AI's template starts vLLM itself
+        renderer.manifest(m, cat, o, {}, m.cpu, [])
+
+
+@pytest.mark.parametrize("owner, retired", [("model-manager", True), ("someone-else", False), ("", False)])
+def test_owned_inference_service_retired(monkeypatch, owner, retired):
+    # An upgrade leaves an OVMS model's InferenceService; the LLMInferenceService replaces it.
+    monkeypatch.setenv("MM_AIGATEWAY_ENABLED", "true")
+    monkeypatch.setenv("MM_AI_GATEWAY_PROVIDER", "envoy")
+    calls = []
+
+    def run(*args, stdin=None):
+        calls.append(" ".join(args[:3]))
+        if args[:2] == ("get", "InferenceService"):
+            return subprocess.CompletedProcess(args, 0 if owner else 1, owner, "")
+        found = args[0] == "delete" or args[:3] in (("get", "aigatewayroute", "aigw-m"), ("get", "aiservicebackend", "m"))
+        return subprocess.CompletedProcess(args, 0 if found else 1, "", "")
+    monkeypatch.setattr(k8s, "run", run)
+    cli._retire_inference_service(Model(name="m", namespace="ns", kind="LLMInferenceService"))
+    deleted = [c for c in calls if c.startswith("delete")]
+    want = ["delete InferenceService m", "delete aigatewayroute aigw-m", "delete aiservicebackend m",
+            "delete backend m"]
+    assert deleted == (want if retired else [])
+
+
+def test_undeploy_after_an_upgrade_removes_the_old_routes(monkeypatch):
+    # Upgrade, then undeploy with no deploy in between: the InferenceService's direct-route objects go too.
+    for k, v in {"MM_CONFIG": str(cli.MM_DIR / "models.yaml"), "MM_AIGATEWAY_ENABLED": "true",
+                 "MM_AI_GATEWAY_PROVIDER": "envoy", "MM_LITELLM_ENABLED": "false", "MM_PLATFORM": "kubernetes"}.items():
+        monkeypatch.setenv(k, v)
+    deleted, gone = [], set()
+
+    def run(*args, stdin=None):
+        if args[0] == "delete":
+            deleted.append(" ".join(args[1:3])); gone.add(args[1:3])
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:2] == ("get", "InferenceService") and ("InferenceService", "qwen3-5-2b-ovms") not in gone:
+            return subprocess.CompletedProcess(args, 0, "model-manager", "")
+        old = args[1:3] in (("aigatewayroute", "aigw-qwen3-5-2b-ovms"), ("aiservicebackend", "qwen3-5-2b-ovms"))
+        return subprocess.CompletedProcess(args, 0 if old and args[1:3] not in gone else 1, "", "")
+    monkeypatch.setattr(k8s, "run", run)
+    cli.undeploy(cli.parse_args(["undeploy", "qwen3-5-2b-ovms"]), "qwen3-5-2b-ovms")
+    for obj in ("aiservicebackend qwen3-5-2b-ovms", "backend qwen3-5-2b-ovms", "InferenceService qwen3-5-2b-ovms",
+                "LLMInferenceService qwen3-5-2b-ovms"):
+        assert obj in deleted, (obj, deleted)
+
+
+def test_runtime_without_a_signal_is_rejected(monkeypatch, tmp_path):
+    catalog = tmp_path / "models.yaml"
+    catalog.write_text((cli.MM_DIR / "models.yaml").read_text().replace(
+        "  openvino:\n", "  openvino:\n    autoscaling: {query: \"\"}\n", 1))
+    with pytest.raises(SystemExit):
+        _render(monkeypatch, "qwen3-5-2b-ovms", "--max-replicas", "3", catalog=catalog)
+
+
+def test_only_llmisvc_models_retire_an_inference_service(monkeypatch):
+    calls = []
+    monkeypatch.setattr(k8s, "run", lambda *a, stdin=None: calls.append(a) or subprocess.CompletedProcess(a, 1, "", ""))
+    cli._retire_inference_service(Model(name="m", namespace="ns", kind="InferenceService"))
+    assert calls == []  # no lookup: nothing moves the other way
+
+
+@pytest.mark.parametrize("counts_running, credited", [(True, 1), (False, 0)])
+def test_upgrade_credits_the_old_inference_service(deploy_env, monkeypatch, counts_running, credited):
+    # The old InferenceService is removed before the new pods start, so NRI must not count its cores as taken.
+    gated = []
+    monkeypatch.setattr(k8s, "succeeds", lambda *a: False)  # no LLMInferenceService yet
+    monkeypatch.setattr(policy.BestEffort, "counts_running_pods", counts_running)
+    monkeypatch.setattr(cli, "_upgrade_credit", lambda m, annotations, cpu: 1)
+    monkeypatch.setattr(cli, "preflight_gate", lambda *a, running=0: gated.append(running))
+    for name in ("download_weights", "_install_runtime", "_retire_inference_service"):
+        monkeypatch.setattr(cli, name, lambda *a: None)
+    monkeypatch.setattr(k8s, "ensure_storage", lambda *a: None)
+    monkeypatch.setattr(k8s, "apply", lambda manifest, ssa: None)
+    monkeypatch.setattr(routing, "register", lambda m: None)
+    monkeypatch.setattr(routing, "print_endpoints", lambda m: None)
+    monkeypatch.setattr(cli, "_wait_ready", lambda m, t: False)
+    cli.deploy(cli.parse_args(["deploy", "qwen3-5-2b-ovms", "--wait"]), "qwen3-5-2b-ovms")
+    assert gated == [credited]
+
+
+@pytest.mark.parametrize("running, checked", [(0, ["2"]), (1, ["1"]), (2, [])])
+def test_preflight_gate_checks_only_the_replicas_beyond_the_running(running, checked):
+    asked = []
+
+    class Policy:
+        def preflight(self, m, tp):
+            asked.append(m.replicas)
+            return []
+    policy.preflight_gate(Policy(), Model(name="m", namespace="n", replicas="2"), 1, running=running)
+    assert asked == checked
+
+
+BALLOON = "cpu-policy.model-manager.io/balloon"
+
+
+@pytest.mark.parametrize("old_cpu, old_balloon, new_cpu, credited", [
+    ("8", "vllm-balloon", "8", 2),      # same shape: the new replicas take the freed cores
+    ("16", "vllm-balloon", "8", 2),     # smaller new replicas fit too
+    ("8", "vllm-balloon", "32", 0),     # bigger new replicas: full check
+    ("8", "vllm-balloon-tp2", "8", 0),  # another balloon (tp): full check
+    ("", "vllm-balloon", "8", 0),       # unreadable old spec: full check
+])
+def test_upgrade_credit_needs_the_freed_cores_to_fit(monkeypatch, old_cpu, old_balloon, new_cpu, credited):
+    m = Model(name="m", namespace="ns", kind="LLMInferenceService")
+    monkeypatch.setattr(cli, "_owned_inference_service", lambda m: Model(name="m", namespace="ns", kind="InferenceService"))
+    monkeypatch.setattr(cli, "_running_replicas", lambda m, node="": 2)
+    spec = {"spec": {"predictor": {"annotations": {BALLOON: old_balloon},
+                                   "model": {"resources": {"requests": {"cpu": old_cpu}}}}}}
+    monkeypatch.setattr(k8s, "get_json", lambda *a: spec)
+    assert cli._upgrade_credit(m, {BALLOON: "vllm-balloon"}, new_cpu) == credited
+
+
+def test_no_upgrade_credit_without_an_old_inference_service(monkeypatch):
+    monkeypatch.setattr(cli, "_owned_inference_service", lambda m: None)
+    assert cli._upgrade_credit(Model(name="m", namespace="ns", kind="LLMInferenceService"), {}, "8") == 0
+
+
+@pytest.mark.parametrize("node, credited", [("", 2), ("a", 1), ("b", 1), ("c", 0)])
+def test_upgrade_credit_counts_only_the_pinned_nodes_pods(monkeypatch, node, credited):
+    # A deploy pinned to a node gains only the cores the old pods free on that node.
+    monkeypatch.setattr(cli, "_owned_inference_service", lambda m: Model(name="m", namespace="ns", kind="InferenceService"))
+    pods = {"items": [{"spec": {"nodeName": n}, "status": {"phase": "Running"}} for n in ("a", "b")]}
+    spec = {"spec": {"predictor": {"annotations": {BALLOON: "vllm-balloon"},
+                                   "model": {"resources": {"requests": {"cpu": "8"}}}}}}
+    monkeypatch.setattr(k8s, "get_json", lambda *a: pods if a[0] == "pods" else spec)
+    m = Model(name="m", namespace="ns", kind="LLMInferenceService", node=node)
+    assert cli._upgrade_credit(m, {BALLOON: "vllm-balloon"}, "8") == credited
+
+
+def test_failed_retire_aborts_and_keeps_the_routes(monkeypatch):
+    # The old model keeps serving: no route is removed and the replacement is not applied.
+    old = Model(name="m", namespace="ns", kind="InferenceService")
+    monkeypatch.setattr(cli, "_owned_inference_service", lambda m: old)
+    monkeypatch.setattr(k8s, "run", lambda *a, stdin=None: subprocess.CompletedProcess(a, 1, "", "forbidden"))
+    deregistered = []
+    monkeypatch.setattr(routing, "deregister", deregistered.append)
+    with pytest.raises(SystemExit):
+        cli._retire_inference_service(Model(name="m", namespace="ns", kind="LLMInferenceService"))
+    assert deregistered == []
+
+
+@pytest.mark.parametrize("llmisvc, isvc, want", [("", "16", "16"), ("12", "16", "12")])
+def test_auto_cpu_keeps_the_old_inference_service_cpu(monkeypatch, llmisvc, isvc, want):
+    # An OVMS upgrade keeps the old CPU instead of sizing against cores the old pods still hold.
+    live = {"LLMInferenceService": llmisvc, "InferenceService": isvc}
+    monkeypatch.setattr(k8s, "out", lambda *a: live[a[1]])
+    m = Model(name="m", namespace="ns", kind="LLMInferenceService", cpu="auto")
+    policy.resolve_auto_cpu(policy.BestEffort(), m, 1)
+    assert m.cpu == want
+
+
+def test_live_scaling_restores_the_query_for_a_fixed_count():
+    # --replicas 1 leaves scale_query empty; the live trigger's query makes the re-render match.
+    spec = {"scaling": {"minReplicas": 1, "maxReplicas": 3,
+                        "keda": {"triggers": [{"metadata": {"query": "q{model=\"m\"}", "threshold": "2"}}]}}}
+    m = Model(name="m", namespace="ns", kind="LLMInferenceService", replicas="1")
+    assert renderer.live_scaling(m, spec).scale_query == 'q{model="m"}'
+
+
+def test_switching_to_a_fixed_count_is_a_scaling_only_change():
+    # The live autoscaled spec, read back into a --replicas 1 model, renders the same scaling block.
+    auto = Model(name="m", namespace="ns", kind="LLMInferenceService", replicas="1", min_replicas="1",
+                 max_replicas="3", scale_target="2", scale_query='q{model="$model"}')
+    live = yaml.safe_load("spec:\n" + renderer._llmisvc_replicas(auto))["spec"]
+    fixed = Model(name="m", namespace="ns", kind="LLMInferenceService", replicas="1")
+    assert renderer._llmisvc_replicas(renderer.live_scaling(fixed, live)) == renderer._llmisvc_replicas(auto)
