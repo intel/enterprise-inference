@@ -60,22 +60,30 @@ def test_whole_cpus(cpu, whole):
     assert whole_cpus(cpu) == whole
 
 
-@pytest.mark.parametrize("hide_ht, tp, want", [("false", 1, 28), ("false", 2, 56), ("true", 1, 14)])
-def test_auto_cpu_sizes_to_smallest_node(monkeypatch, hide_ht, tp, want):
-    monkeypatch.setenv("MM_NRI_HIDE_HT", hide_ht)  # hidden: the request doubles, so half the free CPUs
+@pytest.mark.parametrize("tp, want", [(1, 28), (2, 56)])
+def test_auto_cpu_sizes_to_smallest_node(monkeypatch, tp, want):
+    # w1 has 28 free CPUs on each NUMA node, w2 has 32: w1 decides.
+    free = {"w1": {0: 28, 1: 28}, "w2": {0: 32, 1: 32}}
     monkeypatch.setattr(nri_policy, "_schedulable_nri_nodes", lambda _: ["w1", "w2"])
-    monkeypatch.setattr(nri_policy, "_balloon_pods_cpu_on_node", lambda n: {"w1": 8, "w2": 0}[n])
-    monkeypatch.setattr(nri_policy, "_per_numa_capacity", lambda _: [64, 64])
-    monkeypatch.setattr(nri_policy, "_reserved_cpus_count", lambda _: 64)
-    assert nri_policy.auto_cpu(tp) == want  # w1 (28 free per NUMA node) decides
+    monkeypatch.setattr(nri_policy, "_balloon_pods_cpu_on_node", lambda n: 0)
+    monkeypatch.setattr(nri_policy, "_per_numa_free", lambda n, in_use: free[n])
+    monkeypatch.setattr(nri_policy, "_tp_numa_sets", lambda n, b: [(0,), (1,)] if b.endswith("tp1") else [(0, 1)])
+    assert nri_policy.auto_cpu(tp) == want
 
 
-def test_cpu_auto_keeps_live_request_without_ht_doubling(monkeypatch):
-    monkeypatch.setenv("MM_NRI_HIDE_HT", "true")
+def test_cpu_auto_keeps_the_live_request(monkeypatch):
     monkeypatch.setattr(k8s, "out", lambda *args: "16")
     m = Model(name="m", namespace="n", kind="LLMInferenceService", cpu="auto")
     policy.resolve_auto_cpu(policy.NriBalloons(), m, 1)
-    assert m.cpu == "8"  # renders the live request of 16 again instead of doubling it on every re-deploy
+    assert m.cpu == "16"  # a re-deploy renders the same request, so the spec is unchanged
+
+
+def test_balloon_names_are_engine_neutral(monkeypatch):
+    monkeypatch.delenv("MM_NRI_BALLOON_NAME", raising=False)
+    assert [nri_policy.balloon_name(tp) for tp in (1, 2, 3, 8, 16)] == [
+        "model-balloon-tp1", "model-balloon-tp2", "model-balloon-tp4", "model-balloon-tp8", "model-balloon-tp8"]
+    monkeypatch.setenv("MM_NRI_BALLOON_NAME", "custom")
+    assert nri_policy.balloon_name(2) == "custom"
 
 
 @pytest.mark.parametrize("name, model_id", [("ok", "org/m'; rm -rf /models #"), ("Bad_Name", "org/m")])
@@ -488,7 +496,7 @@ metadata:
   name: m
 spec:
   annotations:
-    balloon.balloons.resource-policy.nri.io/container.main: vllm-balloon-tp1
+    balloon.balloons.resource-policy.nri.io/container.main: model-balloon-tp1
   model:
     uri: pvc://model-store/m
   template:
@@ -563,7 +571,7 @@ def test_openshift_llmisvc(monkeypatch):
     doc = yaml.safe_load(platform.adapt_llmisvc(platform.adapt(LLMISVC)))
     main = doc["spec"]["template"]["containers"][0]
     assert doc["apiVersion"] == "serving.kserve.io/v1alpha1" and "annotations" not in doc["spec"]
-    assert doc["metadata"]["annotations"] == {"balloon.balloons.resource-policy.nri.io/container.main": "vllm-balloon-tp1"}
+    assert doc["metadata"]["annotations"] == {"balloon.balloons.resource-policy.nri.io/container.main": "model-balloon-tp1"}
     assert doc["spec"]["model"] == {"uri": "pvc://model-store/m", "name": "served"}
     assert "args" not in main and main["env"] == [
         {"name": "VLLM_ADDITIONAL_ARGS", "value": "--max-model-len=4096 --chat-template '/etc/chat-template/a b.jinja'"}]
@@ -608,11 +616,11 @@ def test_balloon_cpu_counts_label_selected_pods(monkeypatch):
                 "status": {"phase": phase},
                 "spec": {"containers": [{"resources": {"requests": {"cpu": cpu}}}]}}
     policies = {"items": [{"spec": {"balloonTypes": [
-        {"name": "vllm-balloon-tp1", "matchExpressions": [
+        {"name": "model-balloon-tp1", "matchExpressions": [
             {"key": "pod/labels/kserve.io/component", "operator": "In", "values": ["workload"]}]},
         {"name": "default"}]}}]}
     pods = {"items": [
-        pod("annotated", "4", annotations={"balloon.balloons.resource-policy.nri.io/container.main": "vllm-balloon"}),
+        pod("annotated", "4", annotations={"balloon.balloons.resource-policy.nri.io/container.main": "model-balloon"}),
         pod("by-label", "8", labels={"kserve.io/component": "workload"}),
         pod("by-label-done", "16", labels={"kserve.io/component": "workload"}, phase="Succeeded"),
         pod("other", "2000m", labels={"app": "x"})]}
@@ -963,11 +971,11 @@ BALLOON = "cpu-policy.model-manager.io/balloon"
 
 
 @pytest.mark.parametrize("old_cpu, old_balloon, new_cpu, credited", [
-    ("8", "vllm-balloon", "8", 2),      # same shape: the new replicas take the freed cores
-    ("16", "vllm-balloon", "8", 2),     # smaller new replicas fit too
-    ("8", "vllm-balloon", "32", 0),     # bigger new replicas: full check
-    ("8", "vllm-balloon-tp2", "8", 0),  # another balloon (tp): full check
-    ("", "vllm-balloon", "8", 0),       # unreadable old spec: full check
+    ("8", "model-balloon", "8", 2),      # same shape: the new replicas take the freed cores
+    ("16", "model-balloon", "8", 2),     # smaller new replicas fit too
+    ("8", "model-balloon", "32", 0),     # bigger new replicas: full check
+    ("8", "model-balloon-tp2", "8", 0),  # another balloon (tp): full check
+    ("", "model-balloon", "8", 0),       # unreadable old spec: full check
 ])
 def test_upgrade_credit_needs_the_freed_cores_to_fit(monkeypatch, old_cpu, old_balloon, new_cpu, credited):
     m = Model(name="m", namespace="ns", kind="LLMInferenceService")
@@ -976,7 +984,7 @@ def test_upgrade_credit_needs_the_freed_cores_to_fit(monkeypatch, old_cpu, old_b
     spec = {"spec": {"predictor": {"annotations": {BALLOON: old_balloon},
                                    "model": {"resources": {"requests": {"cpu": old_cpu}}}}}}
     monkeypatch.setattr(k8s, "get_json", lambda *a: spec)
-    assert cli._upgrade_credit(m, {BALLOON: "vllm-balloon"}, new_cpu) == credited
+    assert cli._upgrade_credit(m, {BALLOON: "model-balloon"}, new_cpu) == credited
 
 
 def test_no_upgrade_credit_without_an_old_inference_service(monkeypatch):
@@ -989,11 +997,11 @@ def test_upgrade_credit_counts_only_the_pinned_nodes_pods(monkeypatch, node, cre
     # A deploy pinned to a node gains only the cores the old pods free on that node.
     monkeypatch.setattr(cli, "_owned_inference_service", lambda m: Model(name="m", namespace="ns", kind="InferenceService"))
     pods = {"items": [{"spec": {"nodeName": n}, "status": {"phase": "Running"}} for n in ("a", "b")]}
-    spec = {"spec": {"predictor": {"annotations": {BALLOON: "vllm-balloon"},
+    spec = {"spec": {"predictor": {"annotations": {BALLOON: "model-balloon"},
                                    "model": {"resources": {"requests": {"cpu": "8"}}}}}}
     monkeypatch.setattr(k8s, "get_json", lambda *a: pods if a[0] == "pods" else spec)
     m = Model(name="m", namespace="ns", kind="LLMInferenceService", node=node)
-    assert cli._upgrade_credit(m, {BALLOON: "vllm-balloon"}, "8") == credited
+    assert cli._upgrade_credit(m, {BALLOON: "model-balloon"}, "8") == credited
 
 
 def test_failed_retire_aborts_and_keeps_the_routes(monkeypatch):
@@ -1301,17 +1309,17 @@ def _leaf(name, numa):
 def _tp_policy(*extra):
     """Two NUMA nodes on two packages, as the role generates it: tp1 takes one, tp2 takes both."""
     return [_leaf("pkg0node0", 0), _leaf("pkg1node1", 1),
-            {"name": "vllm-balloon-tp1", "componentCreation": "balance-balloons",
+            {"name": "model-balloon-tp1", "componentCreation": "balance-balloons",
              "components": [{"balloonType": "pkg0node0"}, {"balloonType": "pkg1node1"}]},
             {"name": "crosspkgcomb0-tp2", "componentCreation": "all",
              "components": [{"balloonType": "pkg0node0"}, {"balloonType": "pkg1node1"}]},
-            {"name": "vllm-balloon-tp2", "componentCreation": "balance-balloons",
+            {"name": "model-balloon-tp2", "componentCreation": "balance-balloons",
              "components": [{"balloonType": "crosspkgcomb0-tp2"}]}, *extra]
 
 
 def _nri_cluster(monkeypatch, balloons, annotation=CONTIGUOUS, types=None, reserved="cpuset:8-15"):
     """w1: the NUMA CPU lists the role published, `balloons` = cpusets NRI reports, `types` = balloonTypes."""
-    nrt = {"zones": [{"name": f"vllm-balloon-tp1[{i}]", "type": "balloon", "attributes": [{"name": "cpuset", "value": c}]}
+    nrt = {"zones": [{"name": f"model-balloon-tp1[{i}]", "type": "balloon", "attributes": [{"name": "cpuset", "value": c}]}
                      for i, c in enumerate(balloons)] + [
         {"name": "reserved[0]", "type": "balloon", "attributes": [{"name": "cpuset", "value": "8-9"}]}]}
     policy = {"spec": {"reservedResources": {"cpu": reserved}, "balloonTypes": _tp_policy() if types is None else types}}
@@ -1334,7 +1342,6 @@ def _nri_cluster(monkeypatch, balloons, annotation=CONTIGUOUS, types=None, reser
             return "16"
         return ""
     monkeypatch.setattr(nri_policy, "_kubectl", kubectl)
-    monkeypatch.setattr(nri_policy, "advanced_mode_active", lambda: True)  # the role's per-tp balloon types
 
 
 def test_per_numa_free_counts_each_balloon_where_it_is(monkeypatch):
@@ -1360,26 +1367,35 @@ def test_per_numa_free_with_interleaved_numbering(monkeypatch):
     assert nri_policy._per_numa_free("w1", in_use=2) == {0: 2, 1: 4}
 
 
-def test_no_published_layout_means_no_exact_count(monkeypatch, capsys):
+def test_no_published_layout_fails_the_placement(monkeypatch):
+    # No layout is assumed: the node fits nothing until the role publishes its NUMA CPU lists.
     _nri_cluster(monkeypatch, ["0"], annotation="")
+    monkeypatch.setattr(nri_policy, "_balloon_pods_cpu_on_node", lambda node: 1)
     assert nri_policy._per_numa_free("w1", in_use=1) is None
-    nri_policy._usable_per_numa("w1", [8, 8], 1)
-    assert "nri.intel.com/numa-cpus not published" in capsys.readouterr().err
+    fits, slots, detail = nri_policy._node_capacity_report("w1", 2, 1, 1)
+    assert (fits, slots) == (False, 0) and "re-run the nri_cpu_balloons role" in detail
+
+
+def test_missing_balloon_type_fails_the_placement(monkeypatch):
+    _nri_cluster(monkeypatch, [], types=[_leaf("pkg0node0", 0)])  # no model-balloon-tp1
+    monkeypatch.setattr(nri_policy, "_balloon_pods_cpu_on_node", lambda node: 0)
+    fits, slots, detail = nri_policy._node_capacity_report("w1", 2, 1, 1)
+    assert (fits, slots) == (False, 0) and "balloon type 'model-balloon-tp1'" in detail
 
 
 @pytest.mark.parametrize("types, balloon, want", [
-    (_tp_policy(), "vllm-balloon-tp1", [(0,), (1,)]),
-    (_tp_policy(), "vllm-balloon-tp2", [(0, 1)]),
+    (_tp_policy(), "model-balloon-tp1", [(0,), (1,)]),
+    (_tp_policy(), "model-balloon-tp2", [(0, 1)]),
     # SNC2 on two sockets: tp2 stays within a package (localpkg), as the role generates it.
     ([_leaf(f"pkg{p}node{n}", n) for p, n in ((0, 0), (0, 1), (1, 2), (1, 3))] + [
         {"name": "localpkgcomb0-tp2", "components": [{"balloonType": "pkg0node0"}, {"balloonType": "pkg0node1"}]},
         {"name": "localpkgcomb1-tp2", "components": [{"balloonType": "pkg1node2"}, {"balloonType": "pkg1node3"}]},
-        {"name": "vllm-balloon-tp2", "componentCreation": "balance-balloons",
+        {"name": "model-balloon-tp2", "componentCreation": "balance-balloons",
          "components": [{"balloonType": "localpkgcomb0-tp2"}, {"balloonType": "localpkgcomb1-tp2"}]}],
-     "vllm-balloon-tp2", [(0, 1), (2, 3)]),
-    ([{"name": "vllm-balloon-tp1", "components": [{"balloonType": "nowhere"}]}], "vllm-balloon-tp1", None),
-    ([{"name": "vllm-balloon-tp1"}], "vllm-balloon-tp1", None),  # a leaf close to no NUMA node
-    (_tp_policy(), "vllm-balloon-tp4", None),
+     "model-balloon-tp2", [(0, 1), (2, 3)]),
+    ([{"name": "model-balloon-tp1", "components": [{"balloonType": "nowhere"}]}], "model-balloon-tp1", None),
+    ([{"name": "model-balloon-tp1"}], "model-balloon-tp1", None),  # a leaf close to no NUMA node
+    (_tp_policy(), "model-balloon-tp4", None),
 ])
 def test_tp_numa_sets_follow_the_balloon_policy(monkeypatch, types, balloon, want):
     _nri_cluster(monkeypatch, [], types=types)
@@ -1408,7 +1424,6 @@ def test_auto_cpu_takes_the_freest_numa_set(monkeypatch):
     _nri_cluster(monkeypatch, ["0-1"])
     monkeypatch.setattr(nri_policy, "_balloon_pods_cpu_on_node", lambda node: 2)
     monkeypatch.setattr(nri_policy, "_schedulable_nri_nodes", lambda tp: ["w1"])
-    monkeypatch.setattr(nri_policy, "model_cpu", lambda cpu: cpu)
     assert nri_policy.auto_cpu(1) == 4 and nri_policy.auto_cpu(2) == 4  # tp2: 2 per NUMA node x 2
 
 

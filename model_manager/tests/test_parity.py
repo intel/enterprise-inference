@@ -103,6 +103,12 @@ KUBELET_REQUESTS = [
     (r"^(\[WARN \]    - No schedulable node has 16 allocatable CPUs.*\n)",
      (r"\1[WARN ]    - 1 replica(s) requesting 16 CPU and 32Gi each: the nodes it can use have room for 0 "
       "(free: no schedulable node with AMX); the rest would stay Pending.\n"))]
+# One NRI policy, the role's: engine-neutral model-balloon-tp<N> types, and siblings reserved, so a CPU request
+# is physical cores and never doubled (legacy had vllm-balloon, vllm-balloon-tp<N> and a hideHyperthreads mode).
+BALLOON_TP = (r"vllm-balloon-tp(\d)", r"model-balloon-tp\1")
+BALLOON_TP1 = (r"vllm-balloon\b(?!-)", "model-balloon-tp1")
+BALLOON_TP2 = (r"vllm-balloon\b(?!-)", "model-balloon-tp2")
+NO_HT_DOUBLING = [(r'^(            cpu: )"16"$', r'\1"8"'), (r"^\[INFO \]  NRI: Effective CPU 8 → 16 \(hideHyperthreads active\)\n", "")]
 OVMS_KIND = (r"^\$ kubectl delete InferenceService qwen3-5-2b-ovms ",
              "$ kubectl delete LLMInferenceService qwen3-5-2b-ovms ")
 OVMS_AIGATEWAY_ROUTE = (r"^\$ kubectl delete (aiservicebackend|backend) qwen3-5-2b-ovms .*\n", "")
@@ -127,7 +133,22 @@ def nri_node(in_use: int) -> list:
             [r"numa-nodes\}$", 0, "2"], [r"physical-cpus\}$", 0, "64"], [r"allocatable\.cpu\}$", 0, "126"],
             [r"capacity\.cpu\}$", 0, "128"], [r"reservedResources\.cpu\}$", 0, "cpuset:64-127"],
             [r"^get noderesourcetopologies\S* w1 -o json$", 0, json.dumps(_nrt(in_use))],
-            [r"numa-cpus\}$", 0, '{"0": "0-31,64-95", "1": "32-63,96-127"}']]
+            [r"numa-cpus\}$", 0, '{"0": "0-31,64-95", "1": "32-63,96-127"}'],
+            [r"^get balloonspolicies\.config\.nri node\.w1 -n kube-system -o json$", 0, json.dumps(NRI_POLICY)]]
+
+
+def _leaf(name: str, numa: int) -> dict:
+    return {"name": name, "preferCloseToDevices": [f"/sys/devices/system/node/node{numa}"]}
+
+
+# The role's types for a 2-socket node with one NUMA node each: tp1 takes one, tp2 takes both.
+NRI_POLICY = {"spec": {"balloonTypes": [
+    _leaf("pkg0node0", 0), _leaf("pkg1node1", 1),
+    {"name": "model-balloon-tp1", "componentCreation": "balance-balloons",
+     "components": [{"balloonType": "pkg0node0"}, {"balloonType": "pkg1node1"}]},
+    {"name": "crosspkgcomb0-tp2", "components": [{"balloonType": "pkg0node0"}, {"balloonType": "pkg1node1"}]},
+    {"name": "model-balloon-tp2", "componentCreation": "balance-balloons",
+     "components": [{"balloonType": "crosspkgcomb0-tp2"}]}]}}
 
 
 def _nrt(in_use: int) -> dict:
@@ -155,7 +176,7 @@ CASES = [
     case("qwen-nri-advanced", "deploy", "qwen3-0-6b", "--dry-run", "--tp", "2", "--server-version", "0.19.1",
          "--arg", "--max-model-len=4096", "--arg", "--max-num-seqs", "--arg", "64", "--env", "FOO=bar",
          "--env", "VLLM_CPU_KVCACHE_SPACE=20", "--label", "team=ml", "--label", "example.com/owner=",
-         "--node", "w1", "--replicas", "2", env={**NRI, "MM_NRI_MODE": "advanced", "MM_NRI_HIDE_HT": "true"}),
+         "--node", "w1", "--replicas", "2", env=NRI, deviations=[BALLOON_TP, *NO_HT_DOUBLING]),
     case("llama-kubelet-static", "deploy", "llama3-8b-awq", "--dry-run", "--cpu", "7",
          env={"MM_CPU_POLICY": "kubelet-static"}, k8s=STATIC),
     case("llama-kubelet-millicpu", "deploy", "llama3-8b-awq", "--dry-run", "--cpu", "7500m", "--tp", "2",
@@ -190,12 +211,12 @@ CASES = [
     case("fx-template-file-missing", "deploy", "tmpl-file-missing", "--dry-run", env=BE, catalog=FIXTURE),
     case("fx-cpu-auto-best-effort", "deploy", "auto-cpu", "--dry-run", env=BE, catalog=FIXTURE),
     case("fx-cpu-auto-nri", "deploy", "auto-cpu", "--dry-run", "--tp", "2", env=NRI, catalog=FIXTURE,
-         k8s=nri_node(8)),
+         k8s=nri_node(8), deviations=[BALLOON_TP2]),
     case("fx-cpu-auto-nri-full", "deploy", "auto-cpu", "--dry-run", env=NRI, catalog=FIXTURE, k8s=nri_node(124)),
     case("fx-cpu-auto-keep-live", "deploy", "auto-cpu", "--dry-run", env=NRI, catalog=FIXTURE,
-         k8s=LIVE_AUTO_CPU + nri_node(8)),
+         k8s=LIVE_AUTO_CPU + nri_node(8), deviations=[BALLOON_TP1]),
     case("fx-cpu-auto-override", "deploy", "auto-cpu", "--dry-run", "--cpu", "10", env=NRI, catalog=FIXTURE,
-         k8s=nri_node(8)),
+         k8s=nri_node(8), deviations=[BALLOON_TP1]),
     case("fx-version-not-allowed", "deploy", "multi", "--server", "vllm", "--server-version", "0.30.0",
          "--dry-run", env=BE, catalog=FIXTURE),
     case("fx-category-detected", "deploy", "nocat", "--dry-run",

@@ -81,11 +81,7 @@ class NriBalloons(BestEffort):
                 warn(line)
             return {f"{ANN}/type": "best-effort", f"{ANN}/reason": "nri-resolution-failed"}, m.cpu
         nri_policy.report_daemonset()
-        anns = nri_policy.build_annotations(tp, m.kind)
-        cpu = nri_policy.effective_cpu_request(int(m.cpu))
-        if cpu > 0 and str(cpu) != m.cpu:
-            info(f"NRI: Effective CPU {m.cpu} → {cpu} (hideHyperthreads active)", err=True)
-        return anns, str(cpu) if cpu > 0 else m.cpu
+        return nri_policy.build_annotations(tp, m.kind), m.cpu  # siblings are reserved: cpu is physical cores
 
     def _errors(self, m: Model, tp: int) -> tuple[bool, list[str]]:
         """(the gate passes, placement errors); with MM_NRI_PREFLIGHT=warn the gate passes despite errors."""
@@ -253,8 +249,6 @@ def resolve_auto_cpu(policy: BestEffort, m: Model, tp: int) -> None:
     live = next((v for k in kinds if (v := k8s.out("get", k, m.name, "-n", m.namespace, "-o",
                                                    f"jsonpath={LIVE_CPU[k]}"))), "")
     if live:
-        if isinstance(policy, NriBalloons) and is_uint(live):
-            live = str(nri_policy.model_cpu(int(live)))  # the request carries any hideHyperthreads doubling
         info(f"  CPU auto: keeping deployed value {live}")
         m.cpu = live
         return
