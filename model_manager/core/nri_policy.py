@@ -35,6 +35,8 @@ _NRI_MAX_TP_LABEL = "nri.intel.com/max-tp"
 _NRI_ANNOTATION_PREFIX = "balloon.balloons.resource-policy.nri.io/"
 _DEFAULT_BALLOON = "vllm-balloon"
 _BALLOONSPOLICY_CRD = "balloonspolicies.config.nri"
+_NRT_CRD = "noderesourcetopologies.topology.node.k8s.io"
+_NUMA_CPUS_ANNOTATION = "nri.intel.com/numa-cpus"  # {"0": "0-85,172-257", ...}, from the nri_cpu_balloons role
 _POD_LABEL_PREFIX = "pod/labels/"
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -509,6 +511,57 @@ def _node_total_logical_cpu(node: str) -> int:
     return _cpu_to_cores(raw) if raw else 0
 
 
+def _reserved_cpuset(node: str) -> set[int]:
+    """The reserved cpuset of the node's BalloonsPolicy (empty when given as a count)."""
+    for policy in (f"node.{node}", "default"):
+        raw = _kubectl("get", _BALLOONSPOLICY_CRD, policy, "-n", _NRI_BALLOONS_NS,
+                       "-o", "jsonpath={.spec.reservedResources.cpu}")
+        if raw:
+            return _parse_cpuset(raw[7:]) if raw.startswith("cpuset:") else set()
+    return set()
+
+
+def _numa_cpusets(node: str) -> list[set[int]]:
+    """Each NUMA node's logical CPUs: the role's annotation, else the usual Linux layout (contiguous physical
+    blocks per NUMA node, sibling t of core c = c + t * physical)."""
+    raw = _kubectl("get", "node", node, "-o", "jsonpath={.metadata.annotations.nri\\.intel\\.com/numa-cpus}")
+    try:
+        numa = json.loads(raw) if raw else {}
+        if numa:
+            return [_parse_cpuset(numa[k]) for k in sorted(numa, key=int)]
+    except (ValueError, TypeError, AttributeError):
+        _warn(f"nri-preflight: unreadable {_NUMA_CPUS_ANNOTATION} on '{node}'; assuming the usual CPU layout")
+    phys, numas = _physical_cpus(node), _numa_nodes_count(node)
+    logical = _node_total_logical_cpu(node)
+    if phys <= 0 or numas <= 0 or logical < phys:
+        return []
+    per, threads = phys // numas, logical // phys
+    return [{c + t * phys for t in range(threads) for c in range(i * per, (i + 1) * per)} for i in range(numas)]
+
+
+def _per_numa_free(node: str, in_use: int) -> list[int] | None:
+    """Free balloon CPUs per NUMA node: its CPUs minus the reserved set and every balloon's cpuset, as NRI reports
+    them in NodeResourceTopology. Pods whose balloon is not reported yet (`in_use` covers them) are taken from the
+    freest NUMA node, where the allocator would put them. None when the topology is unreadable."""
+    nrt, numa = _kubectl_json("get", _NRT_CRD, node), _numa_cpusets(node)
+    if not nrt or not numa:
+        return None
+    taken: set[int] = set()
+    for zone in nrt.get("zones") or []:
+        if zone.get("type") == "balloon" and not zone.get("name", "").startswith(("reserved[", "default[")):
+            attrs = {a.get("name"): a.get("value", "") for a in zone.get("attributes") or []}
+            taken |= _parse_cpuset(attrs.get("cpuset", ""))
+    reserved = _reserved_cpuset(node)
+    free = [len(cpus - reserved - taken) for cpus in numa]
+    unreported = max(0, in_use - len(taken))  # taken counts a spilled balloon's reserved CPUs too, as its request does
+    while unreported > 0 and max(free) > 0:
+        i = free.index(max(free))
+        step = min(unreported, free[i])
+        free[i] -= step
+        unreported -= step
+    return free
+
+
 def _node_balloon_pool(node: str) -> int:
     """CPUs available to *named* balloons (vllm-balloon-tpN) on a node.
 
@@ -582,11 +635,7 @@ def _node_capacity_report(
     # `per_numa_need`-sized "unit" from each of `span` NUMA nodes, so the node
     # holds floor(total_units / span) replicas — this naturally caps the
     # node-wide estimate when cores don't divide evenly per NUMA.
-    reserved = _reserved_cpus_count(node)
-    reserved_per_numa = reserved // len(numa_caps)
-    per_numa_used = in_use // len(numa_caps)
-    usable = [max(0, c - reserved_per_numa - per_numa_used) for c in numa_caps]
-
+    usable, exact = _usable_per_numa(node, numa_caps, in_use)
     span = max(1, min(tp, len(usable)))
     per_numa_need = math.ceil(eff_cpu / span)
 
@@ -600,7 +649,7 @@ def _node_capacity_report(
 
     total_units = sum(u // per_numa_need for u in usable)
     numa_slots = total_units // span
-    slots = min(node_wide_slots, numa_slots)
+    slots = numa_slots if exact else min(node_wide_slots, numa_slots)  # exact counts are the real free CPUs
 
     fits = slots >= replicas
     detail = (
@@ -609,6 +658,17 @@ def _node_capacity_report(
         f"(pool={pool}, in-use={in_use}, per-NUMA free={usable})"
     )
     return (fits, slots, detail)
+
+
+def _usable_per_numa(node: str, numa_caps: list[int], in_use: int) -> tuple[list[int], bool]:
+    """(free balloon CPUs per NUMA node, exact): exact from NodeResourceTopology, else the in-use CPUs spread evenly."""
+    exact = _per_numa_free(node, in_use)
+    if exact is not None and len(exact) == len(numa_caps):
+        return exact, True
+    _warn(f"nri-preflight: cannot read the NUMA placement on '{node}' ({_NRT_CRD}); assuming the CPUs in use are "
+          "spread evenly across NUMA nodes")
+    reserved_per_numa = _reserved_cpus_count(node) // len(numa_caps)
+    return [max(0, c - reserved_per_numa - in_use // len(numa_caps)) for c in numa_caps], False
 
 
 def auto_cpu(tp: int, node: str = "") -> int:
@@ -628,9 +688,7 @@ def auto_cpu(tp: int, node: str = "") -> int:
         if not caps:
             sizes.append(max(0, _node_balloon_pool(n) - in_use))
             continue
-        reserved_per_numa = _reserved_cpus_count(n) // len(caps)
-        per_numa_used = in_use // len(caps)
-        usable = sorted((max(0, c - reserved_per_numa - per_numa_used) for c in caps), reverse=True)
+        usable = sorted(_usable_per_numa(n, caps, in_use)[0], reverse=True)
         span = max(1, min(tp, len(usable)))
         sizes.append(usable[span - 1] * span)
     return model_cpu(min(sizes)) if sizes else 0

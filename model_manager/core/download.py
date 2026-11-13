@@ -7,6 +7,7 @@ import subprocess  # nosec B404
 import time
 
 from . import k8s
+from .stuck import Watch
 from .config import Catalog, Model, hf_model_info, pick, text
 from .renderer import proxy_env, quote, render, template, trust_remote_code
 from .ui import YELLOW, RESET, abort, info, ok
@@ -79,6 +80,22 @@ def _script(m: Model, cli_args: list[str]) -> str:
         "@NAME@", m.name).replace("@DIR@", f"/models/{m.name}")
 
 
+def _wait_job(m: Model, job: str) -> str:
+    """'' once the Job completes; 'Failed' when it failed; else why its pod is stuck, or that it timed out."""
+    deadline, watch = time.monotonic() + TIMEOUT, Watch()
+    while time.monotonic() < deadline:
+        status = pick(k8s.get_json("job", job, "-n", m.namespace), "status", {})
+        if status.get("succeeded"):
+            return ""
+        if any(c.get("type") == "Failed" and c.get("status") == "True" for c in status.get("conditions") or []):
+            return "Failed"
+        stuck = watch.stuck(pick(k8s.get_json("pods", "-n", m.namespace, "-l", f"job-name={job}"), "items", []))
+        if stuck:
+            return stuck
+        time.sleep(5)
+    return f"not finished after {TIMEOUT}s"
+
+
 def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
     if catalog.connectivity_url and not _curl_ok(catalog.connectivity_url, catalog.https_proxy):
         abort(f"Network check failed: cannot reach {catalog.connectivity_url} (proxy: {catalog.https_proxy or 'none'}). "
@@ -121,12 +138,16 @@ def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
     pod = k8s.out("get", "pods", "-n", m.namespace, "-l", f"job-name={job}", "-o", "jsonpath={.items[0].metadata.name}")
     logs = subprocess.Popen(["kubectl", "logs", "-f", pod, "-n", m.namespace],  # nosec B603 B607
                             stderr=subprocess.DEVNULL) if pod else None
-    done = k8s.run("wait", "--for=condition=complete", f"job/{job}", "-n", m.namespace, f"--timeout={TIMEOUT}s")
-    if logs:
-        logs.terminate()
-    print(done.stdout, end="")
-    if done.returncode == 0:
+    try:
+        failed = _wait_job(m, job)
+    finally:
+        if logs:
+            logs.terminate()
+    if not failed:
         return ok(f"Download complete: {m.name}")
+    if failed != "Failed":
+        k8s.run("delete", "job", job, "-n", m.namespace, "--ignore-not-found")
+        abort(f"Download of {m.model_id} cannot run: {failed}. Nothing was deployed.")
     tail = k8s.out("logs", "-l", f"job-name={job}", "-n", m.namespace, "--tail=20")
     if re.search(r"401|access denied|gated|authorization", tail, re.I):
         draft = f" or its draft '{m.draft_model_id}'" if m.draft_model_id else ""
