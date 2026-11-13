@@ -126,7 +126,8 @@ def nri_node(in_use: int) -> list:
             [r"^get pods -A --field-selector spec\.nodeName=w1 -o json$", 0, json.dumps({"items": [pod]})],
             [r"numa-nodes\}$", 0, "2"], [r"physical-cpus\}$", 0, "64"], [r"allocatable\.cpu\}$", 0, "126"],
             [r"capacity\.cpu\}$", 0, "128"], [r"reservedResources\.cpu\}$", 0, "cpuset:64-127"],
-            [r"^get noderesourcetopologies\S* w1 -o json$", 0, json.dumps(_nrt(in_use))]]
+            [r"^get noderesourcetopologies\S* w1 -o json$", 0, json.dumps(_nrt(in_use))],
+            [r"numa-cpus\}$", 0, '{"0": "0-31,64-95", "1": "32-63,96-127"}']]
 
 
 def _nrt(in_use: int) -> dict:

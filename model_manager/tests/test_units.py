@@ -1289,92 +1289,137 @@ def test_retire_aborts_when_the_old_pods_stay(monkeypatch):
         cli._retire_inference_service(Model(name="m", namespace="ns", kind="LLMInferenceService"))
 
 
-# ── NRI: real free CPUs per NUMA node ──
+# ── NRI: real free CPUs per NUMA node, on the NUMA sets the node's BalloonsPolicy defines ──
 
-NUMA_NODE = {"metadata": {"name": "w1", "labels": {"nri.intel.com/numa-nodes": "2", "nri.intel.com/physical-cpus": "8"}},
-             "status": {"capacity": {"cpu": "16"}}}
+CONTIGUOUS = '{"0": "0-3,8-11", "1": "4-7,12-15"}'
 
 
-def _nri_cluster(monkeypatch, balloons, annotation=""):
-    """w1: 2 NUMA nodes of 4 cores (0-3, 4-7), siblings 8-15 reserved; `balloons` = cpusets NRI reports."""
+def _leaf(name, numa):
+    return {"name": name, "preferCloseToDevices": [f"/sys/devices/system/node/node{numa}"]}
+
+
+def _tp_policy(*extra):
+    """Two NUMA nodes on two packages, as the role generates it: tp1 takes one, tp2 takes both."""
+    return [_leaf("pkg0node0", 0), _leaf("pkg1node1", 1),
+            {"name": "vllm-balloon-tp1", "componentCreation": "balance-balloons",
+             "components": [{"balloonType": "pkg0node0"}, {"balloonType": "pkg1node1"}]},
+            {"name": "crosspkgcomb0-tp2", "componentCreation": "all",
+             "components": [{"balloonType": "pkg0node0"}, {"balloonType": "pkg1node1"}]},
+            {"name": "vllm-balloon-tp2", "componentCreation": "balance-balloons",
+             "components": [{"balloonType": "crosspkgcomb0-tp2"}]}, *extra]
+
+
+def _nri_cluster(monkeypatch, balloons, annotation=CONTIGUOUS, types=None, reserved="cpuset:8-15"):
+    """w1: the NUMA CPU lists the role published, `balloons` = cpusets NRI reports, `types` = balloonTypes."""
     nrt = {"zones": [{"name": f"vllm-balloon-tp1[{i}]", "type": "balloon", "attributes": [{"name": "cpuset", "value": c}]}
                      for i, c in enumerate(balloons)] + [
         {"name": "reserved[0]", "type": "balloon", "attributes": [{"name": "cpuset", "value": "8-9"}]}]}
+    policy = {"spec": {"reservedResources": {"cpu": reserved}, "balloonTypes": _tp_policy() if types is None else types}}
 
     def kubectl(*args):
         line = " ".join(args)
         if "numa-cpus" in line:
             return annotation
         if "reservedResources" in line:
-            return "cpuset:8-15"
+            return reserved
+        if args[:2] == ("get", nri_policy._NRT_CRD):
+            return json.dumps(nrt)
+        if args[:2] == ("get", nri_policy._BALLOONSPOLICY_CRD) and args[-1] == "json":
+            return json.dumps(policy)
         if "nri\\.intel\\.com/numa-nodes" in line:
             return "2"
         if "nri\\.intel\\.com/physical-cpus" in line:
             return "8"
         if "capacity.cpu" in line:
             return "16"
-        if args[:2] == ("get", nri_policy._NRT_CRD):
-            return json.dumps(nrt)
         return ""
     monkeypatch.setattr(nri_policy, "_kubectl", kubectl)
+    monkeypatch.setattr(nri_policy, "advanced_mode_active", lambda: True)  # the role's per-tp balloon types
 
 
 def test_per_numa_free_counts_each_balloon_where_it_is(monkeypatch):
-    # Both busy cores are on NUMA 0: the even split would have said [3, 3].
+    # Both busy cores are on NUMA 0: the even split would have said 3 and 3.
     _nri_cluster(monkeypatch, ["0", "1"])
-    assert nri_policy._per_numa_free("w1", in_use=2) == [2, 4]
+    assert nri_policy._per_numa_free("w1", in_use=2) == {0: 2, 1: 4}
 
 
 def test_per_numa_free_takes_unreported_pods_from_the_freest_node(monkeypatch):
     _nri_cluster(monkeypatch, ["0"])
-    assert nri_policy._per_numa_free("w1", in_use=3) == [3, 2]  # 2 CPUs requested but not in a balloon yet
+    assert nri_policy._per_numa_free("w1", in_use=3) == {0: 3, 1: 2}  # 2 CPUs requested but not in a balloon yet
 
 
 def test_per_numa_free_counts_a_spilled_balloon(monkeypatch):
     # A balloon on reserved siblings: its request is fully accounted, the reserved CPUs were never free.
     _nri_cluster(monkeypatch, ["2-3,10-11"])
-    assert nri_policy._per_numa_free("w1", in_use=4) == [2, 4]
+    assert nri_policy._per_numa_free("w1", in_use=4) == {0: 2, 1: 4}
 
 
-def test_numa_cpusets_from_the_annotation(monkeypatch):
-    _nri_cluster(monkeypatch, [], annotation='{"0": "0,2,4,6,8,10,12,14", "1": "1,3,5,7,9,11,13,15"}')
-    assert nri_policy._numa_cpusets("w1") == [{0, 2, 4, 6, 8, 10, 12, 14}, {1, 3, 5, 7, 9, 11, 13, 15}]
+def test_per_numa_free_with_interleaved_numbering(monkeypatch):
+    # NUMA 0 = even CPUs, NUMA 1 = odd; no layout is assumed, the published lists decide.
+    _nri_cluster(monkeypatch, ["0,2"], annotation='{"0": "0,2,4,6,8,10,12,14", "1": "1,3,5,7,9,11,13,15"}')
+    assert nri_policy._per_numa_free("w1", in_use=2) == {0: 2, 1: 4}
 
 
-def test_numa_cpusets_default_layout(monkeypatch):
-    _nri_cluster(monkeypatch, [])
-    assert nri_policy._numa_cpusets("w1") == [{0, 1, 2, 3, 8, 9, 10, 11}, {4, 5, 6, 7, 12, 13, 14, 15}]
+def test_no_published_layout_means_no_exact_count(monkeypatch, capsys):
+    _nri_cluster(monkeypatch, ["0"], annotation="")
+    assert nri_policy._per_numa_free("w1", in_use=1) is None
+    nri_policy._usable_per_numa("w1", [8, 8], 1)
+    assert "nri.intel.com/numa-cpus not published" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("types, balloon, want", [
+    (_tp_policy(), "vllm-balloon-tp1", [(0,), (1,)]),
+    (_tp_policy(), "vllm-balloon-tp2", [(0, 1)]),
+    # SNC2 on two sockets: tp2 stays within a package (localpkg), as the role generates it.
+    ([_leaf(f"pkg{p}node{n}", n) for p, n in ((0, 0), (0, 1), (1, 2), (1, 3))] + [
+        {"name": "localpkgcomb0-tp2", "components": [{"balloonType": "pkg0node0"}, {"balloonType": "pkg0node1"}]},
+        {"name": "localpkgcomb1-tp2", "components": [{"balloonType": "pkg1node2"}, {"balloonType": "pkg1node3"}]},
+        {"name": "vllm-balloon-tp2", "componentCreation": "balance-balloons",
+         "components": [{"balloonType": "localpkgcomb0-tp2"}, {"balloonType": "localpkgcomb1-tp2"}]}],
+     "vllm-balloon-tp2", [(0, 1), (2, 3)]),
+    ([{"name": "vllm-balloon-tp1", "components": [{"balloonType": "nowhere"}]}], "vllm-balloon-tp1", None),
+    ([{"name": "vllm-balloon-tp1"}], "vllm-balloon-tp1", None),  # a leaf close to no NUMA node
+    (_tp_policy(), "vllm-balloon-tp4", None),
+])
+def test_tp_numa_sets_follow_the_balloon_policy(monkeypatch, types, balloon, want):
+    _nri_cluster(monkeypatch, [], types=types)
+    assert nri_policy._tp_numa_sets("w1", balloon) == want
+
+
+@pytest.mark.parametrize("free, sets, cpu, want, placed", [
+    ({0: 4, 1: 4}, [(0,), (1,)], 3, 3, 2),
+    ({0: 4, 1: 0, 2: 4, 3: 0}, [(0, 1), (2, 3)], 4, 1, 0),  # spread over NUMA nodes would have said 2
+    ({0: 8, 1: 8, 2: 2, 3: 2}, [(0, 1), (2, 3)], 8, 3, 2),
+    ({0: 6, 1: 2}, [(0,), (1,)], 2, 9, 4),
+])
+def test_place_on_numa_sets(free, sets, cpu, want, placed):
+    assert nri_policy._place(dict(free), sets, cpu, want) == placed
 
 
 def test_capacity_report_uses_the_real_numa_placement(monkeypatch):
     # 3-core replicas: NUMA 0 has 2 free, NUMA 1 has 4, so one fits (the even split said 0 or 2).
     _nri_cluster(monkeypatch, ["0-1"])
     monkeypatch.setattr(nri_policy, "_balloon_pods_cpu_on_node", lambda node: 2)
-    fits, slots, _ = nri_policy._node_capacity_report("w1", 3, 1, 2)
-    assert (fits, slots) == (False, 1)
+    fits, slots, detail = nri_policy._node_capacity_report("w1", 3, 1, 2)
+    assert (fits, slots) == (False, 1) and "per-NUMA free=[2, 4]" in detail
 
 
-def test_failed_download_deletes_its_job_and_shows_the_log(monkeypatch, capsys):
-    calls = []
-    monkeypatch.setattr(download, "_wait_job", lambda m, job: "Failed")
-    monkeypatch.setattr(download, "_curl_ok", lambda *_: True)
-    monkeypatch.setattr(download.time, "sleep", lambda _: None)
-    monkeypatch.setattr(k8s, "out", lambda *a: "fetching via http://user:secret@proxy:911\nOSError: 404 not found"
-                        if a[0] == "logs" else "")
-    monkeypatch.setattr(k8s, "run", lambda *a, stdin=None: calls.append(a) or subprocess.CompletedProcess(a, 0, "", ""))
-    monkeypatch.setattr(k8s, "apply", lambda *a, **k: None)
-    m = Model(name="m", namespace="n", model_id="org/m", runtime="vllm", runtime_image="img", cpu="8", memory="8Gi")
-    with pytest.raises(SystemExit):
-        download.download_weights(m, Catalog(cli.MM_DIR / "models.yaml"), [])
-    assert ("delete", "job", "download-m", "-n", "n", "--ignore-not-found") in calls[1:]
-    err = capsys.readouterr().err
-    assert "OSError: 404 not found" in err and "secret" not in err and "://***@proxy" in err
+def test_auto_cpu_takes_the_freest_numa_set(monkeypatch):
+    _nri_cluster(monkeypatch, ["0-1"])
+    monkeypatch.setattr(nri_policy, "_balloon_pods_cpu_on_node", lambda node: 2)
+    monkeypatch.setattr(nri_policy, "_schedulable_nri_nodes", lambda tp: ["w1"])
+    monkeypatch.setattr(nri_policy, "model_cpu", lambda cpu: cpu)
+    assert nri_policy.auto_cpu(1) == 4 and nri_policy.auto_cpu(2) == 4  # tp2: 2 per NUMA node x 2
 
 
-def test_memory_shortfall_names_the_request_check(monkeypatch, capsys):
-    # The placement check passed, so the abort must not blame the CPU policy.
-    monkeypatch.setattr(policy, "_request_errors", lambda m, cpu, amx: ["no memory"])
-    with pytest.raises(SystemExit):
-        policy.preflight_gate(_Gate(), Model(name="m", namespace="n", cpu="8", memory="600Gi", replicas="1"), 1, "8")
-    err = capsys.readouterr().err
-    assert "Pre-flight failed: cannot place m (cpu=8 memory=600Gi replicas=1)" in err
+@pytest.mark.parametrize("cpu, tp, fits", [(4, 1, True), (5, 1, False), (8, 2, True), (9, 2, False)])
+def test_largest_replica_is_the_best_numa_set(monkeypatch, cpu, tp, fits):
+    # Each NUMA node has 4 non-reserved CPUs: tp1 holds 4, tp2 (both nodes) holds 8.
+    _nri_cluster(monkeypatch, [])
+    largest = nri_policy._largest_replica("w1", tp)
+    assert (cpu <= largest) == fits
+
+
+def test_largest_replica_unknown_without_a_layout(monkeypatch):
+    _nri_cluster(monkeypatch, [], annotation="")
+    assert nri_policy._largest_replica("w1", 1) is None

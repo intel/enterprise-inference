@@ -16,9 +16,11 @@ uses kubectl subprocess calls for all K8s access; diagnostics go to stderr.
 from __future__ import annotations
 
 import fnmatch
+import itertools
 import json
 import math
 import os
+import re
 # Only used for fixed, non-shell kubectl calls (see _kubectl below).
 import subprocess  # nosec B404
 import sys
@@ -521,30 +523,25 @@ def _reserved_cpuset(node: str) -> set[int]:
     return set()
 
 
-def _numa_cpusets(node: str) -> list[set[int]]:
-    """Each NUMA node's logical CPUs: the role's annotation, else the usual Linux layout (contiguous physical
-    blocks per NUMA node, sibling t of core c = c + t * physical)."""
+def _numa_cpusets(node: str) -> dict[int, set[int]]:
+    """Each NUMA node's logical CPUs, as the nri_cpu_balloons role published them from the node's sysfs
+    ({} when not published: no CPU layout is assumed)."""
     raw = _kubectl("get", "node", node, "-o", "jsonpath={.metadata.annotations.nri\\.intel\\.com/numa-cpus}")
     try:
         numa = json.loads(raw) if raw else {}
-        if numa:
-            return [_parse_cpuset(numa[k]) for k in sorted(numa, key=int)]
+        return {int(k): _parse_cpuset(v) for k, v in numa.items()} if isinstance(numa, dict) else {}
     except (ValueError, TypeError, AttributeError):
-        _warn(f"nri-preflight: unreadable {_NUMA_CPUS_ANNOTATION} on '{node}'; assuming the usual CPU layout")
-    phys, numas = _physical_cpus(node), _numa_nodes_count(node)
-    logical = _node_total_logical_cpu(node)
-    if phys <= 0 or numas <= 0 or logical < phys:
-        return []
-    per, threads = phys // numas, logical // phys
-    return [{c + t * phys for t in range(threads) for c in range(i * per, (i + 1) * per)} for i in range(numas)]
+        _warn(f"nri-preflight: unreadable {_NUMA_CPUS_ANNOTATION} on '{node}'")
+        return {}
 
 
-def _per_numa_free(node: str, in_use: int) -> list[int] | None:
+def _per_numa_free(node: str, in_use: int) -> dict[int, int] | None:
     """Free balloon CPUs per NUMA node: its CPUs minus the reserved set and every balloon's cpuset, as NRI reports
     them in NodeResourceTopology. Pods whose balloon is not reported yet (`in_use` covers them) are taken from the
-    freest NUMA node, where the allocator would put them. None when the topology is unreadable."""
-    nrt, numa = _kubectl_json("get", _NRT_CRD, node), _numa_cpusets(node)
-    if not nrt or not numa:
+    freest NUMA node, where the allocator would put them. None when the topology is unknown."""
+    numa = _numa_cpusets(node)
+    nrt = _kubectl_json("get", _NRT_CRD, node) if numa else None
+    if not nrt:
         return None
     taken: set[int] = set()
     for zone in nrt.get("zones") or []:
@@ -552,14 +549,70 @@ def _per_numa_free(node: str, in_use: int) -> list[int] | None:
             attrs = {a.get("name"): a.get("value", "") for a in zone.get("attributes") or []}
             taken |= _parse_cpuset(attrs.get("cpuset", ""))
     reserved = _reserved_cpuset(node)
-    free = [len(cpus - reserved - taken) for cpus in numa]
+    free = {n: len(cpus - reserved - taken) for n, cpus in numa.items()}
     unreported = max(0, in_use - len(taken))  # taken counts a spilled balloon's reserved CPUs too, as its request does
-    while unreported > 0 and max(free) > 0:
-        i = free.index(max(free))
-        step = min(unreported, free[i])
-        free[i] -= step
+    while unreported > 0 and max(free.values()) > 0:
+        n = max(free, key=free.get)
+        step = min(unreported, free[n])
+        free[n] -= step
         unreported -= step
     return free
+
+
+def _tp_numa_sets(node: str, balloon: str) -> list[tuple[int, ...]] | None:
+    """The NUMA node sets a `balloon` can take, from the node's BalloonsPolicy: a type with components takes one of
+    them (componentCreation: balance-balloons) or all of them (otherwise); a leaf type is the NUMA node it is
+    close to (preferCloseToDevices: .../node/nodeN). None when the policy does not resolve that far."""
+    policy = None
+    for name in (f"node.{node}", "default"):
+        policy = _kubectl_json("get", _BALLOONSPOLICY_CRD, name, "-n", _NRI_BALLOONS_NS)
+        if policy:
+            break
+    types = {t.get("name"): t for t in ((policy or {}).get("spec") or {}).get("balloonTypes") or []}
+
+    def sets(name: str, depth: int = 0) -> list[tuple[int, ...]] | None:
+        t = types.get(name)
+        if t is None or depth > 16:
+            return None
+        parts = [c.get("balloonType", "") for c in t.get("components") or []]
+        if not parts:
+            numa = {int(m.group(1)) for d in t.get("preferCloseToDevices") or []
+                    if (m := re.search(r"/node/node(\d+)/?$", d))}
+            return [tuple(numa)] if len(numa) == 1 else None
+        children = [sets(c, depth + 1) for c in parts]
+        if any(c is None for c in children):
+            return None
+        if t.get("componentCreation") == "balance-balloons":
+            return [s for c in children for s in c]
+        return [tuple(sorted({n for s in combo for n in s})) for combo in itertools.product(*children)]
+
+    found = sets(balloon)
+    return sorted(set(found)) if found else None
+
+
+def _largest_replica(node: str, tp: int) -> int | None:
+    """The most CPUs one tp-N replica can get on the empty node: its best NUMA set, split evenly, without the
+    reserved CPUs. None when the layout or the balloon types are not known."""
+    numa, numa_sets = _numa_cpusets(node), _tp_numa_sets(node, balloon_name(tp))
+    if not numa or not numa_sets:
+        return None
+    usable = {n: len(cpus - _reserved_cpuset(node)) for n, cpus in numa.items()}
+    return max(min(usable.get(n, 0) for n in s) * len(s) for s in numa_sets)
+
+
+def _place(free: dict[int, int], numa_sets: list[tuple[int, ...]], cpu: int, want: int) -> int:
+    """How many of `want` replicas of `cpu` CPUs fit, each split evenly over one of `numa_sets`; like the
+    balloon allocator, each goes to the set with the most free CPUs left."""
+    placed = 0
+    while placed < want:
+        fits = [s for s in numa_sets if all(free.get(n, 0) >= math.ceil(cpu / len(s)) for n in s)]
+        if not fits:
+            break
+        best = max(fits, key=lambda s: min(free[n] for n in s))
+        for n in best:
+            free[n] -= math.ceil(cpu / len(best))
+        placed += 1
+    return placed
 
 
 def _node_balloon_pool(node: str) -> int:
@@ -635,7 +688,14 @@ def _node_capacity_report(
     # `per_numa_need`-sized "unit" from each of `span` NUMA nodes, so the node
     # holds floor(total_units / span) replicas — this naturally caps the
     # node-wide estimate when cores don't divide evenly per NUMA.
-    usable, exact = _usable_per_numa(node, numa_caps, in_use)
+    exact = _per_numa_free(node, in_use)
+    numa_sets = _tp_numa_sets(node, balloon_name(tp)) if exact is not None else None
+    if exact is not None and numa_sets:
+        slots = _place(dict(exact), numa_sets, eff_cpu, replicas)
+        detail = (f"{node}: need {replicas} replica(s) of {eff_cpu} (tp={tp}, NUMA sets {numa_sets}); node fits "
+                  f"{slots} (per-NUMA free={[exact[n] for n in sorted(exact)]})")
+        return slots >= replicas, slots, detail
+    usable, exact_counts = _usable_per_numa(node, numa_caps, in_use, exact)
     span = max(1, min(tp, len(usable)))
     per_numa_need = math.ceil(eff_cpu / span)
 
@@ -649,7 +709,7 @@ def _node_capacity_report(
 
     total_units = sum(u // per_numa_need for u in usable)
     numa_slots = total_units // span
-    slots = numa_slots if exact else min(node_wide_slots, numa_slots)  # exact counts are the real free CPUs
+    slots = numa_slots if exact_counts else min(node_wide_slots, numa_slots)  # exact counts are the real free CPUs
 
     fits = slots >= replicas
     detail = (
@@ -660,13 +720,19 @@ def _node_capacity_report(
     return (fits, slots, detail)
 
 
-def _usable_per_numa(node: str, numa_caps: list[int], in_use: int) -> tuple[list[int], bool]:
+_MISSING = object()
+
+
+def _usable_per_numa(node: str, numa_caps: list[int], in_use: int,
+                     exact: Any = _MISSING) -> tuple[list[int], bool]:
     """(free balloon CPUs per NUMA node, exact): exact from NodeResourceTopology, else the in-use CPUs spread evenly."""
-    exact = _per_numa_free(node, in_use)
+    if exact is _MISSING:
+        exact = _per_numa_free(node, in_use)
     if exact is not None and len(exact) == len(numa_caps):
-        return exact, True
-    _warn(f"nri-preflight: cannot read the NUMA placement on '{node}' ({_NRT_CRD}); assuming the CPUs in use are "
-          "spread evenly across NUMA nodes")
+        return [exact[n] for n in sorted(exact)], True
+    _warn(f"nri-preflight: the NUMA placement on '{node}' is unknown ({_NUMA_CPUS_ANNOTATION} not published, or "
+          f"{_NRT_CRD} unreadable): re-run the nri_cpu_balloons role. Assuming the CPUs in use are spread evenly "
+          "across NUMA nodes.")
     reserved_per_numa = _reserved_cpus_count(node) // len(numa_caps)
     return [max(0, c - reserved_per_numa - in_use // len(numa_caps)) for c in numa_caps], False
 
@@ -684,11 +750,16 @@ def auto_cpu(tp: int, node: str = "") -> int:
     sizes: list[int] = []
     for n in nodes:
         in_use = _balloon_pods_cpu_on_node(n)
+        exact = _per_numa_free(n, in_use)
+        numa_sets = _tp_numa_sets(n, balloon_name(tp)) if exact is not None else None
+        if exact is not None and numa_sets:  # the most each NUMA node of the best set still has, times its size
+            sizes.append(max(min(exact[x] for x in s) * len(s) for s in numa_sets))
+            continue
         caps = _per_numa_capacity(n)
         if not caps:
             sizes.append(max(0, _node_balloon_pool(n) - in_use))
             continue
-        usable = sorted(_usable_per_numa(n, caps, in_use)[0], reverse=True)
+        usable = sorted(_usable_per_numa(n, caps, in_use, exact)[0], reverse=True)
         span = max(1, min(tp, len(usable)))
         sizes.append(usable[span - 1] * span)
     return model_cpu(min(sizes)) if sizes else 0
@@ -753,12 +824,14 @@ def preflight(cpu: int, tp: int, node: str = "", replicas: int = 1) -> dict:
             notes.append(f"cluster max-tp={best} across {labeled} labeled node(s) (ok for tp={tp})")
 
     # ── NUMA topology checks ──
-    target = node
-    if not target:
-        # Pick first NRI-capable node for topology checks
-        candidates = _schedulable_nri_nodes(tp)
-        if candidates:
-            target = candidates[0]
+    nodes = [node] if node else _schedulable_nri_nodes(tp)
+    largest = {n: _largest_replica(n, tp) for n in nodes}
+    exact = bool(nodes) and None not in largest.values()
+    if exact and eff_cpu > max(largest.values()):
+        errors.append(f"no node can hold one replica of {eff_cpu} CPUs (tp={tp}, balloon '{bname}'): the largest "
+                      f"fits {max(largest.values())} ({', '.join(f'{n}: {v}' for n, v in largest.items())})")
+    # Without a published layout: the first NRI node, assuming equal NUMA nodes.
+    target = "" if exact else (node or (nodes[0] if nodes else ""))
 
     if target:
         numas = _numa_nodes_count(target)
