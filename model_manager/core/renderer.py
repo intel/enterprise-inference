@@ -91,19 +91,16 @@ def proxy_env(catalog: Catalog) -> list[tuple[str, str]]:
 
 
 def _affinity(node: str, require_amx: bool) -> str:
-    lines = ["    affinity:", "      nodeAffinity:"] if node or require_amx else []
-    if require_amx:
-        lines += ["        requiredDuringSchedulingIgnoredDuringExecution:", "          nodeSelectorTerms:",
-                  "            - matchExpressions:", "                - key: feature.node.kubernetes.io/cpu-cpuid.AMXBF16",
-                  "                  operator: In", "                  values:", '                    - "true"']
-    if node:
-        lines += ["        preferredDuringSchedulingIgnoredDuringExecution:", "          - weight: 100",
-                  "            preference:", "              matchExpressions:",
-                  "                - key: kubernetes.io/hostname", "                  operator: In",
-                  "                  values:", f"                    - {node}", "          - weight: 50",
-                  "            preference:", "              matchExpressions:",
-                  "                - key: node-role.kubernetes.io/control-plane",
-                  "                  operator: DoesNotExist"]
+    """Required node affinity: --node pins (as every pre-flight check assumes), and AMX catalogs need AMX nodes."""
+    match = ([("feature.node.kubernetes.io/cpu-cpuid.AMXBF16", "true")] if require_amx else []) + \
+        ([("kubernetes.io/hostname", node)] if node else [])
+    if not match:
+        return ""
+    lines = ["    affinity:", "      nodeAffinity:", "        requiredDuringSchedulingIgnoredDuringExecution:",
+             "          nodeSelectorTerms:", "            - matchExpressions:"]
+    for key, value in match:  # quoted: a node name cannot inject YAML
+        lines += [f"                - key: {key}", "                  operator: In", "                  values:",
+                  f"                    - {json.dumps(value)}"]
     return "\n".join(lines)
 
 

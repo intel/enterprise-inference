@@ -16,5 +16,9 @@ if verb in ("apply", "create", "delete", "patch", "run") and os.environ.get("FAK
 for pattern, rc, out in json.loads(os.environ.get("FAKE_K8S") or "[]"):
     if re.search(pattern, line):
         sys.stdout.write(out)
+        if rc and verb == "get":
+            sys.stderr.write("Error from server (NotFound): not found\n")
         sys.exit(rc)
+if verb == "get":
+    sys.stderr.write("Error from server (NotFound): not found\n")
 sys.exit(1 if verb == "get" else 0)

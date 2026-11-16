@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+from typing import NoReturn
 
 _COLOR = sys.stdout.isatty()
 
@@ -26,7 +27,7 @@ def warn(msg: str) -> None:
     print(f"{YELLOW}[WARN ]{RESET}  {msg}", file=sys.stderr)
 
 
-def abort(msg: str):
+def abort(msg: str) -> NoReturn:
     print(f"{RED}[ERROR]{RESET}  {msg}", file=sys.stderr)
     sys.exit(1)
 
