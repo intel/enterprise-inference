@@ -1504,6 +1504,25 @@ def test_update_credit_keeps_room_for_the_surge(monkeypatch, running, live, cred
     assert cli._update_credit(m, {"cpu-policy.model-manager.io/balloon": "model-balloon-tp1"}, "8") == credit
 
 
+@pytest.mark.parametrize("node, amx, want", [
+    ("w1", False, [{"key": "kubernetes.io/hostname", "operator": "In", "values": ["w1"]}]),
+    ("", True, [{"key": "feature.node.kubernetes.io/cpu-cpuid.AMXBF16", "operator": "In", "values": ["true"]}]),
+    ("w1", True, [{"key": "feature.node.kubernetes.io/cpu-cpuid.AMXBF16", "operator": "In", "values": ["true"]},
+                  {"key": "kubernetes.io/hostname", "operator": "In", "values": ["w1"]}]),  # one term: both apply
+    ('w1"\n    hostNetwork: true', False,
+     [{"key": "kubernetes.io/hostname", "operator": "In", "values": ['w1"\n    hostNetwork: true']}]),
+])
+def test_node_affinity_pins_the_node_it_was_checked_on(node, amx, want):
+    # --node is required, not preferred: the pre-flight checks only that node, so the pods must go there.
+    doc = yaml.safe_load("spec:\n" + renderer._affinity(node, amx))
+    assert doc["spec"] == {"affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {
+        "nodeSelectorTerms": [{"matchExpressions": want}]}}}}
+
+
+def test_no_node_and_no_amx_renders_no_affinity():
+    assert renderer._affinity("", False) == ""
+
+
 def test_update_credit_reads_v1alpha1_annotations_from_the_object(monkeypatch):
     # platform.adapt_llmisvc moves v1alpha1 pod annotations to metadata.annotations.
     live = _live("LLMInferenceService")

@@ -33,7 +33,6 @@ def exists(*args: str) -> bool:
     if "(NotFound)" in r.stderr:
         return False
     abort(f"Could not look up {' '.join(args)}: {r.stderr.strip() or 'kubectl get failed'}")
-    return False
 
 
 def get_json(*args: str) -> Any:

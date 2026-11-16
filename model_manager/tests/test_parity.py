@@ -109,6 +109,10 @@ BALLOON_TP = (r"vllm-balloon-tp(\d)", r"model-balloon-tp\1")
 BALLOON_TP1 = (r"vllm-balloon\b(?!-)", "model-balloon-tp1")
 BALLOON_TP2 = (r"vllm-balloon\b(?!-)", "model-balloon-tp2")
 NO_HT_DOUBLING = [(r'^(            cpu: )"16"$', r'\1"8"'), (r"^\[INFO \]  NRI: Effective CPU 8 → 16 \(hideHyperthreads active\)\n", "")]
+# --node is a required affinity (was preferred, plus a control-plane preference): pre-flight checks only that node.
+PIN_NODE = (r"^        preferredDuringSchedulingIgnoredDuringExecution:\n          - weight: 100\n            preference:\n"
+            r"              matchExpressions:\n(                - key: kubernetes.io/hostname\n[\s\S]*?)                    - w1\n"
+            r"          - weight: 50\n[\s\S]*?operator: DoesNotExist\n", r'\1                    - "w1"\n')
 OVMS_KIND = (r"^\$ kubectl delete InferenceService qwen3-5-2b-ovms ",
              "$ kubectl delete LLMInferenceService qwen3-5-2b-ovms ")
 OVMS_AIGATEWAY_ROUTE = (r"^\$ kubectl delete (aiservicebackend|backend) qwen3-5-2b-ovms .*\n", "")
@@ -174,7 +178,7 @@ CASES = [
     case("qwen-nri-advanced", "deploy", "qwen3-0-6b", "--dry-run", "--tp", "2", "--server-version", "0.19.1",
          "--arg", "--max-model-len=4096", "--arg", "--max-num-seqs", "--arg", "64", "--env", "FOO=bar",
          "--env", "VLLM_CPU_KVCACHE_SPACE=20", "--label", "team=ml", "--label", "example.com/owner=",
-         "--node", "w1", "--replicas", "2", env=NRI, deviations=[BALLOON_TP, *NO_HT_DOUBLING]),
+         "--node", "w1", "--replicas", "2", env=NRI, deviations=[BALLOON_TP, *NO_HT_DOUBLING, PIN_NODE]),
     case("llama-kubelet-static", "deploy", "llama3-8b-awq", "--dry-run", "--cpu", "7",
          env={"MM_CPU_POLICY": "kubelet-static"}, k8s=STATIC),
     case("llama-kubelet-millicpu", "deploy", "llama3-8b-awq", "--dry-run", "--cpu", "7500m", "--tp", "2",
