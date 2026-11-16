@@ -414,7 +414,7 @@ def _tp_numa_sets(node: str, balloon: str) -> list[tuple[int, ...]] | None:
 def schedulable_nodes(tp: int) -> list[str]:
     """Schedulable NRI nodes that can host a tp-N replica (read once per run)."""
     if ("nodes", str(tp)) not in _static:
-        _static[("nodes", str(tp))] = _schedulable_nri_nodes(tp)
+        _static[("nodes", str(tp))] = _schedulable_nri_nodes(tp)  # the one direct call
     return _static[("nodes", str(tp))]
 
 
@@ -471,7 +471,7 @@ def auto_cpu(tp: int, node: str = "") -> int:
     """CPU for a `cpu: auto` model: the most one replica can still get on the node with the least room, each
     node's best NUMA set split evenly (models already running keep theirs). 0 = nothing free or nothing known."""
     sizes: list[int] = []
-    for n in [node] if node else _schedulable_nri_nodes(tp):
+    for n in [node] if node else schedulable_nodes(tp):
         free = _per_numa_free(n, _balloon_pods_cpu_on_node(n))
         numa_sets = _tp_numa_sets(n, balloon_name(tp)) if free is not None else None
         if free is None or not numa_sets:
@@ -540,7 +540,7 @@ def preflight(cpu: int, tp: int, node: str = "", replicas: int = 1) -> dict:
             notes.append(f"cluster max-tp={best} across {labeled} labeled node(s) (ok for tp={tp})")
 
     # ── NUMA topology: one replica must fit an empty node ──
-    nodes = [node] if node else _schedulable_nri_nodes(tp)
+    nodes = [node] if node else schedulable_nodes(tp)
     largest = {n: _largest_replica(n, tp) for n in nodes}
     unknown = [n for n, size in largest.items() if size is None]
     if unknown:
@@ -557,7 +557,7 @@ def preflight(cpu: int, tp: int, node: str = "", replicas: int = 1) -> dict:
             fits, _slots, detail = _node_capacity_report(node, eff_cpu, tp, replicas)
             (notes if fits else errors).append(f"capacity: {detail}")
         else:
-            candidates = _schedulable_nri_nodes(tp)
+            candidates = schedulable_nodes(tp)
             if not candidates:
                 notes.append(
                     "no schedulable node carries nri.intel.com/max-tp; skipping "

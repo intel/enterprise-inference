@@ -153,7 +153,7 @@ def _nrt(in_use: int) -> dict:
     """NRI's report for nri_node: the in-use balloon CPUs split evenly over its two NUMA nodes (0-31, 32-63)."""
     half = min(32, in_use // 2)
     cpus = ",".join(f"{lo}-{lo + half - 1}" for lo in (0, 32)) if half else ""
-    return {"zones": [{"name": "vllm-balloon[0]", "type": "balloon", "attributes": [{"name": "cpuset", "value": cpus}]}]}
+    return {"zones": [{"name": "model-balloon-tp1[0]", "type": "balloon", "attributes": [{"name": "cpuset", "value": cpus}]}]}
 
 
 # Room for any model, so the request check (new; legacy had none) passes quietly; case rules match first.
