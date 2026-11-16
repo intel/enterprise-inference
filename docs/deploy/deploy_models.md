@@ -160,8 +160,10 @@ CPU ones included, must then run on that node.
 
 `--tp N` without `--gpus` also sets the GPU count to N. A tensor parallel size
 larger than the GPU count is refused; a smaller one warns about the unused GPUs.
-The count covers tensor parallelism only: with pipeline or data parallelism passed
-through `--arg`, set `--gpus` to the total GPUs the pod needs.
+The count covers tensor parallelism only. With pipeline or data parallelism passed
+through `--arg`, set both `--gpus` (the total GPUs the pod needs) and `--tp` (the
+tensor parallel size): without `--tp`, it defaults to the GPU count. The "GPUs
+unused" warning then counts only tensor parallelism, so it can be ignored.
 For a manual CLI deploy on a GPU cluster you already trust:
 
 ```bash
