@@ -324,32 +324,52 @@ def _schedulable_nri_nodes(min_tp: int) -> list[str]:
 
 # ── Per-NUMA capacity analysis ───────────────────────────────────────────────
 
+# A node's layout and BalloonsPolicy do not change during one model-manager run: read each once.
+_static: dict[tuple[str, str], Any] = {}
+
+
+def clear_cache() -> None:
+    _static.clear()
+
+
+def _node_policy(node: str) -> dict:
+    """The node's BalloonsPolicy (node.<name>, else default); {} when there is none."""
+    if ("policy", node) not in _static:
+        _static[("policy", node)] = next((p for name in (f"node.{node}", "default")
+                                          if (p := _kubectl_json("get", _BALLOONSPOLICY_CRD, name,
+                                                                 "-n", _NRI_BALLOONS_NS))), {})
+    return _static[("policy", node)]
+
+
 def _reserved_cpuset(node: str) -> set[int]:
     """The reserved cpuset of the node's BalloonsPolicy (empty when given as a count)."""
-    for policy in (f"node.{node}", "default"):
-        raw = _kubectl("get", _BALLOONSPOLICY_CRD, policy, "-n", _NRI_BALLOONS_NS,
-                       "-o", "jsonpath={.spec.reservedResources.cpu}")
-        if raw:
-            return _parse_cpuset(raw[7:]) if raw.startswith("cpuset:") else set()
-    return set()
+    raw = _text(((_node_policy(node).get("spec") or {}).get("reservedResources") or {}).get("cpu"))
+    return _parse_cpuset(raw[7:]) if raw.startswith("cpuset:") else set()
+
+
+def _text(value: Any) -> str:
+    return "" if value is None else str(value)
 
 
 def _numa_cpusets(node: str) -> dict[int, set[int]]:
     """Each NUMA node's logical CPUs, as the nri_cpu_balloons role published them from the node's sysfs
     ({} when not published: no CPU layout is assumed)."""
-    raw = _kubectl("get", "node", node, "-o", "jsonpath={.metadata.annotations.nri\\.intel\\.com/numa-cpus}")
-    try:
-        numa = json.loads(raw) if raw else {}
-        return {int(k): _parse_cpuset(v) for k, v in numa.items()} if isinstance(numa, dict) else {}
-    except (ValueError, TypeError, AttributeError):
-        _warn(f"nri-preflight: unreadable {_NUMA_CPUS_ANNOTATION} on '{node}'")
-        return {}
+    if ("numa", node) not in _static:
+        raw = _kubectl("get", "node", node, "-o", "jsonpath={.metadata.annotations.nri\\.intel\\.com/numa-cpus}")
+        try:
+            numa = json.loads(raw) if raw else {}
+            _static[("numa", node)] = ({int(k): _parse_cpuset(v) for k, v in numa.items()}
+                                       if isinstance(numa, dict) else {})
+        except (ValueError, TypeError, AttributeError):
+            _warn(f"nri-preflight: unreadable {_NUMA_CPUS_ANNOTATION} on '{node}'")
+            _static[("numa", node)] = {}
+    return _static[("numa", node)]
 
 
 def _per_numa_free(node: str, in_use: int) -> dict[int, int] | None:
     """Free balloon CPUs per NUMA node: its CPUs minus the reserved set and every balloon's cpuset, as NRI reports
-    them in NodeResourceTopology. Pods whose balloon is not reported yet (`in_use` covers them) are taken from the
-    freest NUMA node, where the allocator would put them. None when the topology is unknown."""
+    them in NodeResourceTopology. CPUs requested by pods NRI has not placed yet (`in_use` covers them) could land on
+    any NUMA node, so they are taken from every one. None when the topology is unknown."""
     numa = _numa_cpusets(node)
     nrt = _kubectl_json("get", _NRT_CRD, node) if numa else None
     if not nrt:
@@ -362,24 +382,14 @@ def _per_numa_free(node: str, in_use: int) -> dict[int, int] | None:
     reserved = _reserved_cpuset(node)
     free = {n: len(cpus - reserved - taken) for n, cpus in numa.items()}
     unreported = max(0, in_use - len(taken))  # taken counts a spilled balloon's reserved CPUs too, as its request does
-    while unreported > 0 and max(free.values()) > 0:
-        n = max(free, key=free.get)
-        step = min(unreported, free[n])
-        free[n] -= step
-        unreported -= step
-    return free
+    return {n: max(0, f - unreported) for n, f in free.items()}
 
 
 def _tp_numa_sets(node: str, balloon: str) -> list[tuple[int, ...]] | None:
     """The NUMA node sets a `balloon` can take, from the node's BalloonsPolicy: a type with components takes one of
     them (componentCreation: balance-balloons) or all of them (otherwise); a leaf type is the NUMA node it is
     close to (preferCloseToDevices: .../node/nodeN). None when the policy does not resolve that far."""
-    policy = None
-    for name in (f"node.{node}", "default"):
-        policy = _kubectl_json("get", _BALLOONSPOLICY_CRD, name, "-n", _NRI_BALLOONS_NS)
-        if policy:
-            break
-    types = {t.get("name"): t for t in ((policy or {}).get("spec") or {}).get("balloonTypes") or []}
+    types = {t.get("name"): t for t in (_node_policy(node).get("spec") or {}).get("balloonTypes") or []}
 
     def sets(name: str, depth: int = 0) -> list[tuple[int, ...]] | None:
         t = types.get(name)
@@ -399,6 +409,18 @@ def _tp_numa_sets(node: str, balloon: str) -> list[tuple[int, ...]] | None:
 
     found = sets(balloon)
     return sorted(set(found)) if found else None
+
+
+def schedulable_nodes(tp: int) -> list[str]:
+    """Schedulable NRI nodes that can host a tp-N replica (read once per run)."""
+    if ("nodes", str(tp)) not in _static:
+        _static[("nodes", str(tp))] = _schedulable_nri_nodes(tp)
+    return _static[("nodes", str(tp))]
+
+
+def node_slots(node: str, cpu: int, tp: int, want: int) -> int:
+    """How many of `want` replicas of `cpu` CPUs NRI can place on `node` now."""
+    return _node_capacity_report(node, cpu, tp, want)[1]
 
 
 def _largest_replica(node: str, tp: int) -> int | None:

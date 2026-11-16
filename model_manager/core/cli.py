@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
 import re
 import shutil
@@ -406,6 +407,7 @@ def deploy(o: Options, target: str) -> None:
             warn(f"{m.name} spec diff failed (rc={rc}) — applying")
     if renderer.inline_chat_template(m):
         _apply_chat_template(m)
+    retired = False
     if action == "apply":
         def render(model: Model) -> str:
             return renderer.manifest(model, catalog, o, annotations, cpu, cli_args)
@@ -414,6 +416,11 @@ def deploy(o: Options, target: str) -> None:
             running = _running_replicas(m)
             info("  Only the replica count or autoscaling changed: the running pods stay, so only the replicas "
                  "beyond them are checked.")
+        elif changed:
+            running = _update_credit(m, annotations, cpu)
+            if running:
+                info(f"  A rolling update replaces the running pods a few at a time: {running} of them are counted "
+                     "as free, the rest are the surge pods it needs room for.")
         else:
             # An upgrade removes the old InferenceService before the new pods start, so its CPUs are free for them.
             running = _upgrade_credit(m, annotations, cpu)
@@ -425,7 +432,7 @@ def deploy(o: Options, target: str) -> None:
         download_weights(m, catalog, cli_args)
         if m.kind == "InferenceService":
             _install_runtime(m)
-        _retire_inference_service(m)
+        retired = _retire_inference_service(m, wait_pods=True)
         k8s.apply(manifest, ssa=True)
         ok(f"Manifest applied: {m.kind}/{m.name} in {m.namespace}")
     routing.register(m)
@@ -437,7 +444,7 @@ def deploy(o: Options, target: str) -> None:
         if not problem:
             on_ready(m)
             return routing.print_endpoints(m)
-        _deploy_failed(m, problem, rollback=action == "apply" and not existed)
+        _deploy_failed(m, problem, rollback=action == "apply" and not existed, retired=retired)
     else:
         time.sleep(3)
         if workload_ready(m) == "True":
@@ -457,14 +464,16 @@ def deploy(o: Options, target: str) -> None:
     routing.print_endpoints(m)
 
 
-def _deploy_failed(m: Model, problem: str, rollback: bool) -> None:
+def _deploy_failed(m: Model, problem: str, rollback: bool, retired: bool = False) -> None:
     """Exit 1 with the reason. A model this deploy created is removed first, so nothing is left Pending."""
     warn(f"{m.name} is not Ready: {problem}")
     if rollback:
         info(f"Rolling back: removing {m.name}, which this deploy created.")
         _remove(m, wait=True, timeout=UNDEPLOY_WAIT)
         k8s.delete("job", f"download-{m.name}", m.namespace, quiet=True)  # its weights stay on the PVC
-        abort(f"Deploy of {m.name} failed and was rolled back: {problem}")
+        gone = (f" The previous InferenceService/{m.name} was removed by this deploy and is not restored: deploy "
+                "again once the problem is fixed.") if retired else ""
+        abort(f"Deploy of {m.name} failed and was rolled back: {problem}.{gone}")
     abort(f"Deploy of {m.name} failed: {problem}. It was already deployed, so it is left as it is; check: "
           f"kubectl get pods -n {m.namespace} -l app.kubernetes.io/name={m.name}")
 
@@ -515,27 +524,43 @@ def _owned_inference_service(m: Model) -> Model | None:
                  routing=_live_routing(m.name, m.namespace))
 
 
+def _fits_in_live_pods(kind: str, m: Model, annotations: dict, cpu: str) -> bool:
+    """Whether a new pod of m fits where a live `kind` pod of the same name is: the same NRI balloon (which follows
+    tp) and no more CPUs or memory."""
+    spec = pick(k8s.get_json(kind, m.name, "-n", m.namespace) or {}, "spec", {})
+    pod = pick(spec, "predictor", {}) if kind == "InferenceService" else spec
+    container = (pick(pick(pod, "model", {}), "resources", {}) if kind == "InferenceService"
+                 else pick((pick(pick(spec, "template", {}), "containers", []) or [{}])[0], "resources", {}))
+    requests, balloon = pick(container, "requests", {}), f"{ANN}/balloon"
+    return (pick(pick(pod, "annotations", {}), balloon) == annotations.get(balloon)
+            and whole_cpus(text(pick(requests, "cpu")), floor=True) >= whole_cpus(cpu)
+            and mem_bytes(text(pick(requests, "memory"))) >= mem_bytes(m.memory))
+
+
 def _upgrade_credit(m: Model, annotations: dict, cpu: str) -> int:
-    """Running pods of the InferenceService m replaces whose place a new replica can take: the same NRI balloon
-    (which follows tp) and at least as many CPUs and as much memory. Any other change gets the full check."""
+    """Running pods of the InferenceService m replaces whose place a new replica can take. Any other change gets
+    the full check."""
     old = _owned_inference_service(m)
-    if old is None:
-        return 0
-    predictor = pick(pick(k8s.get_json("InferenceService", m.name, "-n", m.namespace) or {}, "spec", {}), "predictor", {})
-    requests = pick(pick(pick(predictor, "model", {}), "resources", {}), "requests", {})
-    balloon = f"{ANN}/balloon"
-    if pick(pick(predictor, "annotations", {}), balloon) != annotations.get(balloon) or \
-            whole_cpus(text(pick(requests, "cpu")), floor=True) < whole_cpus(cpu) or \
-            mem_bytes(text(pick(requests, "memory"))) < mem_bytes(m.memory):
+    if old is None or not _fits_in_live_pods("InferenceService", m, annotations, cpu):
         return 0
     return _running_replicas(old, m.node)  # cores freed on another node don't help a pinned deploy
 
 
-def _retire_inference_service(m: Model) -> None:
-    """Remove the InferenceService m replaces, and its routes."""
+def _update_credit(m: Model, annotations: dict, cpu: str) -> int:
+    """Running pods of m a rolling update replaces in place: the Deployment's 25% surge (at least one pod) needs room
+    beside them, the rest is credited, when the new pods fit where the old ones are. Otherwise the full check."""
+    if not _fits_in_live_pods(m.kind, m, annotations, cpu):
+        return 0
+    running = _running_replicas(m, m.node)
+    return max(0, running - max(1, math.ceil(running / 4)))
+
+
+def _retire_inference_service(m: Model, wait_pods: bool = False) -> bool:
+    """Remove the InferenceService m replaces, and its routes; with `wait_pods` (a deploy), until its pods are gone
+    so their CPUs are free for the new ones. Whether there was one."""
     old = _owned_inference_service(m)
     if old is None:
-        return
+        return False
     info(f"Removing the previous InferenceService/{m.name}: it now deploys as an {m.kind}")
     # Delete first: if it fails, the old model keeps its routes and its cores, and the replacement is not applied.
     r = k8s.run("delete", "InferenceService", m.name, "-n", m.namespace, "--ignore-not-found")
@@ -544,11 +569,12 @@ def _retire_inference_service(m: Model) -> None:
     routing.deregister(old)
     selector = f"serving.kserve.io/inferenceservice={m.name}"
     deadline = time.monotonic() + UNDEPLOY_WAIT
-    while k8s.out("get", "pods", "-n", m.namespace, "-l", selector, "-o", "name"):  # their CPUs go to the new pods
+    while wait_pods and k8s.out("get", "pods", "-n", m.namespace, "-l", selector, "-o", "name"):
         if time.monotonic() > deadline:
             abort(f"The previous InferenceService/{m.name}'s pods are still terminating after {UNDEPLOY_WAIT}s; "
                   f"re-run the deploy once they are gone: kubectl get pods -n {m.namespace} -l {selector}")
         time.sleep(3)
+    return True
 
 
 def undeploy(o: Options, target: str) -> None:

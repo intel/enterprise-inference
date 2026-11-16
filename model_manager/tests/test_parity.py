@@ -91,7 +91,7 @@ WAIT_FAILS = [
       "[  OK ]  qwen3-0-6b undeployed (all pods terminated, CPUs released)\n")),
     (r"^\[WARN \]  qwen3-0-6b did not become Ready within 1s\n\[WARN \]    Check progress: .*\n",
      ("[WARN ]  qwen3-0-6b is not Ready: timed out after 1s\n"
-      "[ERROR]  Deploy of qwen3-0-6b failed and was rolled back: timed out after 1s\n")),
+      "[ERROR]  Deploy of qwen3-0-6b failed and was rolled back: timed out after 1s.\n")),
     (r"\Z", ("$ kubectl delete LLMInferenceService qwen3-0-6b -n llm-inference --ignore-not-found\n"
              "$ kubectl delete configmap qwen3-0-6b-chat-template -n llm-inference --ignore-not-found\n"
              "$ kubectl delete aigatewayroute aigw-qwen3-0-6b -n llm-inference --ignore-not-found\n"
@@ -126,12 +126,10 @@ def nri_node(in_use: int) -> list:
     """One Ready NRI worker w1: 2 NUMA nodes, 128 logical CPUs, siblings reserved; in_use balloon CPUs taken."""
     node = {"metadata": {"name": "w1", "labels": {"nri.intel.com/max-tp": "2"}}, "spec": {},
             "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
-    pod = {"metadata": {"annotations": {"balloon.balloons.resource-policy.nri.io/container.main": "vllm-balloon"}},
+    pod = {"metadata": {"annotations": {"balloon.balloons.resource-policy.nri.io/container.main": "model-balloon-tp1"}},
            "spec": {"containers": [{"resources": {"requests": {"cpu": str(in_use)}}}]}, "status": {"phase": "Running"}}
     return [[r"^get nodes -o json$", 0, json.dumps({"items": [node]})],
             [r"^get pods -A --field-selector spec\.nodeName=w1 -o json$", 0, json.dumps({"items": [pod]})],
-            [r"numa-nodes\}$", 0, "2"], [r"physical-cpus\}$", 0, "64"], [r"allocatable\.cpu\}$", 0, "126"],
-            [r"capacity\.cpu\}$", 0, "128"], [r"reservedResources\.cpu\}$", 0, "cpuset:64-127"],
             [r"^get noderesourcetopologies\S* w1 -o json$", 0, json.dumps(_nrt(in_use))],
             [r"numa-cpus\}$", 0, '{"0": "0-31,64-95", "1": "32-63,96-127"}'],
             [r"^get balloonspolicies\.config\.nri node\.w1 -n kube-system -o json$", 0, json.dumps(NRI_POLICY)]]
@@ -142,7 +140,7 @@ def _leaf(name: str, numa: int) -> dict:
 
 
 # The role's types for a 2-socket node with one NUMA node each: tp1 takes one, tp2 takes both.
-NRI_POLICY = {"spec": {"balloonTypes": [
+NRI_POLICY = {"spec": {"reservedResources": {"cpu": "cpuset:64-127"}, "balloonTypes": [
     _leaf("pkg0node0", 0), _leaf("pkg1node1", 1),
     {"name": "model-balloon-tp1", "componentCreation": "balance-balloons",
      "components": [{"balloonType": "pkg0node0"}, {"balloonType": "pkg1node1"}]},
