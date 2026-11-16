@@ -99,22 +99,25 @@
         - auth_type | default('jwt') == 'litellm_vkey'
         - (ai_gateway_provider | default('envoy')) == 'envoy'
 
-    # Enumerate the catalog model names (jq over the YAML->JSON, the same shape
-    # the CLI itself uses). Select only models opted in with `autodeploy: true`
-    # so a full install does not accidentally serve the entire catalog (which
-    # can include large models like an 8B). Models without the flag are left for
-    # the operator to deploy manually with `./model-manager deploy <name>`.
-    # With _mm_only_models, exactly the requested catalog models.
+    # Enumerate the catalog model names with yq alone: the installer already
+    # requires mikefarah yq v4, and jq is not provisioned on the host. Select
+    # only models opted in with `autodeploy: true` so a full install does not
+    # accidentally serve the entire catalog (which can include large models like
+    # an 8B). Models without the flag are left for the operator to deploy
+    # manually with `./model-manager deploy <name>`.
+    # With _mm_only_models, exactly the requested catalog models; the list is
+    # passed through the environment so no name is spliced into the shell.
     - name: Enumerate autodeploy models from the catalog
       shell: |
-        set -o pipefail
         {% if _mm_only_models is defined %}
-        yq -o=json '.' "{{ _mm_catalog }}" | jq -r --argjson only '{{ _mm_only_models | to_json }}' '.models[] | select(.name as $n | $only | index($n)) | .name'
+        yq -r 'env(MM_ONLY_MODELS) as $only | .models[] | select(.name as $n | $only | any_c(. == $n)) | .name' "{{ _mm_catalog }}"
         {% else %}
-        yq -o=json '.' "{{ _mm_catalog }}" | jq -r '.models[] | select(.autodeploy == true) | .name'
+        yq -r '.models[] | select(.autodeploy == true) | .name' "{{ _mm_catalog }}"
         {% endif %}
       args:
         executable: /bin/bash
+      environment:
+        MM_ONLY_MODELS: "{{ _mm_only_models | default([]) | to_json }}"
       register: _mm_model_names
       changed_when: false
 
