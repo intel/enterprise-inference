@@ -328,6 +328,27 @@ def test_litellm_called_directly_in_a_pod(monkeypatch):
     assert seen == {"url": "http://litellm.litellm.svc:4000/model/new", "auth": "Bearer k", "method": "POST"}
 
 
+@pytest.mark.parametrize("category, runtime, provider_model, mode", [
+    ("llm", "vllm", "openai/m", None),
+    ("embed", "vllm", "hosted_vllm/m", "embedding"),
+    ("rerank", "vllm", "hosted_vllm/m", "rerank"),
+    ("embed", "ovms", "openai/m", "embedding"),
+])
+def test_litellm_register_payload(monkeypatch, category, runtime, provider_model, mode):
+    sent = []
+    monkeypatch.setattr(routing, "litellm_enabled", lambda: True)
+    monkeypatch.setattr(routing, "_litellm_base", lambda: "http://litellm")
+    monkeypatch.setattr(routing, "litellm_deregister", lambda name: None)
+    monkeypatch.setattr(routing, "_internal_url", lambda m: "http://backend/v1")
+    monkeypatch.setattr(routing, "_litellm_ids", lambda name, base: ["id"])
+    monkeypatch.setattr(routing, "_litellm", lambda method, url, payload=None: sent.append((url, payload)) or "{}")
+    routing.litellm_register(Model(name="m", namespace="n", category=category, runtime=runtime))
+    url, payload = sent[0]
+    assert url == "http://litellm/model/new"
+    assert payload["litellm_params"]["model"] == provider_model
+    assert payload.get("model_info") == ({"mode": mode} if mode else None)
+
+
 FIXTURE_CATALOG = Path(__file__).resolve().parent / "fixtures" / "models.yaml"
 
 
