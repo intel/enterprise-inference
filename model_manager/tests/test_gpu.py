@@ -294,11 +294,11 @@ def test_own_pods_on_the_stores_node_say_undeploy_not_storage(monkeypatch):
 
 def test_a_store_that_binds_on_first_use_holds_replicas_on_one_node(monkeypatch, capsys):
     runtime = policy.GpuRuntime("model-store")
-    assert preflight(monkeypatch, _labelled(_nodes(8, 8)), pvc=PENDING, binding="WaitForFirstConsumer",
-                     replicas="3", runtime=runtime) == []
-    err = capsys.readouterr().err
-    assert "only 1 of 3 new replicas fit" in err and runtime.download_nodes == ("n0", "n1")
-    assert "every model using it, CPU ones included, must then run on that node" in err
+    errors = preflight(monkeypatch, _labelled(_nodes(8, 8)), pvc=PENDING, binding="WaitForFirstConsumer",
+                       replicas="2", runtime=runtime)
+    assert errors[0].startswith("Only 1 of 2 new replicas fit on the free nvidia.com/gpu of one node")
+    assert runtime.download_nodes == ("n0", "n1")  # pinned even so, for MM_PREFLIGHT=warn
+    assert "every model using it, CPU ones included, must then run on that node" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("init, sidecars, app, held", [
@@ -322,10 +322,10 @@ def test_a_replica_only_change_needs_no_room_for_the_running_pods(monkeypatch, n
     assert (preflight(monkeypatch, nodes, pods, rolls=False, replicas=replicas) == []) is fits
 
 
-def test_a_pending_replica_still_needs_room(monkeypatch, capsys):
+def test_a_pending_replica_still_needs_room(monkeypatch):
     # One replica runs on n0, one is Pending: a scale-up to 3 needs room for two pods, and only one fits on n1.
-    assert preflight(monkeypatch, _nodes(8, 8), _pods(("n0", "m", 8), ("", "m", 8)), rolls=False, replicas="3") == []
-    assert "only 1 of 2 new replicas fit" in capsys.readouterr().err
+    errors = preflight(monkeypatch, _nodes(8, 8), _pods(("n0", "m", 8), ("", "m", 8)), rolls=False, replicas="3")
+    assert errors[0].startswith("Only 1 of 2 new replicas fit")
 
 
 def test_a_terminating_pod_holds_gpus_but_is_not_a_replica(monkeypatch):
@@ -417,12 +417,10 @@ def test_gpu_preflight_counts_only_the_pinned_node(monkeypatch):
     assert preflight(monkeypatch, _nodes(None, 8), node="n1") == []
 
 
-def test_gpu_preflight_warns_when_not_every_replica_fits(monkeypatch, capsys):
-    assert preflight(monkeypatch, _nodes(8), replicas="2") == []
-    assert "only 1 of 2 new replicas fit" in capsys.readouterr().err
+def test_gpu_preflight_refuses_when_not_every_replica_fits(monkeypatch):
+    assert preflight(monkeypatch, _nodes(8), replicas="2")[0].startswith("Only 1 of 2 new replicas fit")
     # A scale-up only needs room for the new replica; the running one keeps its GPUs.
     assert preflight(monkeypatch, _nodes(8, 8), _pods(("n0", "m", 8)), replicas="2") == []
-    assert "replicas fit" not in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("have, want, refused", [("gpu.intel.com/xe", "amd.com/gpu", True),

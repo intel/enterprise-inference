@@ -259,17 +259,18 @@ class GpuRuntime(BestEffort):
         if not fit:
             return [f"No node has {need} free {resource}; the most on one node is {max(max(free.values()), 0)}. A "
                     "pod's GPUs cannot span nodes: lower --gpus, or free GPUs on a node."]
-        if fit < new:
-            warn(f"GPU: only {fit} of {new} new replicas fit on the free {resource} — the rest will stay Pending.")
         if unbound:
             self.download_nodes = tuple(name for name, f in free.items() if max(f, 0) // need >= min(new, fit))
             warn(f"The model store {self.pvc} binds on first use, so it is created on one of {', '.join(self.download_nodes)}"
                  " where the download runs. On node-local storage, every model using it, CPU ones included, must then "
                  "run on that node.")
+        if fit < new:
+            where = " of one node, where the model store that binds on first use is created" if unbound else ""
+            return [f"Only {fit} of {new} new replicas fit on the free {resource}{where}; the rest would stay Pending."]
         return []
 
     def failure(self, m: Model, tp: int) -> str:
-        return (f"GPU pre-flight failed: cannot place {m.name} ({m.gpus} x {m.accel_resource}) on any node. Override "
+        return (f"GPU pre-flight failed: cannot place {m.name} ({m.gpus} x {m.accel_resource}). Override "
                 "with MM_PREFLIGHT=warn (proceed anyway) or MM_SKIP_PREFLIGHT=1 (skip check).")
 
 

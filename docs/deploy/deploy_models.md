@@ -134,9 +134,9 @@ Enterprise AI Solutions sets it automatically when
 on a standard CPU install it is empty and GPU models cannot be deployed by
 accident.
 
-A deploy then checks the cluster itself: a Ready node, not cordoned or tainted
-against the pod, must have at least `gpus` free `nvidia.com/gpu`, counting what
-running pods already hold (a pod's GPUs cannot span nodes). Otherwise it stops
+A deploy then checks the cluster itself: each new replica needs a Ready node, not
+cordoned or tainted against the pod, with at least `gpus` free `nvidia.com/gpu`,
+counting what running pods already hold (a pod's GPUs cannot span nodes). Otherwise it stops
 before downloading weights, for example when the profile declares a GPU node
 that has not joined the cluster or whose device plugin is not ready yet.
 With `--node`, which pins the pod, only that node counts.
@@ -156,8 +156,8 @@ The model store must be mountable on a GPU node. On node-local storage
 deploy: GPU models need shared (ReadWriteMany) storage, or the store on a GPU
 node. A store that binds on first use (and is not ReadWriteMany) is created
 where the download Job runs, so the pre-flight pins the Job to the GPU nodes
-that fit (not when it is skipped, or when `MM_PREFLIGHT=warn` proceeds past a
-refusal), and warns: on node-local storage every model,
+that fit (not when it is skipped, or when `MM_PREFLIGHT=warn` proceeds with no
+GPU node that fits), and warns: on node-local storage every model,
 CPU ones included, must then run on that node.
 GPU replicas on more than one node need a ReadWriteMany store: `storage_backend`
 `nfs`, `ceph` (CephFS) or `netapp-trident` (NAS drivers), or `custom` unless
