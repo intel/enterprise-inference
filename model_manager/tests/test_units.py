@@ -1077,7 +1077,7 @@ def test_changed_spec_runs_the_gate_then_applies(deploy_env, monkeypatch, scalin
     steps, asked = [], []
     if forced:
         monkeypatch.setenv("MM_FORCE_REDEPLOY", "1")
-    monkeypatch.setattr(k8s, "succeeds", lambda *a: True)  # deployed; the diff (rc 1) reports a change
+    monkeypatch.setattr(k8s, "exists", lambda *a: True)  # deployed; the diff (rc 1) reports a change
     monkeypatch.setattr(cli, "_only_scaling_changed", lambda m, render: asked.append(m.name) or scaling_only)
     monkeypatch.setattr(cli, "_running_replicas", lambda m: 2)
     monkeypatch.setattr(cli, "preflight_gate", lambda *a, running=0, amx=False: steps.append(f"gate {running}"))
@@ -1090,7 +1090,7 @@ def test_changed_spec_runs_the_gate_then_applies(deploy_env, monkeypatch, scalin
 def test_upgrade_credit_reaches_the_gate(deploy_env, monkeypatch):
     # Whatever the policy: the old InferenceService's pods go before the new ones start.
     steps = []
-    monkeypatch.setattr(k8s, "succeeds", lambda *a: False)
+    monkeypatch.setattr(k8s, "exists", lambda *a: False)
     monkeypatch.setattr(cli, "_upgrade_credit", lambda m, annotations, cpu: 1)
     monkeypatch.setattr(cli, "preflight_gate", lambda *a, running=0, amx=False: steps.append(f"gate {running}"))
     _quiet_deploy(monkeypatch, steps)
@@ -1102,7 +1102,7 @@ def test_upgrade_credit_reaches_the_gate(deploy_env, monkeypatch):
 @pytest.mark.parametrize("existed, rolled_back", [(False, True), (True, False)])
 def test_failed_wait_exits_1_and_rolls_back_only_a_new_model(deploy_env, monkeypatch, capsys, existed, rolled_back):
     steps = []
-    monkeypatch.setattr(k8s, "succeeds", lambda *a: existed)
+    monkeypatch.setattr(k8s, "exists", lambda *a: existed)
     monkeypatch.setattr(cli, "_only_scaling_changed", lambda m, render: False)
     monkeypatch.setattr(cli, "preflight_gate", lambda *a, **k: None)
     _quiet_deploy(monkeypatch, steps, ready="pod p cannot be scheduled: 0/2 nodes are available")
@@ -1258,6 +1258,14 @@ def test_stuck_waits_out_the_grace(monkeypatch):
     assert watch.stuck([pod]) == ""
 
 
+def test_stuck_ignores_a_terminating_pod():
+    # An update that fixes a crash loop: the old pod keeps its state while it goes; its replacement decides.
+    from core import stuck
+    pod = _waiting("CrashLoopBackOff", restarts=5)
+    pod["metadata"]["deletionTimestamp"] = "2026-11-16T05:00:00Z"
+    assert stuck.blocker(pod)[1] and stuck.Watch().stuck([pod]) == ""
+
+
 @pytest.mark.parametrize("job, pods, want", [
     ({"status": {"succeeded": 1}}, [], ""),
     ({"status": {"conditions": [{"type": "Failed", "status": "True"}]}}, [], "Failed"),
@@ -1280,24 +1288,37 @@ def test_download_wait_times_out(monkeypatch):
 
 # ── upgrade: the old InferenceService's pods go before the apply ──
 
-def test_retire_waits_for_the_old_pods(monkeypatch):
-    old = Model(name="m", namespace="ns", kind="InferenceService")
-    monkeypatch.setattr(cli, "_owned_inference_service", lambda m: old)
+def _retire_env(monkeypatch, pod_lists):
+    """An owned InferenceService whose pod list answers from pod_lists: (rc, stdout), the last one repeats."""
+    monkeypatch.setattr(cli, "_owned_inference_service", lambda m: Model(name="m", namespace="ns", kind="InferenceService"))
     monkeypatch.setattr(routing, "deregister", lambda m: None)
-    monkeypatch.setattr(k8s, "run", lambda *a, stdin=None: subprocess.CompletedProcess(a, 0, "", ""))
-    left = ["pod/a", "pod/a", ""]
-    monkeypatch.setattr(k8s, "out", lambda *a: left.pop(0))
     monkeypatch.setattr(cli.time, "sleep", lambda _: None)
+
+    def run(*a, stdin=None):
+        if a[:2] != ("get", "pods"):
+            return subprocess.CompletedProcess(a, 0, "", "")
+        rc, out = pod_lists.pop(0) if len(pod_lists) > 1 else pod_lists[0]
+        return subprocess.CompletedProcess(a, rc, out, "Unable to connect to the server" if rc else "")
+    monkeypatch.setattr(k8s, "run", run)
+
+
+def test_retire_waits_for_the_old_pods(monkeypatch):
+    lists = [(0, "pod/a"), (0, "pod/a"), (0, "")]
+    _retire_env(monkeypatch, lists)
     assert cli._retire_inference_service(Model(name="m", namespace="ns", kind="LLMInferenceService"), wait_pods=True)
-    assert left == []
+    assert lists == [(0, "")]
+
+
+def test_retire_aborts_when_the_pod_list_fails(monkeypatch, capsys):
+    # A failed list is not "the pods are gone": their CPUs may still be held.
+    _retire_env(monkeypatch, [(1, "")])
+    with pytest.raises(SystemExit):
+        cli._retire_inference_service(Model(name="m", namespace="ns", kind="LLMInferenceService"), wait_pods=True)
+    assert "Could not list the previous InferenceService/m's pods" in capsys.readouterr().err
 
 
 def test_retire_aborts_when_the_old_pods_stay(monkeypatch):
-    old = Model(name="m", namespace="ns", kind="InferenceService")
-    monkeypatch.setattr(cli, "_owned_inference_service", lambda m: old)
-    monkeypatch.setattr(routing, "deregister", lambda m: None)
-    monkeypatch.setattr(k8s, "run", lambda *a, stdin=None: subprocess.CompletedProcess(a, 0, "", ""))
-    monkeypatch.setattr(k8s, "out", lambda *a: "pod/a")
+    _retire_env(monkeypatch, [(0, "pod/a")])
     clock = iter(range(0, 10**6, 100))
     monkeypatch.setattr(cli.time, "monotonic", lambda: next(clock))
     monkeypatch.setattr(cli.time, "sleep", lambda _: None)
@@ -1307,10 +1328,7 @@ def test_retire_aborts_when_the_old_pods_stay(monkeypatch):
 
 def test_undeploy_does_not_wait_for_the_old_pods(monkeypatch):
     # Only a deploy needs the old pods' CPUs; an undeploy goes on to remove the model.
-    monkeypatch.setattr(cli, "_owned_inference_service", lambda m: Model(name="m", namespace="ns", kind="InferenceService"))
-    monkeypatch.setattr(routing, "deregister", lambda m: None)
-    monkeypatch.setattr(k8s, "run", lambda *a, stdin=None: subprocess.CompletedProcess(a, 0, "", ""))
-    monkeypatch.setattr(k8s, "out", lambda *a: "pod/still-terminating")
+    _retire_env(monkeypatch, [(0, "pod/still-terminating")])
     assert cli._retire_inference_service(Model(name="m", namespace="ns", kind="LLMInferenceService"))
 
 
@@ -1369,6 +1387,17 @@ def test_per_numa_free_counts_a_spilled_balloon(monkeypatch):
     # A balloon on reserved siblings: its request is fully accounted, the reserved CPUs were never free.
     _nri_cluster(monkeypatch, ["2-3,10-11"])
     assert nri_policy._per_numa_free("w1", in_use=4) == {0: 2, 1: 4}
+
+
+def test_per_numa_free_takes_the_reserved_balloon_where_it_grew(monkeypatch):
+    # The reserved balloon reported outside reservedResources: those CPUs are not free.
+    _nri_cluster(monkeypatch, ["0"], reserved="cpuset:8-15")
+    nrt = json.loads(nri_policy._kubectl("get", nri_policy._NRT_CRD, "w1"))
+    nrt["zones"][-1]["attributes"][0]["value"] = "4-5"
+    kubectl = nri_policy._kubectl
+    monkeypatch.setattr(nri_policy, "_kubectl", lambda *a: json.dumps(nrt) if a[:2] == ("get", nri_policy._NRT_CRD)
+                        else kubectl(*a))
+    assert nri_policy._per_numa_free("w1", in_use=1) == {0: 3, 1: 2}  # in_use is the model balloon's own CPU
 
 
 def test_per_numa_free_with_interleaved_numbering(monkeypatch):
@@ -1475,6 +1504,34 @@ def test_update_credit_keeps_room_for_the_surge(monkeypatch, running, live, cred
     assert cli._update_credit(m, {"cpu-policy.model-manager.io/balloon": "model-balloon-tp1"}, "8") == credit
 
 
+def test_update_credit_reads_v1alpha1_annotations_from_the_object(monkeypatch):
+    # platform.adapt_llmisvc moves v1alpha1 pod annotations to metadata.annotations.
+    live = _live("LLMInferenceService")
+    live["metadata"] = {"annotations": live["spec"].pop("annotations")}
+    monkeypatch.setattr(k8s, "get_json", lambda *a: live)
+    monkeypatch.setattr(cli, "_running_replicas", lambda m, node="": 2)
+    m = Model(name="m", namespace="ns", kind="LLMInferenceService", cpu="8", memory="16Gi")
+    assert cli._update_credit(m, {"cpu-policy.model-manager.io/balloon": "model-balloon-tp1"}, "8") == 1
+
+
+@pytest.mark.parametrize("rc, stderr, want", [
+    (0, "", True),
+    (1, 'Error from server (NotFound): llminferenceservices "m" not found', False),
+])
+def test_exists_tells_not_found_from_found(monkeypatch, rc, stderr, want):
+    monkeypatch.setattr(k8s, "run", lambda *a, stdin=None: subprocess.CompletedProcess(a, rc, "", stderr))
+    assert k8s.exists("LLMInferenceService", "m", "-n", "ns") is want
+
+
+def test_exists_aborts_when_the_lookup_fails(monkeypatch, capsys):
+    # A timeout is not absence: it would make a failed deploy roll back (delete) an existing model.
+    monkeypatch.setattr(k8s, "run", lambda *a, stdin=None: subprocess.CompletedProcess(
+        a, 1, "", "Unable to connect to the server: net/http: TLS handshake timeout"))
+    with pytest.raises(SystemExit):
+        k8s.exists("LLMInferenceService", "m", "-n", "ns")
+    assert "Could not look up LLMInferenceService m" in capsys.readouterr().err
+
+
 def test_upgrade_credit_reads_the_inference_service_shape(monkeypatch):
     monkeypatch.setattr(cli, "_owned_inference_service", lambda m: Model(name="m", namespace="ns", kind="InferenceService"))
     monkeypatch.setattr(k8s, "get_json", lambda *a: _live("InferenceService"))
@@ -1507,6 +1564,29 @@ def _container(cpu, memory, restart=None):
 ])
 def test_pod_requests_follow_the_scheduler(spec, want):
     assert policy.pod_requests({"spec": spec}) == want
+
+
+@pytest.mark.parametrize("spec", [{"unschedulable": True}, {"taints": [{"key": "k", "effect": "NoExecute"}]}])
+def test_request_check_skips_cordoned_and_no_execute_nodes(monkeypatch, spec):
+    nodes = {"items": [{**_node("a", "96", "64Gi"), "spec": spec}]}
+    monkeypatch.setattr(k8s, "get_json", lambda *a: {"items": []} if a[0] == "pods" else nodes)
+    assert policy._request_errors(Model(name="m", namespace="n", memory="16Gi", replicas="1"), "8", False) != []
+
+
+def test_nri_preflight_warn_reports_and_passes(monkeypatch, capsys):
+    _nri_cluster(monkeypatch, ["0"])
+    monkeypatch.setattr(nri_policy, "_nri_balloons_installed", lambda: False)
+    monkeypatch.setenv("MM_NRI_PREFLIGHT", "warn")
+    result = nri_policy.preflight(8, 1, node="w1")
+    assert result["ok"] and result["errors"] and "MM_NRI_PREFLIGHT=warn" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("env", [{"MM_NRI_SKIP_PREFLIGHT": "1"}, {"MM_NRI_PREFLIGHT": "off"}])
+def test_nri_skip_settings_also_skip_the_nri_slot_limit(monkeypatch, env):
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(nri_policy, "schedulable_nodes", lambda tp: pytest.fail("NRI read despite the skip"))
+    assert policy.NriBalloons().node_slots(Model(name="m", namespace="n", cpu="8"), 1, "w1") is None
 
 
 def test_a_node_must_fit_both_the_cpu_policy_and_the_requests(monkeypatch):

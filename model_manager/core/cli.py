@@ -391,7 +391,7 @@ def deploy(o: Options, target: str) -> None:
 
     # Unchanged spec: skip pre-flight and apply (the running pods would count against their own cores).
     action, changed = "apply", False
-    existed = k8s.succeeds("get", m.kind, m.name, "-n", m.namespace)
+    existed = k8s.exists(m.kind, m.name, "-n", m.namespace)  # decides the rollback: never guess on a failed get
     if existed and not truthy(os.environ.get("MM_FORCE_REDEPLOY", "")):
         rc = k8s.run("diff", *k8s.SSA, "-f", "-", stdin=manifest).returncode
         if rc == 0:
@@ -527,12 +527,16 @@ def _owned_inference_service(m: Model) -> Model | None:
 def _fits_in_live_pods(kind: str, m: Model, annotations: dict, cpu: str) -> bool:
     """Whether a new pod of m fits where a live `kind` pod of the same name is: the same NRI balloon (which follows
     tp) and no more CPUs or memory."""
-    spec = pick(k8s.get_json(kind, m.name, "-n", m.namespace) or {}, "spec", {})
+    live = k8s.get_json(kind, m.name, "-n", m.namespace) or {}
+    spec = pick(live, "spec", {})
     pod = pick(spec, "predictor", {}) if kind == "InferenceService" else spec
+    # v1alpha1 LLMInferenceServices carry the pod annotations on the object (platform.adapt_llmisvc).
+    pod_annotations = pick(pod, "annotations", {}) or (
+        pick(pick(live, "metadata", {}), "annotations", {}) if kind == "LLMInferenceService" else {})
     container = (pick(pick(pod, "model", {}), "resources", {}) if kind == "InferenceService"
                  else pick((pick(pick(spec, "template", {}), "containers", []) or [{}])[0], "resources", {}))
     requests, balloon = pick(container, "requests", {}), f"{ANN}/balloon"
-    return (pick(pick(pod, "annotations", {}), balloon) == annotations.get(balloon)
+    return (pick(pod_annotations, balloon) == annotations.get(balloon)
             and whole_cpus(text(pick(requests, "cpu")), floor=True) >= whole_cpus(cpu)
             and mem_bytes(text(pick(requests, "memory"))) >= mem_bytes(m.memory))
 
@@ -569,7 +573,12 @@ def _retire_inference_service(m: Model, wait_pods: bool = False) -> bool:
     routing.deregister(old)
     selector = f"serving.kserve.io/inferenceservice={m.name}"
     deadline = time.monotonic() + UNDEPLOY_WAIT
-    while wait_pods and k8s.out("get", "pods", "-n", m.namespace, "-l", selector, "-o", "name"):
+    while wait_pods:
+        r = k8s.run("get", "pods", "-n", m.namespace, "-l", selector, "-o", "name")
+        if r.returncode:
+            abort(f"Could not list the previous InferenceService/{m.name}'s pods: {r.stderr.strip()}")
+        if not r.stdout.strip():
+            break
         if time.monotonic() > deadline:
             abort(f"The previous InferenceService/{m.name}'s pods are still terminating after {UNDEPLOY_WAIT}s; "
                   f"re-run the deploy once they are gone: kubectl get pods -n {m.namespace} -l {selector}")

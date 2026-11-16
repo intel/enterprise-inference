@@ -34,7 +34,7 @@ DOWNLOAD = [[r"get pvc model-store .*phase", 0, "Bound"],
 POOL = [[r"get inferencepool", 0, ""],
         [r"refs\[0\]\.name", 0, "ai-gateway"], [r"refs\[0\]\.namespace", 0, "llm-inference"]]
 QWEN_READY = [[r"get LLMInferenceService qwen3-0-6b -n llm-inference -o json$", 0, _ready("MainWorkloadReady")]]
-QWEN_EXISTS = [[r"get LLMInferenceService qwen3-0-6b -n llm-inference$", 0, ""]]
+QWEN_EXISTS = [[r"get LLMInferenceService qwen3-0-6b -n llm-inference( -o name)?$", 0, ""]]
 STATIC = [[r"get nodes -l", 0, "w1"],
           [r"configz", 0, json.dumps({"kubeletconfig": {"cpuManagerPolicy": "static",
                                                          "cpuManagerPolicyOptions": {"full-pcpus-only": "true"}}})]]

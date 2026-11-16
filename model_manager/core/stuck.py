@@ -42,6 +42,8 @@ class Watch:
     def stuck(self, pods: list[dict]) -> str:
         now, seen = time.monotonic(), {}
         for pod in pods:
+            if (pod.get("metadata") or {}).get("deletionTimestamp"):
+                continue  # an old pod on its way out: its replacement decides
             reason, final = blocker(pod)
             if not reason:
                 continue

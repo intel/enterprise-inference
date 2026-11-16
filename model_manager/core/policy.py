@@ -100,7 +100,8 @@ class NriBalloons(BestEffort):
         return [] if ok else errors
 
     def node_slots(self, m: Model, tp: int, node: str) -> int | None:
-        if not truthy(os.environ.get("MM_NRI_ENABLED", "true")) or not is_uint(m.cpu):
+        if not truthy(os.environ.get("MM_NRI_ENABLED", "true")) or not is_uint(m.cpu) or \
+                nri_policy.preflight_disabled():
             return None
         with contextlib.redirect_stderr(io.StringIO()):
             if node not in nri_policy.schedulable_nodes(tp):
@@ -345,8 +346,9 @@ def _request_errors(m: Model, cpu: str, amx: bool, policy: BestEffort | None = N
     slots, free = 0, []
     for n in [nodes] if m.node else nodes.get("items", []):
         name, labels = n["metadata"]["name"], pick(n["metadata"], "labels", {})
-        if any(t.get("effect") == "NoSchedule" for t in pick(n.get("spec"), "taints", [])) or \
-                (amx and labels.get(AMX_LABEL) != "true"):
+        node_spec = pick(n, "spec", {})
+        if pick(node_spec, "unschedulable") or (amx and labels.get(AMX_LABEL) != "true") or \
+                any(t.get("effect") in ("NoSchedule", "NoExecute") for t in pick(node_spec, "taints", [])):
             continue
         alloc, (cpu_used, mem_used) = pick(pick(n, "status", {}), "allocatable", {}), used.get(name, [0, 0])
         free_cpu = _cpu_millis(text(pick(alloc, "cpu", "0"))) - cpu_used

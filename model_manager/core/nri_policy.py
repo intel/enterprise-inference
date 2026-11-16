@@ -366,6 +366,13 @@ def _numa_cpusets(node: str) -> dict[int, set[int]]:
     return _static[("numa", node)]
 
 
+def preflight_disabled() -> bool:
+    """MM_NRI_SKIP_PREFLIGHT=1 or MM_NRI_PREFLIGHT=off."""
+    mode = os.environ.get("MM_NRI_PREFLIGHT", "").strip().lower()
+    return os.environ.get("MM_NRI_SKIP_PREFLIGHT", "").strip() in ("1", "true", "yes") or \
+        mode in ("off", "0", "false", "no")
+
+
 def _per_numa_free(node: str, in_use: int) -> dict[int, int] | None:
     """Free balloon CPUs per NUMA node: its CPUs minus the reserved set and every balloon's cpuset, as NRI reports
     them in NodeResourceTopology. CPUs requested by pods NRI has not placed yet (`in_use` covers them) could land on
@@ -374,14 +381,18 @@ def _per_numa_free(node: str, in_use: int) -> dict[int, int] | None:
     nrt = _kubectl_json("get", _NRT_CRD, node) if numa else None
     if not nrt:
         return None
-    taken: set[int] = set()
+    taken: set[int] = set()  # every balloon's CPUs, reserved and default too: they may grow past reservedResources
+    placed: set[int] = set()  # the model balloons', which `in_use` counts
     for zone in nrt.get("zones") or []:
-        if zone.get("type") == "balloon" and not zone.get("name", "").startswith(("reserved[", "default[")):
+        if zone.get("type") == "balloon":
             attrs = {a.get("name"): a.get("value", "") for a in zone.get("attributes") or []}
-            taken |= _parse_cpuset(attrs.get("cpuset", ""))
+            cpus = _parse_cpuset(attrs.get("cpuset", ""))
+            taken |= cpus
+            if not zone.get("name", "").startswith(("reserved[", "default[")):
+                placed |= cpus
     reserved = _reserved_cpuset(node)
     free = {n: len(cpus - reserved - taken) for n, cpus in numa.items()}
-    unreported = max(0, in_use - len(taken))  # taken counts a spilled balloon's reserved CPUs too, as its request does
+    unreported = max(0, in_use - len(placed))  # placed counts a spilled balloon's reserved CPUs too, as its request does
     return {n: max(0, f - unreported) for n, f in free.items()}
 
 
@@ -495,8 +506,7 @@ def preflight(cpu: int, tp: int, node: str = "", replicas: int = 1) -> dict:
     """
     replicas = max(1, int(replicas or 1))
     mode = os.environ.get("MM_NRI_PREFLIGHT", "").strip().lower()
-    skip = os.environ.get("MM_NRI_SKIP_PREFLIGHT", "").strip()
-    if skip in ("1", "true", "yes") or mode in ("off", "0", "false", "no"):
+    if preflight_disabled():
         return {"ok": True, "errors": [], "notes": ["preflight disabled"], "skipped": True}
 
     errors: list[str] = []
