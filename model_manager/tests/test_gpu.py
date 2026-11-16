@@ -20,10 +20,11 @@ import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from core import cli, config, download, k8s, policy, renderer, routing  # noqa: E402
+from core import cli, config, download, k8s, policy, renderer  # noqa: E402
 from core.config import Catalog, Model  # noqa: E402
 from core.renderer import gpu_vendor  # noqa: E402
 from test_parity import BE, DOWNLOAD, GOLDEN, MM, NO_LITELLM_URL, NRI, POOL, _ready, case, run  # noqa: E402
+from test_units import _quiet_deploy  # noqa: E402
 
 GPU = {"MM_ACCEL_RESOURCE": "nvidia.com/gpu"}
 # GPU pods are Burstable since the B300 run: no CPU limit, so kubelet's static CPU manager never pins them.
@@ -52,7 +53,7 @@ def _nodes(*gpus, unschedulable=(), not_ready=(), taints=None):
     """`kubectl get nodes -o json`: node n<i> with that many allocatable GPUs (None: no GPUs)."""
     return {"items": [{"metadata": {"name": f"n{i}"},
                        "spec": {"unschedulable": i in unschedulable, "taints": (taints or {}).get(i, [])},
-                       "status": {"allocatable": {"cpu": "64", **({} if g is None else {"nvidia.com/gpu": str(g)})},
+                       "status": {"allocatable": {"cpu": "64", "memory": "1Ti", **({} if g is None else {"nvidia.com/gpu": str(g)})},
                                   "conditions": [{"type": "Ready", "status": "False" if i in not_ready else "True"}]}}
                       for i, g in enumerate(gpus)]}
 
@@ -64,6 +65,14 @@ def _pods(*held):
                       for node, name, n in held]}
 
 
+# --node is a required affinity since #74 (it was preferred, with a control-plane preference); the GPU vendor stays
+# preferred.
+PIN_NODE_GPU = (r"^        preferredDuringSchedulingIgnoredDuringExecution:\n          - weight: 100\n            preference:\n"
+                r"              matchExpressions:\n                - key: kubernetes\.io/hostname\n                  operator: In\n"
+                r"                  values:\n                    - w1\n          - weight: 50\n[\s\S]*?operator: DoesNotExist\n",
+                "        requiredDuringSchedulingIgnoredDuringExecution:\n          nodeSelectorTerms:\n            - matchExpressions:\n"
+                "                - key: kubernetes.io/hostname\n                  operator: In\n                  values:\n"
+                '                    - "w1"\n        preferredDuringSchedulingIgnoredDuringExecution:\n')
 GPU_NODES = [[r"get nodes -o json$", 0, json.dumps(_nodes(8))],
              [r"get pods -A --field-selector \S+ -o json$", 0, json.dumps(_pods())]]
 
@@ -73,7 +82,7 @@ GPU_CASES = [
     case("gpu-dry-run-ungated", "deploy", "qwen3-0-6b-cuda", "--dry-run",
          deviations=[BURSTABLE_GPU, UNGATED_VENDOR_PREFERENCE]),
     case("gpu-count-node", "deploy", "qwen3-0-6b-cuda", "--gpus", "2", "--node", "w1", "--dry-run", env={**GPU, **NRI},
-         deviations=[BURSTABLE_GPU]),
+         deviations=[BURSTABLE_GPU, PIN_NODE_GPU]),
     case("gpu-explicit-tp", "deploy", "llama-3-1-70b-instruct-cuda", "--tp", "4", "--dry-run", env=GPU,
          deviations=[BURSTABLE_GPU, *TP_SETS_GPUS]),
     case("gpu-flag-ignored-on-cpu", "deploy", "qwen3-0-6b", "--gpus", "2", "--dry-run", env=BE),
@@ -331,20 +340,16 @@ def test_gpu_pods_roll_unless_only_the_scaling_changed(monkeypatch, scaling_only
     for k, v in {**GPU, "MM_PLATFORM": "kubernetes", "MM_LLMISVC_API_VERSION": "v1alpha2",
                  "MM_CONFIG": str(cli.MM_DIR / "models.yaml")}.items():
         monkeypatch.setenv(k, v)
-    seen = []
-    monkeypatch.setattr(k8s, "succeeds", lambda *a: True)
+    seen, steps = [], []
+    monkeypatch.setattr(k8s, "exists", lambda *a: True)
     monkeypatch.setattr(k8s, "run", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", ""))  # the diff: changed
     monkeypatch.setattr(cli, "_only_scaling_changed", lambda m, render: scaling_only)
-    monkeypatch.setattr(cli, "preflight_gate", lambda gate, *a, running=0: seen.append(gate.rolls))
-    monkeypatch.setattr(k8s, "ensure_storage", lambda *a: None)
-    monkeypatch.setattr(cli, "download_weights", lambda *a: None)
-    monkeypatch.setattr(cli, "_retire_inference_service", lambda m: None)
-    monkeypatch.setattr(k8s, "apply", lambda manifest, ssa: None)
-    monkeypatch.setattr(routing, "register", lambda m: None)
-    monkeypatch.setattr(routing, "print_endpoints", lambda m: None)
-    monkeypatch.setattr(cli, "_wait_ready", lambda m, t: False)
+    monkeypatch.setattr(cli, "_running_replicas", lambda m, node="": 1)
+    monkeypatch.setattr(cli, "_update_credit", lambda m, annotations, cpu: 0)
+    monkeypatch.setattr(cli, "preflight_gate", lambda gate, *a, running=0, amx=False: seen.append((gate.rolls, amx)))
+    _quiet_deploy(monkeypatch, steps)
     cli.deploy(cli.parse_args(["deploy", "qwen3-0-6b-cuda", "--replicas", "2", "--wait"]), "qwen3-0-6b-cuda")
-    assert seen == [rolls]
+    assert seen == [(rolls, False)]  # and a GPU model is never held to the catalog's AMX requirement
 
 
 def test_node_matches_required_terms():
@@ -394,6 +399,8 @@ def test_the_rendered_download_job_carries_the_pin_and_the_toleration(monkeypatc
     monkeypatch.setattr(k8s, "apply", lambda manifest, **kw: applied.append(manifest))
     monkeypatch.setattr(k8s, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""))
     monkeypatch.setattr(k8s, "out", lambda *a, **k: "")
+    monkeypatch.setattr(k8s, "get_json", lambda *a: {"status": {"succeeded": 1}})
+    monkeypatch.setattr(download.time, "sleep", lambda _: None)
     monkeypatch.setattr(download, "_curl_ok", lambda *a: True)
     monkeypatch.setattr(download, "hf_model_info", lambda *a: {})
     catalog = Catalog.load()
@@ -404,8 +411,10 @@ def test_the_rendered_download_job_carries_the_pin_and_the_toleration(monkeypatc
     assert spec["tolerations"] == [{"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}]
 
 
-def test_gpu_preflight_ignores_the_preferred_node(monkeypatch):
-    assert preflight(monkeypatch, _nodes(None, 8), node="n0") == []
+def test_gpu_preflight_counts_only_the_pinned_node(monkeypatch):
+    # --node is a required affinity: the GPUs on other nodes do not help.
+    assert preflight(monkeypatch, _nodes(None, 8), node="n0")[0].startswith("Node n0 (--node)")
+    assert preflight(monkeypatch, _nodes(None, 8), node="n1") == []
 
 
 def test_gpu_preflight_warns_when_not_every_replica_fits(monkeypatch, capsys):
@@ -436,7 +445,16 @@ def test_declared_gpus_the_cluster_lacks_stop_the_deploy(monkeypatch):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(k8s, "get_json", lambda *a: _nodes(None, None) if a == ("nodes",) else _pods())
     with pytest.raises(SystemExit):
-        policy.preflight_gate(policy.GpuRuntime("model-store"), Model(**GPU_MODEL, gpus="1"), 1)
+        policy.preflight_gate(policy.GpuRuntime("model-store"), Model(**GPU_MODEL, gpus="1"), 1, "8")
+
+
+def test_the_request_check_counts_gpu_nodes_with_their_taint_and_no_cpu_node(monkeypatch):
+    nodes = _nodes(None, 8, taints={1: [{"key": "nvidia.com/gpu", "effect": "NoSchedule"}]})
+    busy = {"items": [{"spec": {"nodeName": "n1", "containers": [{"resources": {"requests": {"cpu": "60"}}}]}}]}
+    m = Model(**{**GPU_MODEL, "gpus": "1", "memory": "16Gi"})
+    for pods, fits in (({"items": []}, True), (busy, False)):  # n1's taint is tolerated; n0, a CPU node, never counts
+        monkeypatch.setattr(k8s, "get_json", lambda *a, pods=pods: nodes if a == ("nodes",) else pods)
+        assert (policy._request_errors(m, "8", False) == []) is fits
 
 
 def test_gpu_preflight_skips_when_the_cluster_cannot_be_read(monkeypatch):

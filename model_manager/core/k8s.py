@@ -25,6 +25,16 @@ def succeeds(*args: str) -> bool:
     return run(*args).returncode == 0
 
 
+def exists(*args: str) -> bool:
+    """Whether `kubectl get args` finds the object: False only on NotFound, abort when the lookup fails."""
+    r = run("get", *args, "-o", "name")
+    if r.returncode == 0:
+        return True
+    if "(NotFound)" in r.stderr:
+        return False
+    abort(f"Could not look up {' '.join(args)}: {r.stderr.strip() or 'kubectl get failed'}")
+
+
 def get_json(*args: str) -> Any:
     try:
         return json.loads(out("get", *args, "-o", "json") or "null")

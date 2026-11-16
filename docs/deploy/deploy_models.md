@@ -119,7 +119,8 @@ What `vllm-cuda` changes in the rendered manifest, relative to CPU `vllm`:
 - **No CPU pinning.** NRI balloon / kubelet-static annotations, their
   pre-flight checks, and the AMX node requirement are all skipped: they are
   Xeon placement controls and do not apply to a GPU pod. A GPU pre-flight
-  runs instead (see [The gate](#the-gate)).
+  runs instead (see [The gate](#the-gate)), and the CPU and memory check
+  counts only the GPU nodes.
 - A *preferred* (not required) node affinity for `gpu-vendor=<vendor>`, the
   label the rack-scale installer applies. On clusters without that label the
   resource request alone decides placement.
@@ -138,6 +139,7 @@ against the pod, must have at least `gpus` free `nvidia.com/gpu`, counting what
 running pods already hold (a pod's GPUs cannot span nodes). Otherwise it stops
 before downloading weights, for example when the profile declares a GPU node
 that has not joined the cluster or whose device plugin is not ready yet.
+With `--node`, which pins the pod, only that node counts.
 `MM_PREFLIGHT=warn` proceeds anyway; `MM_SKIP_PREFLIGHT=1` skips the check.
 
 A re-deploy that changes more than `--replicas` may restart the pod: the

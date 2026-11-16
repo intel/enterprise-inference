@@ -94,25 +94,24 @@ def gpu_vendor(resource: str) -> str:
     return "nvidia" if resource.startswith("nvidia.com/") else ""
 
 
-def _affinity(node: str, require_amx: bool, vendor: str) -> str:
-    lines = ["    affinity:", "      nodeAffinity:"] if node or require_amx or vendor else []
-    if require_amx:
+def _affinity(node: str, require_amx: bool, vendor: str = "") -> str:
+    """Required node affinity: --node pins (as every pre-flight check assumes), and AMX catalogs need AMX nodes.
+    A GPU model prefers the nodes labelled with its GPU vendor."""
+    match = ([("feature.node.kubernetes.io/cpu-cpuid.AMXBF16", "true")] if require_amx else []) + \
+        ([("kubernetes.io/hostname", node)] if node else [])
+    if not match and not vendor:
+        return ""
+    lines = ["    affinity:", "      nodeAffinity:"]
+    if match:
         lines += ["        requiredDuringSchedulingIgnoredDuringExecution:", "          nodeSelectorTerms:",
-                  "            - matchExpressions:", "                - key: feature.node.kubernetes.io/cpu-cpuid.AMXBF16",
-                  "                  operator: In", "                  values:", '                    - "true"']
-    if node or vendor:
-        lines.append("        preferredDuringSchedulingIgnoredDuringExecution:")
-    if node:
-        lines += ["          - weight: 100", "            preference:", "              matchExpressions:",
-                  "                - key: kubernetes.io/hostname", "                  operator: In",
-                  "                  values:", f"                    - {node}", "          - weight: 50",
-                  "            preference:", "              matchExpressions:",
-                  "                - key: node-role.kubernetes.io/control-plane",
-                  "                  operator: DoesNotExist"]
+                  "            - matchExpressions:"]
+    for key, value in match:  # quoted: a node name cannot inject YAML
+        lines += [f"                - key: {key}", "                  operator: In", "                  values:",
+                  f"                    - {json.dumps(value)}"]
     if vendor:
-        lines += ["          - weight: 100", "            preference:", "              matchExpressions:",
-                  "                - key: gpu-vendor", "                  operator: In", "                  values:",
-                  f"                    - {vendor}"]
+        lines += ["        preferredDuringSchedulingIgnoredDuringExecution:", "          - weight: 100",
+                  "            preference:", "              matchExpressions:", "                - key: gpu-vendor",
+                  "                  operator: In", "                  values:", f"                    - {vendor}"]
     return "\n".join(lines)
 
 
