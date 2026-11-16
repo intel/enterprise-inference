@@ -157,16 +157,18 @@ where the download Job runs, so the pre-flight pins the Job to the GPU nodes
 that fit (not when it is skipped, or when `MM_PREFLIGHT=warn` proceeds past a
 refusal), and warns: on node-local storage every model,
 CPU ones included, must then run on that node.
-GPU replicas on more than one node need a ReadWriteMany store, which the
-installer creates on multi-node clusters. A ReadWriteOnce block volume attaches
-to one node at a time, and the pre-flight does not check where it is attached.
+GPU replicas on more than one node need a ReadWriteMany store: `storage_backend`
+`nfs`, `ceph` (CephFS) or `netapp-trident` (NAS drivers), or `custom` unless
+`storage_custom_rwx: false`. A ReadWriteOnce block volume attaches to one node
+at a time, and the pre-flight does not check where it is attached.
 
 `--tp N` without `--gpus` also sets the GPU count to N. A tensor parallel size
 larger than the GPU count is refused; a smaller one warns about the unused GPUs.
 The count covers tensor parallelism only. With pipeline or data parallelism passed
-through `--arg`, set both `--gpus` (the total GPUs the pod needs) and `--tp` (the
-tensor parallel size): without `--tp`, it is the catalog's value or the GPU count. The "GPUs
-unused" warning then counts only tensor parallelism, so it can be ignored.
+through `--arg`, set `--gpus` to the total GPUs the pod needs, and the tensor
+parallel size with `--tp` or a `--tensor-parallel-size` in `--arg` (the long
+form). Otherwise it is the catalog's value, or the GPU count. The "GPUs unused"
+warning then counts only tensor parallelism, so it can be ignored.
 For a manual CLI deploy on a GPU cluster you already trust:
 
 ```bash
