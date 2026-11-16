@@ -3,6 +3,19 @@
 # vLLM Semantic Router — teardown (removes what install created; safe when absent)
 # =============================================================================
 
+- name: "vllm_sr | teardown | Check the cluster API"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Namespace
+    name: "{{ vllm_sr_namespace }}"
+  register: _vllm_sr_td_api
+  failed_when: false
+
+# No cluster (for example a failed install): nothing to remove, and the reset must still run
+- name: "vllm_sr | teardown | No cluster — skip"
+  when: _vllm_sr_td_api.resources is not defined
+  ansible.builtin.meta: end_role
+
 # kubernetes.core.k8s_exec takes no stdin, so the script is piped in through kubectl.
 - name: "vllm_sr | teardown | Deregister the LiteLLM virtual model"
   when: vllm_sr_expose in ['litellm', 'both']

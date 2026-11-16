@@ -229,7 +229,12 @@ def litellm_register(m: Model) -> None:
         return warn("LiteLLM not reachable — skipping registration")
     litellm_deregister(m.name)  # /model/new always mints a new id, so clear the name first
     url = _internal_url(m)
-    payload = {"model_name": m.name, "litellm_params": {"model": f"openai/{m.name}", "api_base": url, "api_key": "unused"}}
+    mode = {"embed": "embedding", "rerank": "rerank"}.get(m.category)
+    # LiteLLM's openai provider has no rerank and sends encoding_format: null on embeddings
+    provider = "hosted_vllm" if mode and m.runtime == "vllm" else "openai"
+    payload = {"model_name": m.name, "litellm_params": {"model": f"{provider}/{m.name}", "api_base": url, "api_key": "unused"}}
+    if mode:
+        payload["model_info"] = {"mode": mode}
     info(f"Registering {m.name} with LiteLLM (api_base={url})")
     for attempt in (1, 2, 3):  # the proxy may still be rolling out when the model turns Ready
         if _litellm("POST", f"{base}/model/new", payload) is not None and _litellm_ids(m.name, base):
