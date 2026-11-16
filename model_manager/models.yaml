@@ -574,6 +574,9 @@ runtimes:
       # default_version and every other model are unchanged.
       "0.28.0":
         image: "docker.io/vllm/vllm-openai-cpu:v0.28.0"
+      # Opt-in only (--server-version 0.33.0); not yet validated with the default category args.
+      "0.33.0":
+        image: "docker.io/vllm/vllm-openai-cpu:v0.33.0"
       # Reference entry — copy, change key + image, tweak deltas. Deltas must suit
       # the model: MoE-only flags (e.g. --enable-expert-parallel) crash dense models.
       "0.19.1":
