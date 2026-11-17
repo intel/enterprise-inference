@@ -24,6 +24,7 @@ litellm_version: "v1.105.1"
 litellm_run_as_user: 65534
 litellm_namespace: "litellm"
 litellm_num_workers: 2
+litellm_rust_enabled: true
 litellm_valkey_tag: "9.1.2-alpine"              # valkey/valkey (official upstream image, Alpine for smaller footprint)
 
 # An existing release is left as it is, except that one whose config lacks the

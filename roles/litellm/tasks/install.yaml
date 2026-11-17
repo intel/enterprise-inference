@@ -432,6 +432,7 @@
           # to config.yaml is importable regardless of how litellm resolves it.
           envVars: >-
             {{ {'UI_USERNAME': 'admin',
+                'LITELLM_RUST': (litellm_rust_enabled | bool | ternary('true', 'false')),
                 'LITELLM_MODE': 'PRODUCTION',
                 'LITELLM_LOG': 'ERROR',
                 'CHECKPOINT_DISABLE': '1'} | combine(_litellm_proxy_env)
