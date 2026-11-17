@@ -26,6 +26,12 @@ def fresh_nri_reads():
     nri_policy.clear_cache()
 
 
+@pytest.fixture(autouse=True)
+def no_sizing(monkeypatch):
+    """Tests stay offline: sizing reads HuggingFace, so it is on only where a test turns it on."""
+    monkeypatch.setenv("MM_AUTOSIZE", "false")
+
+
 @pytest.fixture
 def kubectl(monkeypatch):
     """Record kubectl calls as (argv, stdin); every call succeeds with empty output (a Job reads as complete)."""

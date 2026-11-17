@@ -54,8 +54,15 @@ HELP_SVC_NS = (r"^(  MM_INFERENCE_HOSTNAME .*\n)",
                r"                        Gateway and run with the namespace's SCC UIDs.\n"
                r"  MM_INFERENCE_GATEWAY_SVC_NS\n                        Namespace of the AI Gateway Service LiteLLM calls\n"
                r"                        (default: MM_INFERENCE_GATEWAY_NS, else envoy-gateway-system)\n")
+# llama3-8b-awq is sized automatically now; with sizing off it takes the category memory.
+LLAMA_AUTO_MEMORY = (r"([Mm]emory: )32Gi", r"\g<1>16Gi")
+# The 0.19.1 version no longer pins VLLM_CPU_KVCACHE_SPACE over the category value.
+V0191_KV = (r'(- name: VLLM_CPU_KVCACHE_SPACE\n +value: )"12"', r'\1"8"')
 # vLLM 0.33.0 is a new runtime version.
 V0330 = (r"(Available: .*0\.28\.0)$", r"\1, 0.33.0")
+# --help documents MM_AUTOSIZE, which is new.
+HELP_AUTOSIZE = (r"^(  MM_SKIP_PREFLIGHT .*\n)",
+                 r"\1  MM_AUTOSIZE           false ⇒ no memory/KV sizing from HuggingFace metadata\n")
 # --help documents the list command, which is new.
 HELP_LIST = [
     (r"^(  undeploy <model>\|<name>\|all .*\n)",
@@ -182,11 +189,11 @@ CASES = [
          "--env", "VLLM_CPU_KVCACHE_SPACE=20", "--label", "team=ml", "--label", "example.com/owner=",
          "--node", "w1", "--replicas", "2", env=NRI, deviations=[BALLOON_TP, *NO_HT_DOUBLING, PIN_NODE]),
     case("llama-kubelet-static", "deploy", "llama3-8b-awq", "--dry-run", "--cpu", "7",
-         env={"MM_CPU_POLICY": "kubelet-static"}, k8s=STATIC),
+         env={"MM_CPU_POLICY": "kubelet-static"}, k8s=STATIC, deviations=[LLAMA_AUTO_MEMORY]),
     case("llama-kubelet-millicpu", "deploy", "llama3-8b-awq", "--dry-run", "--cpu", "7500m", "--tp", "2",
-         env={"MM_CPU_POLICY": "kubelet-static"}),
+         env={"MM_CPU_POLICY": "kubelet-static"}, deviations=[LLAMA_AUTO_MEMORY]),
     case("kubelet-static-bad-cpu", "deploy", "llama3-8b-awq", "--dry-run", "--cpu", "abc",
-         env={"MM_CPU_POLICY": "kubelet-static"}),
+         env={"MM_CPU_POLICY": "kubelet-static"}, deviations=[LLAMA_AUTO_MEMORY]),
     case("embed-direct", "deploy", "bge-base-en", "--dry-run", "--cpu-policy", "BEST-EFFORT"),
     case("agent-default-model", "deploy", "qwen2-5-coder-14b", "--dry-run", env=BE),
     case("rerank-explicit-routing", "deploy", "bge-reranker", "--dry-run", "--routing", "epp", env=BE),
@@ -194,9 +201,9 @@ CASES = [
          env={**BE, "FAKE_HF_JSON": '{"pipeline_tag": "feature-extraction"}'}),
     case("id-named", "deploy", "--hfid", "meta-llama/Llama-3.2-1B-Instruct", "--name", "l1", "--cpu", "4",
          "--memory", "8Gi", "--server-version", "0.19.1", "--dry-run",
-         env={**BE, "FAKE_HF_JSON": '{"pipeline_tag": "text-generation"}'}),
+         env={**BE, "FAKE_HF_JSON": '{"pipeline_tag": "text-generation"}'}, deviations=[V0191_KV]),
     case("id-hf-unreachable", "deploy", "--hfid", "Org/Some_Model.v2", "--dry-run", env=BE),
-    case("alias", "deploy", "qwen3-0-6b", "--as", "qwen-alt", "--server-version", "0.19.1", "--dry-run", env=BE),
+    case("alias", "deploy", "qwen3-0-6b", "--as", "qwen-alt", "--server-version", "0.19.1", "--dry-run", env=BE, deviations=[V0191_KV]),
     case("options-before-command", "--dry-run", "--cpu", "4", "deploy", "qwen3-0-6b", env=BE),
     # Legacy reached the fallback by crashing nri_policy.py on int("4.5"); the box and manifest are kept.
     case("nri-non-integer-cpu", "deploy", "qwen3-0-6b", "--cpu", "4.5", "--dry-run", env=NRI, deviations=[
@@ -230,9 +237,9 @@ CASES = [
     case("fx-bad-env", "deploy", "badenv", "--dry-run", env=BE, catalog=FIXTURE),
     case("fx-bad-template", "deploy", "badtpl", "--dry-run", env=BE, catalog=FIXTURE),
     # CLI surface and validation errors.
-    case("no-args", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_SCALING]),
-    case("help", "--help", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_SCALING]),
-    case("help-command", "help", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_SCALING]),
+    case("no-args", deviations=[HELP_SVC_NS, HELP_AUTOSIZE, *HELP_LIST, *HELP_HFID, *HELP_SCALING]),
+    case("help", "--help", deviations=[HELP_SVC_NS, HELP_AUTOSIZE, *HELP_LIST, *HELP_HFID, *HELP_SCALING]),
+    case("help-command", "help", deviations=[HELP_SVC_NS, HELP_AUTOSIZE, *HELP_LIST, *HELP_HFID, *HELP_SCALING]),
     case("version", "version"),
     case("version-flag", "-v"),
     case("unknown-option", "deploy", "qwen3-0-6b", "--bogus"),
@@ -269,7 +276,7 @@ CASES = [
         [r"get LLMInferenceService specdec -n ns1 -o json$", 0, _ready("MainWorkloadReady")]],
          deviations=[NO_LITELLM_URL]),
     case("kubelet-static-preflight-blocks", "deploy", "llama3-8b-awq", env={"MM_CPU_POLICY": "kubelet-static"},
-         k8s=STATIC + SMALL_NODES, deviations=[KUBELET_PER_POD, *KUBELET_REQUESTS]),
+         k8s=STATIC + SMALL_NODES, deviations=[LLAMA_AUTO_MEMORY, KUBELET_PER_POD, *KUBELET_REQUESTS]),
     case("undeploy-embed", "undeploy", "bge-base-en"),
     case("undeploy-ovms", "undeploy", "qwen3-5-2b-ovms", deviations=[OVMS_KIND, OVMS_AIGATEWAY_ROUTE]),
     case("undeploy-live-alias", "undeploy", "qwen-alt", k8s=[
@@ -290,6 +297,7 @@ def run(launcher: Path, c: dict, tmp: Path) -> str:
         "MM_CONFIG": c["catalog"] or str(MM / "models.yaml"),
         "MM_INFERENCE_HOSTNAME": "inference.example.com", "MM_LITELLM_ENABLED": "false",
         "MM_AI_GATEWAY_PROVIDER": "envoy", "MM_RECONCILE_LOG_DIR": str(tmp),
+        "MM_AUTOSIZE": "false",  # legacy had no sizing; test_units covers it
         "FAKE_K8S": json.dumps(c["k8s"]), "FAKE_K8S_LOG": str(log), **c["env"],
     }
     p = subprocess.run([str(launcher), *c["args"]], env=env, capture_output=True, text=True,  # nosec B603

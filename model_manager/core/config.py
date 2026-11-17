@@ -81,16 +81,41 @@ def load_yaml(path: Path) -> Any:
         abort(f"Cannot read {path}: {e}")
 
 
-def hf_model_info(model_id: str, proxy: str) -> dict:
-    """HuggingFace model metadata, or {} when the Hub is unreachable."""
-    cmd = ["curl", "-sf", "--max-time", "10", *(["--proxy", proxy] if proxy else []),
-           f"https://huggingface.co/api/models/{model_id}"]
-    r = subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
+@cache
+def _hf_json(url: str, proxy: str) -> dict:
+    """A HuggingFace JSON document, or {} when unreachable. HF_TOKEN goes in on stdin, never in argv."""
+    token = os.environ.get("HF_TOKEN", "")
+    cmd = ["curl", "-sfL", "--max-time", "10", *(["--proxy", proxy] if proxy else []),
+           *(["--config", "-"] if token else []), url]
+    r = subprocess.run(cmd, input=f'header = "Authorization: Bearer {token}"\n' if token else None,  # nosec B603: argv list, no shell
+                       capture_output=True, text=True, check=False)
     try:
-        data = json.loads(r.stdout) if r.returncode == 0 else {}
+        data = json.loads(r.stdout) if r.returncode == 0 and r.stdout else {}
     except ValueError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def hf_model_info(model_id: str, proxy: str) -> dict:
+    """HuggingFace model metadata, or {} when the Hub is unreachable."""
+    return _hf_json(f"https://huggingface.co/api/models/{model_id}", proxy)
+
+
+def hf_config(model_id: str, proxy: str) -> dict | None:
+    """The repo's config.json; None when unreadable (unreachable, or gated without HF_TOKEN)."""
+    return _hf_json(f"https://huggingface.co/{model_id}/resolve/main/config.json", proxy) or None
+
+
+def hf_weight_bytes(model_id: str, proxy: str) -> int:
+    """Bytes of the safetensors weights the server loads (consolidated.* is Mistral's duplicate format); 0 if unknown."""
+    index = _hf_json(f"https://huggingface.co/{model_id}/resolve/main/model.safetensors.index.json", proxy)
+    total = pick(pick(index, "metadata", {}), "total_size", 0)
+    if total:
+        return int(total)
+    files = pick(_hf_json(f"https://huggingface.co/api/models/{model_id}?blobs=true", proxy), "siblings", [])
+    return sum(int(pick(f, "size", 0)) for f in files if isinstance(f, dict)
+               and text(pick(f, "rfilename")).endswith(".safetensors")
+               and not text(pick(f, "rfilename")).startswith("consolidated"))
 
 
 class Catalog:
@@ -145,6 +170,17 @@ def _merge(base: dict, overlay: dict) -> dict:
 
 
 @dataclass
+class Sizing:
+    """Memory of one pod for a vLLM model (core/sizer.py)."""
+    weights_gib: float
+    kv_gib: int                               # VLLM_CPU_KVCACHE_SPACE, per TP worker
+    tp: int
+    max_model_len: int
+    needed_gib: float                         # weights + tp x (kv + overhead)
+    memory_gi: int                            # needed_gib with headroom: the request and limit
+
+
+@dataclass
 class Model:
     name: str
     namespace: str
@@ -161,6 +197,9 @@ class Model:
     routing: str = ""
     cpu: str = ""
     memory: str = ""
+    memory_auto: bool = False                 # no memory set: sized from the model (core/sizer.py)
+    kv_cache_gb: str = ""                     # sized VLLM_CPU_KVCACHE_SPACE
+    max_model_len: str = ""                   # sized --max-model-len
     replicas: str = "1"
     min_replicas: str = ""
     max_replicas: str = ""
@@ -233,7 +272,9 @@ def resolve(catalog: Catalog, target: str, o: Any) -> Model:
 
     defaults = pick(m.cat, "defaults", {})
     m.cpu = o.cpu or m.cpu or text(pick(defaults, "cpu", 8))
-    m.memory = o.memory or m.memory or text(pick(defaults, "memory", "16Gi"))
+    explicit_memory = "" if (o.memory or m.memory) == "auto" else o.memory or m.memory
+    m.memory_auto = not explicit_memory
+    m.memory = explicit_memory or text(pick(defaults, "memory", "16Gi"))
     m.replicas = o.replicas or m.replicas
     m.node = o.node or m.node
     if o.routing:

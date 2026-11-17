@@ -39,6 +39,7 @@ How the toolkit is built and how a request travels through it.
 | [Architecture](reference/architecture.md) | Components, Ansible roles, and how Toolkit Manager installs and operates this toolkit |
 | [Inference Request Flow](reference/request_flow.md) | End-to-end request routing for both auth modes, with a verified network trace |
 | [CPU Pinning & NUMA](reference/cpu_pinning.md) | The three CPU policies, the pre-flight capacity check, and NUMA placement |
+| [Memory & KV-Cache Sizing](reference/memory_sizing.md) | How a vLLM model's memory and KV cache are sized from its config, layer layouts, TP, and the memory pre-flight |
 | [Database Architecture](reference/database.md) | Shared PostgreSQL schema and provisioning for LiteLLM and Langfuse |
 
 ## Support

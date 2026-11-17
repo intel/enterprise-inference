@@ -45,6 +45,10 @@ network:
 # Common fields:
 #   category:        llm | embed | rerank | vlm   (drives default args + cpu/memory)
 #   cpu / memory:    resource requests            (default from category)
+#                    memory: omitted or auto — vLLM llm models are sized from
+#                    their HuggingFace config.json (weights + KV + overhead);
+#                    see docs/reference/memory_sizing.md. A value (memory: 128Gi)
+#                    is used as is and checked to fit. --memory overrides.
 #                    cpu: auto — NUMA-aware: under nri-balloons, the free
 #                    physical cores of one NUMA node per TP rank on the smallest
 #                    schedulable node (the category cpu under other policies).
@@ -105,7 +109,6 @@ models:
       vllm: { versions: ["0.24.0", "0.19.1"], default: "0.24.0" }   # engine: allowed versions + default
     default_server: vllm                                            # server used when --server is not passed
     cpu: 8                                                          # CPU cores requested (overrides category default)
-    memory: 16Gi                                                    # memory requested (overrides category default)
 
   # LLM — quantized Llama-3 8B, chat/completion (shorthand form)
   - name: llama3-8b-awq
@@ -114,7 +117,6 @@ models:
     runtime: vllm
     server_version: "0.24.0"
     cpu: 16
-    memory: 32Gi
 
   # LLM — Qwen3.5 2B INT4 on OpenVINO (flat runtime, no version)
   - name: qwen3-5-2b-ovms
@@ -581,7 +583,7 @@ runtimes:
       # the model: MoE-only flags (e.g. --enable-expert-parallel) crash dense models.
       "0.19.1":
         image: "docker.io/vllm/vllm-openai-cpu:v0.19.1"
-        env: { VLLM_USE_V1: "1", VLLM_CPU_KVCACHE_SPACE: "12" }
+        env: { VLLM_USE_V1: "1" }
         args: [ --max-num-seqs, "256" ]
 
     # Per-category engine args + env + resource defaults (a model's own values

@@ -9,8 +9,8 @@ import math
 import os
 import re
 
-from . import k8s, nri_policy
-from .config import Model, is_uint, pick, text, truthy
+from . import k8s, nri_policy, sizer
+from .config import Model, Sizing, is_uint, pick, text, truthy
 from .ui import abort, info, warn
 
 ANN = "cpu-policy.model-manager.io"
@@ -115,15 +115,21 @@ class NriBalloons(BestEffort):
                 "(proceed anyway) or MM_NRI_SKIP_PREFLIGHT=1 (skip check).")
 
 
-def _allocatable(m: Model) -> list[int] | None:
-    """Whole allocatable CPUs of each schedulable node (m.node only, when pinned); None when nodes can't be read.
-    Allocatable already excludes kube/system-reserved; exclusive CPUs cannot span nodes."""
+def _schedulable_nodes(m: Model) -> list[dict] | None:
+    """Nodes without a NoSchedule taint (m.node only, when pinned); None when nodes can't be read."""
     nodes = k8s.get_json("node", m.node) if m.node else k8s.get_json("nodes")
     if not nodes:
         return None
-    return [whole_cpus(text(pick(pick(n.get("status"), "allocatable", {}), "cpu", "0")), floor=True)
-            for n in ([nodes] if m.node else nodes.get("items", []))
+    return [n for n in ([nodes] if m.node else nodes.get("items", []))
             if not any(t.get("effect") == "NoSchedule" for t in pick(n.get("spec"), "taints", []))]
+
+
+def _allocatable(m: Model) -> list[int] | None:
+    """Whole allocatable CPUs of each schedulable node; None when nodes can't be read.
+    Allocatable already excludes kube/system-reserved; exclusive CPUs cannot span nodes."""
+    nodes = _schedulable_nodes(m)
+    return None if nodes is None else [
+        whole_cpus(text(pick(pick(n.get("status"), "allocatable", {}), "cpu", "0")), floor=True) for n in nodes]
 
 
 def _replica_shortfall(alloc: list[int] | None, per_pod: int, replicas: int) -> str:
@@ -389,3 +395,30 @@ def preflight_gate(policy: BestEffort, m: Model, tp: int, cpu: str, running: int
     if "warn" in (os.environ.get("MM_PREFLIGHT"), os.environ.get("MM_NRI_PREFLIGHT")):
         return warn(f"{policy.name} pre-flight failed but MM_PREFLIGHT=warn — proceeding anyway.")
     abort(policy.failure(placed, tp) if placement else placement_failure(probe))
+
+
+def memory_gate(m: Model, s: Sizing | None) -> None:
+    """Abort before the download when the pod's memory cannot hold the model (vLLM is OOM-killed at load) or is
+    larger than any schedulable node offers (the pod stays Pending). Every CPU policy runs it."""
+    if _preflight_skipped():
+        return
+    have = sizer.to_gib(m.memory)
+    errors = []
+    if s and have is not None and s.needed_gib > have:
+        errors.append(f"memory {m.memory} is below the {math.ceil(s.needed_gib)}Gi {m.name} needs at tp={s.tp}: "
+                      f"weights {s.weights_gib:.1f} + KV {s.tp} x {s.kv_gib} + overhead {s.tp} x "
+                      f"{sizer.OVERHEAD_GIB} GiB. Raise --memory or lower VLLM_CPU_KVCACHE_SPACE.")
+    nodes = _schedulable_nodes(m) or []
+    largest = max((g for g in (sizer.to_gib(text(pick(pick(n.get("status"), "allocatable", {}), "memory")))
+                               for n in nodes) if g is not None), default=None)
+    if have is not None and largest is not None and have > largest:
+        errors.append(f"no schedulable node has {m.memory} allocatable memory; the largest offers "
+                      f"{largest:.0f}Gi, so the pod would stay Pending.")
+    if not errors:
+        return
+    for e in errors:
+        warn(f"Memory pre-flight: {e}")
+    if os.environ.get("MM_PREFLIGHT") == "warn":
+        return warn("Memory pre-flight failed but MM_PREFLIGHT=warn — proceeding anyway.")
+    abort(f"Memory pre-flight failed for {m.name}. Override with MM_PREFLIGHT=warn (proceed anyway) or "
+          "MM_SKIP_PREFLIGHT=1 (skip check).")

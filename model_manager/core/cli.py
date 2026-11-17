@@ -14,10 +14,11 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import __version__, k8s, platform, renderer, routing
-from .config import MM_DIR, Catalog, Model, is_uint, mm_path, pick, resolve, resolve_autoscaling, text, truthy
+from . import __version__, k8s, platform, renderer, routing, sizer
+from .config import (MM_DIR, Catalog, Model, Sizing, hf_config, hf_weight_bytes, is_uint, mm_path, pick, resolve,
+                     resolve_autoscaling, text, truthy)
 from .download import download_weights
-from .policy import ANN, mem_bytes, preflight_gate, resolve_auto_cpu, resolve_policy, whole_cpus
+from .policy import ANN, mem_bytes, memory_gate, preflight_gate, resolve_auto_cpu, resolve_policy, whole_cpus
 from .stuck import Watch
 from .ui import BOLD, CYAN, DIM, GREEN, RESET, YELLOW, abort, fmt_duration, info, ok, warn
 
@@ -84,6 +85,7 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
   {GREEN}MM_NRI_ENABLED{RESET}        Legacy: false ⇒ best-effort (no pinning)
   {GREEN}MM_PREFLIGHT{RESET}          'warn' ⇒ report placement failures, don't block
   {GREEN}MM_SKIP_PREFLIGHT{RESET}     1 ⇒ skip the placement pre-flight entirely
+  {GREEN}MM_AUTOSIZE{RESET}           false ⇒ no memory/KV sizing from HuggingFace metadata
   {GREEN}MM_INFERENCE_HOSTNAME{RESET} Override inference gateway hostname
   {GREEN}MM_PLATFORM{RESET}           openshift | kubernetes (default: detected). On
                         OpenShift models attach to OpenShift AI's inference
@@ -333,6 +335,42 @@ def _spawn_reconciler(m: Model, timeout: int) -> tuple[Path, bool]:
     return log, True
 
 
+def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], tp: int) -> Sizing | None:
+    """Size memory and VLLM_CPU_KVCACHE_SPACE of a vLLM LLM from its HuggingFace metadata; explicit values win.
+    None when sizing is off or impossible: the static values stay, and an explicit memory is not fit-checked."""
+    if m.runtime != "vllm" or m.category != "llm" or not truthy(os.environ.get("MM_AUTOSIZE", "true")):
+        return None
+    kv = renderer.explicit_kv_cache(m, cli_args, o.env)
+    if kv and not is_uint(kv):
+        abort(f"VLLM_CPU_KVCACHE_SPACE for {m.name} must be a whole number of GiB, got '{kv}'.")
+    if kv and m.memory_auto:
+        abort(f"{m.name} sets VLLM_CPU_KVCACHE_SPACE={kv} but no memory. Set memory as well (models.yaml memory: or "
+              "--memory), or remove both to size them automatically.")
+    proxy, args = catalog.https_proxy, [*renderer.engine_args(m), *cli_args]
+    cfg = hf_config(m.model_id, proxy)
+    if cfg and sizer.topology_error(cfg, tp):
+        abort(f"{m.name}: {sizer.topology_error(cfg, tp)}; vLLM would fail at start-up.")
+    draft = ((hf_config(m.draft_model_id, proxy), hf_weight_bytes(m.draft_model_id, proxy))
+             if m.draft_model_id else None)
+    try:
+        s = sizer.size(cfg, hf_weight_bytes(m.model_id, proxy), args, tp, draft, int(kv) if kv else None,
+                       None if m.memory_auto else sizer.to_gib(m.memory))
+    except (sizer.Unsupported, ValueError) as e:  # ValueError: a non-integer engine arg such as --max-num-seqs
+        warn(f"Memory sizing unavailable for {m.name} ({e}); using memory {m.memory}.")
+        return None
+    if m.memory_auto:
+        m.memory = f"{s.memory_gi}Gi"
+    if not kv:
+        m.kv_cache_gb = str(s.kv_gib)
+        if not sizer.arg_value(args, "--max-model-len"):
+            m.max_model_len = str(s.max_model_len)
+    info(f"  Memory: {m.memory} ({'sized' if m.memory_auto else 'set'}) | needs {s.needed_gib:.1f} GiB = weights "
+         f"{s.weights_gib:.1f} + KV {s.tp} x {s.kv_gib} + overhead {s.tp} x {sizer.OVERHEAD_GIB}"
+         + (f", x {sizer.HEADROOM} headroom" if m.memory_auto else "")
+         + ("" if kv else f" | KV for up to {sizer.CONCURRENCY} x {s.max_model_len} tokens"))
+    return s
+
+
 def _require_autoscaling(m: Model) -> None:
     """KEDA installed, and a KServe whose LLMInferenceService has KEDA scaling (checked before the download)."""
     if not k8s.succeeds("get", "crd", "scaledobjects.keda.sh"):
@@ -369,9 +407,11 @@ def deploy(o: Options, target: str) -> None:
     m = resolve(catalog, target, o)
     resolve_autoscaling(m, o)
     m.check()
+    cli_args, tp = _engine_cli_args(o)
     info(f"Deploying {m.name} ({m.kind})")
     info(f"  Runtime: {m.runtime}{f' @ {m.version}' if m.version else ''} | Category: {m.category} | "
          f"Routing: {m.routing or 'default'}")
+    sizing = _apply_sizing(m, catalog, o, cli_args, tp)
     replicas = (f"{m.min_replicas}-{m.max_replicas} (autoscaled, target {m.scale_target} per replica)"
                 if m.autoscaled else m.replicas)
     info(f"  CPU: {m.cpu} | Memory: {m.memory} | Replicas: {replicas}")
@@ -379,7 +419,6 @@ def deploy(o: Options, target: str) -> None:
         info(f"  Node: {m.node}")
     policy = resolve_policy(o.cpu_policy, m.node)
     info(f"  CPU policy: {policy.name}")
-    cli_args, tp = _engine_cli_args(o)
     resolve_auto_cpu(policy, m, tp)
     policy.prepare(m)
     annotations, cpu = policy.annotations(m, tp)
@@ -428,6 +467,7 @@ def deploy(o: Options, target: str) -> None:
                 info(f"  The previous InferenceService/{m.name} is removed before the new pods start: its {running} "
                      "running pods' CPUs and memory are counted as free.")
         preflight_gate(policy, m, tp, cpu, running=running, amx=catalog.require_amx)
+        memory_gate(m, sizing)
         k8s.ensure_storage(m.namespace, catalog.pvc)
         download_weights(m, catalog, cli_args)
         if m.kind == "InferenceService":

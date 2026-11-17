@@ -296,6 +296,8 @@ Disabling NFD means those affinity rules cannot be satisfied.
 | `MM_NRI_PREFLIGHT` | `warn` — report a capacity shortfall but proceed |
 | `MM_NRI_SKIP_PREFLIGHT` | `1` — skip the capacity check entirely |
 | `MM_FORCE_REDEPLOY` | `1` — re-apply a model even if its rendered spec is unchanged |
+| `MM_AUTOSIZE` | `false` — do not size memory and the KV cache from Hugging Face metadata ([Memory & KV-Cache Sizing](../reference/memory_sizing.md)) |
+| `MM_PREFLIGHT` / `MM_SKIP_PREFLIGHT` | `warn` — report a placement or memory pre-flight failure but proceed / `1` — skip those checks |
 | `MM_HTTP_PROXY` / `MM_HTTPS_PROXY` / `MM_NO_PROXY` | Proxy for reaching Hugging Face (Hub checks, the download job, OVMS pods). `models.yaml` `network:` takes precedence; `HTTP_PROXY` / `http_proxy` etc. are the fallback |
 | `SKIP_MODEL_DEPLOYMENT` | `true` — skip the auto-deploy phase for one install run |
 
