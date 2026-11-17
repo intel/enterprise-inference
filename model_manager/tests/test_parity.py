@@ -55,7 +55,7 @@ HELP_SVC_NS = (r"^(  MM_INFERENCE_HOSTNAME .*\n)",
                r"  MM_INFERENCE_GATEWAY_SVC_NS\n                        Namespace of the AI Gateway Service LiteLLM calls\n"
                r"                        (default: MM_INFERENCE_GATEWAY_NS, else envoy-gateway-system)\n")
 # llama3-8b-awq is sized automatically now; with sizing off it takes the category memory.
-LLAMA_AUTO_MEMORY = (r"([Mm]emory: )32Gi", r"\g<1>16Gi")
+LLAMA_AUTO_MEMORY = (r"([Mm]emory: |CPU and )32Gi", r"\g<1>16Gi")
 # The 0.19.1 version no longer pins VLLM_CPU_KVCACHE_SPACE over the category value.
 V0191_KV = (r'(- name: VLLM_CPU_KVCACHE_SPACE\n +value: )"12"', r'\1"8"')
 # vLLM 0.33.0 is a new runtime version.
@@ -276,7 +276,7 @@ CASES = [
         [r"get LLMInferenceService specdec -n ns1 -o json$", 0, _ready("MainWorkloadReady")]],
          deviations=[NO_LITELLM_URL]),
     case("kubelet-static-preflight-blocks", "deploy", "llama3-8b-awq", env={"MM_CPU_POLICY": "kubelet-static"},
-         k8s=STATIC + SMALL_NODES, deviations=[LLAMA_AUTO_MEMORY, KUBELET_PER_POD, *KUBELET_REQUESTS]),
+         k8s=STATIC + SMALL_NODES, deviations=[KUBELET_PER_POD, *KUBELET_REQUESTS, LLAMA_AUTO_MEMORY]),
     case("undeploy-embed", "undeploy", "bge-base-en"),
     case("undeploy-ovms", "undeploy", "qwen3-5-2b-ovms", deviations=[OVMS_KIND, OVMS_AIGATEWAY_ROUTE]),
     case("undeploy-live-alias", "undeploy", "qwen-alt", k8s=[
