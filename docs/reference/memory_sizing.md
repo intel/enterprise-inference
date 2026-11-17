@@ -102,7 +102,7 @@ page = widest layer's bytes per token × block size (128); narrower layers fit m
 | Full attention | `max_model_len` | `num_key_value_heads` (else `num_attention_heads`), `head_dim` (else `hidden_size / num_attention_heads`) |
 | Sliding window | `min(sliding_window − 1 + --max-num-batched-tokens, max_model_len)` + 1 page | `layer_types: sliding_attention`, `sliding_window` |
 | Linear attention (Gated DeltaNet) | a fixed state: 1 page, 2 with prefix caching | `layer_types: linear_attention`, `linear_num_key_heads`, `linear_num_value_heads`, `linear_key_head_dim`, `linear_value_head_dim`, `linear_conv_kernel_dim` |
-| Cross-attention (encoder-decoder) | the encoder length | `is_encoder_decoder`, `decoder_layers`, `decoder_attention_heads`, `d_model`, `max_source_positions` |
+| Cross-attention (encoder-decoder) | `max(max_source_positions, --max-num-batched-tokens)`: vLLM reserves the encoder budget | `is_encoder_decoder`, `decoder_layers`, `decoder_attention_heads`, `d_model`, `max_source_positions` |
 
 How the layout is chosen:
 1. **Encoder-decoder** (`is_encoder_decoder: true`, e.g. Whisper): every decoder layer has
@@ -166,7 +166,7 @@ off, a request holds `10 × ceil(32768 / 1152) + 30 × 1 = 320` pages = 720 MiB.
 ```
 decoder layer × 12: self-attention ≤ 448 tokens + cross-attention over 1500 audio frames
 heads 12, head_dim 768 / 12 = 64, float32 (the catalog serves it with --dtype float32)
-per request: 12 × (4 + 12 pages) × 128 × 6 KiB = 144 MiB
+per request: 12 × (4 + 16 pages) × 128 × 6 KiB = 180 MiB   (cross-attention: the 2048 batched tokens)
 ```
 
 KV → 3 GiB, `--max-model-len 448`, memory → **8Gi**.

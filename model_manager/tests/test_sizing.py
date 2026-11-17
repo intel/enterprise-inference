@@ -80,7 +80,9 @@ def test_encoder_decoder_caches_decoder_and_audio_frames():
     layers = sizer.layout(WHISPER)
     assert [x.kind for x in layers] == ["full"] * 12 + ["cross"] * 12
     args = [*LLM_ARGS, "--dtype", "float32", "--no-enable-prefix-caching"]
-    assert sizer.bytes_per_request(layers, 1, 448, 4, 4, 128, 2048, False) == 144 * MIB  # 12 x (4 + 12) fp32 blocks
+    # 12 x (4 self + 16 cross) fp32 blocks: cross-attention is reserved for the 2048 batched tokens, not 1500 frames
+    assert sizer.bytes_per_request(layers, 1, 448, 4, 4, 128, 2048, False) == 180 * MIB
+    assert sizer.bytes_per_request(layers, 1, 448, 4, 4, 128, 448, False) == 144 * MIB
     s = sizer.size(WHISPER, gib(0.90), args, 1)
     assert (s.kv_gib, s.memory_gi, s.max_model_len) == (3, 8, 448)  # context capped at max_target_positions
 

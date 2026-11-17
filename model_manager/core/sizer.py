@@ -133,7 +133,8 @@ def bytes_per_request(layers: list[Layer], tp: int, max_len: int, kv_bytes: int,
     total = 0
     for x in attention:
         tokens_per_page = page // _per_token(x, tp, kv_bytes)
-        held = {"full": max_len, "cross": x.tokens,
+        # Cross-attention is reserved for the encoder budget, which defaults to the batched tokens.
+        held = {"full": max_len, "cross": max(x.tokens, batched_tokens),
                 "sliding": min(x.tokens - 1 + batched_tokens, max_len)}[x.kind]
         total += (math.ceil(held / tokens_per_page) + (x.kind == "sliding")) * page
     return total + len(linear) * (2 if prefix_caching else 1) * page
