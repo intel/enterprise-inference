@@ -24,6 +24,7 @@ import pytest
 MM = Path(__file__).resolve().parents[1]
 GOLDEN = MM / "tests" / "golden"
 FIXTURE = str(MM / "tests" / "fixtures" / "models.yaml")
+UNDEPLOY_ALL = str(MM / "tests" / "fixtures" / "undeploy-all.yaml")
 
 
 def _ready(cond: str) -> str:
@@ -115,10 +116,20 @@ NO_HT_DOUBLING = [(r'^(            cpu: )"16"$', r'\1"8"'), (r"^\[INFO \]  NRI: 
 PIN_NODE = (r"^        preferredDuringSchedulingIgnoredDuringExecution:\n          - weight: 100\n            preference:\n"
             r"              matchExpressions:\n(                - key: kubernetes.io/hostname\n[\s\S]*?)                    - w1\n"
             r"          - weight: 50\n[\s\S]*?operator: DoesNotExist\n", r'\1                    - "w1"\n')
-OVMS_KIND = (r"^\$ kubectl delete InferenceService qwen3-5-2b-ovms ",
-             "$ kubectl delete LLMInferenceService qwen3-5-2b-ovms ")
+
+
+def ovms_kind(name: str) -> tuple[str, str]:
+    """OVMS is served as an LLMInferenceService, not an InferenceService."""
+    return rf"^\$ kubectl delete InferenceService {re.escape(name)} ", f"$ kubectl delete LLMInferenceService {name} "
+
+
+def ovms_agw_route(name: str) -> tuple[str, str]:
+    """With agentgateway, OVMS gets the aigw- route of an LLMInferenceService, not direct-."""
+    return rf"^(\$ kubectl delete httproute )direct-({re.escape(name)} )", r"\1aigw-\2"
+
+
+OVMS_KIND = ovms_kind("qwen3-5-2b-ovms")
 OVMS_AIGATEWAY_ROUTE = (r"^\$ kubectl delete (aiservicebackend|backend) qwen3-5-2b-ovms .*\n", "")
-OVMS_AGW_ROUTE = (r"^(\$ kubectl delete httproute )direct-(qwen3-5-2b-ovms )", r"\1aigw-\2")
 HELP_HFID = [
     (r"^  deploy <model>\|--id <hf/repo>   ", "  deploy <model>|--hfid <hf/repo> "),
     (r"^  --id <hf/repo>       Ad-hoc deploy any HuggingFace model$",
@@ -135,17 +146,6 @@ HELP_GPU = [(r"^  --tp N .*\n",
              r"\1  MM_ACCEL_RESOURCE     Accelerator extended resource the cluster advertises (e.g. nvidia.com/gpu).\n"
              r"                        Required to deploy a device: gpu runtime (vllm-cuda); ai-solutions sets\n"
              r"                        it in rack-scale mode only\n")]
-# The catalog's GPU examples, its last entries, are undeployed too; the legacy catalog had none.
-GPU_MODELS = ("qwen3-0-6b-cuda", "llama-3-1-70b-instruct-cuda", "nemotron-3-5-lightning-30b-a3b-cuda",
-              "nemotron-3-super-120b-a12b-cuda", "nemotron-3-ultra-550b-a55b-cuda")
-UNDEPLOY_GPU_MODELS = [
-    (r"^(?=--- stderr\n)", "".join(
-        f"[INFO ]  Undeploying {n}\n[INFO ]  Waiting for {n} pods to terminate (timeout: 180s)...\n"
-        f"[  OK ]  {n} undeployed (all pods terminated, CPUs released)\n" for n in GPU_MODELS)),
-    (r"\Z", "".join(
-        f"$ kubectl delete LLMInferenceService {n} -n llm-inference --ignore-not-found\n"
-        f"$ kubectl delete configmap {n}-chat-template -n llm-inference --ignore-not-found\n"
-        f"$ kubectl delete httproute aigw-{n} -n llm-inference --ignore-not-found\n" for n in GPU_MODELS))]
 
 
 def nri_node(in_use: int) -> list:
@@ -296,7 +296,7 @@ CASES = [
         [r"get httproute direct-qwen-alt", 0, ""]]),
     case("undeploy-missing", "undeploy", "ghost"),
     case("undeploy-all-agentgateway", "undeploy", "all", "--wait", env={"MM_AI_GATEWAY_PROVIDER": "agentgateway"},
-         deviations=[OVMS_KIND, OVMS_AGW_ROUTE, *UNDEPLOY_GPU_MODELS]),
+         catalog=UNDEPLOY_ALL, deviations=[ovms_kind("ovms"), ovms_agw_route("ovms")]),
 ]
 
 
