@@ -1,0 +1,34 @@
+# Catalog for the undeploy-all parity case: one model per kind of cleanup
+# (vLLM chat, embed and rerank on direct routes, OVMS), so adding models to the
+# shipped catalog does not change its golden output.
+defaults:
+  namespace: llm-inference
+  require_amx: false
+
+models:
+  - name: chat
+    model_id: org/chat
+    category: llm
+    runtime: vllm
+
+  - name: embed
+    model_id: org/embed
+    category: embed
+    runtime: vllm
+
+  - name: rerank
+    model_id: org/rerank
+    category: rerank
+    runtime: vllm
+
+  - name: ovms
+    model_id: OpenVINO/ovms-int4-ov
+    category: llm
+    runtime: openvino
+
+runtimes:
+  vllm:
+    default_version: "0.24.0"
+    versions:
+      "0.24.0": { image: "img/vllm:0.24.0" }
+  openvino: {}

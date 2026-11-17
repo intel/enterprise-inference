@@ -22,6 +22,7 @@ import pytest
 MM = Path(__file__).resolve().parents[1]
 GOLDEN = MM / "tests" / "golden"
 FIXTURE = str(MM / "tests" / "fixtures" / "models.yaml")
+UNDEPLOY_ALL = str(MM / "tests" / "fixtures" / "undeploy-all.yaml")
 
 
 def _ready(cond: str) -> str:
@@ -116,7 +117,6 @@ PIN_NODE = (r"^        preferredDuringSchedulingIgnoredDuringExecution:\n       
 OVMS_KIND = (r"^\$ kubectl delete InferenceService qwen3-5-2b-ovms ",
              "$ kubectl delete LLMInferenceService qwen3-5-2b-ovms ")
 OVMS_AIGATEWAY_ROUTE = (r"^\$ kubectl delete (aiservicebackend|backend) qwen3-5-2b-ovms .*\n", "")
-OVMS_AGW_ROUTE = (r"^(\$ kubectl delete httproute )direct-(qwen3-5-2b-ovms )", r"\1aigw-\2")
 HELP_HFID = [
     (r"^  deploy <model>\|--id <hf/repo>   ", "  deploy <model>|--hfid <hf/repo> "),
     (r"^  --id <hf/repo>       Ad-hoc deploy any HuggingFace model$",
@@ -273,8 +273,9 @@ CASES = [
         [r"get LLMInferenceService qwen-alt -n llm-inference -o jsonpath", 0, "llm-inference"],
         [r"get httproute direct-qwen-alt", 0, ""]]),
     case("undeploy-missing", "undeploy", "ghost"),
+    # Its own catalog, so adding models to the shipped one leaves this golden unchanged.
     case("undeploy-all-agentgateway", "undeploy", "all", "--wait", env={"MM_AI_GATEWAY_PROVIDER": "agentgateway"},
-         deviations=[OVMS_KIND, OVMS_AGW_ROUTE]),
+         catalog=UNDEPLOY_ALL),
 ]
 
 
