@@ -54,6 +54,8 @@ HELP_SVC_NS = (r"^(  MM_INFERENCE_HOSTNAME .*\n)",
                r"                        Gateway and run with the namespace's SCC UIDs.\n"
                r"  MM_INFERENCE_GATEWAY_SVC_NS\n                        Namespace of the AI Gateway Service LiteLLM calls\n"
                r"                        (default: MM_INFERENCE_GATEWAY_NS, else envoy-gateway-system)\n")
+# vLLM 0.33.0 is a new runtime version.
+V0330 = (r"(Available: .*0\.28\.0)$", r"\1, 0.33.0")
 # --help documents the list command, which is new.
 HELP_LIST = [
     (r"^(  undeploy <model>\|<name>\|all .*\n)",
@@ -243,7 +245,8 @@ CASES = [
     case("not-in-catalog", "deploy", "nope", env=BE),
     case("server-not-declared", "deploy", "qwen3-0-6b", "--server", "openvino", env=BE),
     case("version-not-declared", "deploy", "qwen3-0-6b", "--server-version", "9.9", env=BE),
-    case("runtime-version-missing", "deploy", "llama3-8b-awq", "--server-version", "9.9", env=BE),
+    case("runtime-version-missing", "deploy", "llama3-8b-awq", "--server-version", "9.9", env=BE,
+         deviations=[V0330]),
     case("flat-runtime-version", "deploy", "qwen3-5-2b-ovms", "--server-version", "1", env=BE),
     case("invalid-cli-policy", "deploy", "qwen3-0-6b", "--cpu-policy", "bogus", "--dry-run"),
     # Side effects (fake cluster).
