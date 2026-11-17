@@ -136,14 +136,14 @@ The router is part of the **`litellm`** role and is controlled by one setting in
 hybrid_router_enabled: true
 ```
 
-Then run `./es_auto_installer.sh install inference` (or `install agent-toolkit`).
+Then run `./toolkit_manager.sh install inference` (or `install agent-toolkit`).
 
 The router is wired into the LiteLLM Helm release, and the install leaves an existing
 release as it is. To add, change or remove the router on a stack whose LiteLLM is already
 installed, upgrade the release with `litellm_reconcile`:
 
 ```bash
-./es_auto_installer.sh install inference -- -e litellm_reconcile=true
+./toolkit_manager.sh install inference -- -e litellm_reconcile=true
 ```
 
 (or set `litellm_reconcile: true` in `env/<env>/config.inference.yaml`, which upgrades the

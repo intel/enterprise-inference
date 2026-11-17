@@ -81,7 +81,7 @@ set in the Toolkit Manager repo's `config/repos.yaml` — and installs and opera
 
 ```
 enterprise-ai-solutions/
-├── es_auto_installer.sh          # Toolkit Manager entry point
+├── toolkit_manager.sh            # Toolkit Manager entry point (es_auto_installer.sh: former name, still works)
 ├── model-manager                 # thin wrapper → ext/.../model_manager/model-manager
 ├── config/repos.yaml             # declares this repo, and which branch to clone
 ├── env/<env>/global_config.yaml     # Toolkit Manager settings (base_domain_name, …)

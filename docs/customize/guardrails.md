@@ -127,7 +127,7 @@ The derived endpoint is the AI gateway's data-plane Service for the active
 guard_service_url: "http://ai-gateway.envoy-gateway-system.svc.cluster.local/other-ns/qwen3guard/v1/chat/completions"
 ```
 
-Then re-run `./es_auto_installer.sh install inference` — the install upgrades LiteLLM so
+Then re-run `./toolkit_manager.sh install inference` — the install upgrades LiteLLM so
 the new guard host reaches its allowlist (next section).
 
 ### Outbound URL allowlist
@@ -246,7 +246,7 @@ a sandbox mistake cannot take the guardrail down.
 ### Deploy with Intel® Inference Toolkit
 
 ```bash
-./es_auto_installer.sh install inference   # or: install agent-toolkit
+./toolkit_manager.sh install inference   # or: install agent-toolkit
 ```
 
 The litellm role registers the guardrail after LiteLLM is up, and llm_services deploys the
@@ -267,14 +267,14 @@ Re-register the guardrail (re-renders the code and updates the existing registra
 place):
 
 ```bash
-./es_auto_installer.sh install inference
+./toolkit_manager.sh install inference
 ```
 
 ---
 
 ## Verification
 
-`./es_auto_installer.sh validate inference` sends a short benign request through LiteLLM
+`./toolkit_manager.sh validate inference` sends a short benign request through LiteLLM
 and fails when the guardrail blocks it — the guard model is down, or its host is not
 allowlisted. The manual checks below go into detail.
 

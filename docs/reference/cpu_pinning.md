@@ -30,7 +30,7 @@ kubernetes_cpu_policy: "nri-balloons"   # nri-balloons | kubelet-static | best-e
 > This must match the value the cluster was **installed** with. It decides both how
 > kubelet is configured (Toolkit Manager repo) and how model manifests are rendered (this
 > repo). Changing it on an existing cluster requires re-running
-> `./es_auto_installer.sh install kubernetes` so kubelet is reconfigured.
+> `./toolkit_manager.sh install kubernetes` so kubelet is reconfigured.
 
 model-manager records the resolved policy on each model pod:
 

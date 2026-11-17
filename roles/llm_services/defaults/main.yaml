@@ -83,7 +83,7 @@ llm_services_deploy_runtimes: true
 
 # Deploy default models after infrastructure is ready
 # Set to false to skip model deployment during installation
-# Override via: ./es_auto_installer.sh install inference --skip-models
+# Override via: ./toolkit_manager.sh install inference --skip-models
 llm_services_deploy_models: true
 
 # Catalog models to deploy on install regardless of llm_services_deploy_models /

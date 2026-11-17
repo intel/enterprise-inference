@@ -80,11 +80,11 @@
       {%- if (kubernetes_cpu_policy | default('nri-balloons')) == 'nri-balloons' %}
       the nri-resource-policy-balloons DaemonSet is not present in kube-system.
       Models will be annotated for NRI but get no CPU pinning. Run the
-      nri_cpu_balloons role (./es_auto_installer.sh install nri_cpu_balloons).
+      nri_cpu_balloons role (./toolkit_manager.sh install nri_cpu_balloons).
       {%- else %}
       kubelet reports cpuManagerPolicy='{{ _llm_kubelet_cpu_policy.stdout | default('') | trim }}',
       not 'static'. Guaranteed pods will NOT get exclusive CPUs. Re-run
-      ./es_auto_installer.sh install kubernetes with
+      ./toolkit_manager.sh install kubernetes with
       kubernetes_cpu_policy=kubelet-static to reconfigure kubelet.
       {%- endif %}
   when: >-

@@ -74,7 +74,7 @@ envoy_ai_gateway_namespace: "envoy-ai-gateway-system"
 # This must match the value the cluster was installed with: it decides both how
 # kubelet is configured (solutions repo) and how model manifests are rendered
 # (this repo). Changing it on an existing cluster requires re-running
-# `./es_auto_installer.sh install kubernetes` so kubelet is reconfigured.
+# `./toolkit_manager.sh install kubernetes` so kubelet is reconfigured.
 kubernetes_cpu_policy: "nri-balloons"
 
 # NRI Balloons tuning (only when kubernetes_cpu_policy=nri-balloons):
@@ -94,7 +94,7 @@ kubernetes_cpu_policy: "nri-balloons"
 
 # Deploy models during installation (true/false)
 # Set to false to install infrastructure only without deploying any models
-# Can be overridden with: ./es_auto_installer.sh install inference --skip-models
+# Can be overridden with: ./toolkit_manager.sh install inference --skip-models
 llm_services_deploy_models: false
 
 # Catalog models deployed on install whatever llm_services_deploy_models says —

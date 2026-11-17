@@ -77,7 +77,7 @@ vllm_sr_enabled: true
 Then run the installer:
 
 ```bash
-./es_auto_installer.sh install inference   # or: install agent-toolkit
+./toolkit_manager.sh install inference   # or: install agent-toolkit
 ```
 
 The install will:
@@ -89,7 +89,7 @@ The install will:
    (`vllm_sr_litellm_model_name`, default `semantic-router`; Intel® Agent Toolkit sets
    `vllm-sr/auto`)
 
-`./es_auto_installer.sh validate inference` checks the router, the gateway, the
+`./toolkit_manager.sh validate inference` checks the router, the gateway, the
 `EnvoyPatchPolicy` and, with the dashboard on, its route and auth exemption.
 
 ### Verify
@@ -279,7 +279,7 @@ Prometheus metrics on port 9190 (Service `semantic-router-metrics`).
 After editing the settings, re-run the install:
 
 ```bash
-./es_auto_installer.sh install inference
+./toolkit_manager.sh install inference
 ```
 
 The Helm release is upgraded in place and the router restarts when its config changes.
@@ -298,7 +298,7 @@ The Helm release is upgraded in place and the router restarts when its config ch
 2. With `vllm_sr_route_models` unset, the next install discovers it. Otherwise add it
    to `vllm_sr_route_models`. Add it to a decision in `vllm_sr_config_override` if it
    should receive a specific category of prompts.
-3. Re-run `./es_auto_installer.sh install inference`.
+3. Re-run `./toolkit_manager.sh install inference`.
 
 The model then shows up in the dashboard and becomes a candidate for routing.
 

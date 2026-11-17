@@ -31,7 +31,7 @@ agentgateway_inference_extension_enabled: true
 
 # --- Gateway API CRDs (agentgateway needs the standard channel) ---
 # Only applied when absent (agentgateway as the sole gateway); with the
-# ai-solutions platform, envoy_gateway owns them. Same version it ships.
+# Toolkit Manager platform, envoy_gateway owns them. Same version it ships.
 agentgateway_gateway_api_version: "v1.6.1"
 agentgateway_gateway_api_manifest: >-
   https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ agentgateway_gateway_api_version }}/standard-install.yaml
