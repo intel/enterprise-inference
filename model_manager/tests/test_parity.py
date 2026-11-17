@@ -114,8 +114,19 @@ NO_HT_DOUBLING = [(r'^(            cpu: )"16"$', r'\1"8"'), (r"^\[INFO \]  NRI: 
 PIN_NODE = (r"^        preferredDuringSchedulingIgnoredDuringExecution:\n          - weight: 100\n            preference:\n"
             r"              matchExpressions:\n(                - key: kubernetes.io/hostname\n[\s\S]*?)                    - w1\n"
             r"          - weight: 50\n[\s\S]*?operator: DoesNotExist\n", r'\1                    - "w1"\n')
-OVMS_KIND = (r"^\$ kubectl delete InferenceService qwen3-5-2b-ovms ",
-             "$ kubectl delete LLMInferenceService qwen3-5-2b-ovms ")
+
+
+def ovms_kind(name: str) -> tuple[str, str]:
+    """OVMS is served as an LLMInferenceService, not an InferenceService."""
+    return rf"^\$ kubectl delete InferenceService {re.escape(name)} ", f"$ kubectl delete LLMInferenceService {name} "
+
+
+def ovms_agw_route(name: str) -> tuple[str, str]:
+    """With agentgateway, OVMS gets the aigw- route of an LLMInferenceService, not direct-."""
+    return rf"^(\$ kubectl delete httproute )direct-({re.escape(name)} )", r"\1aigw-\2"
+
+
+OVMS_KIND = ovms_kind("qwen3-5-2b-ovms")
 OVMS_AIGATEWAY_ROUTE = (r"^\$ kubectl delete (aiservicebackend|backend) qwen3-5-2b-ovms .*\n", "")
 HELP_HFID = [
     (r"^  deploy <model>\|--id <hf/repo>   ", "  deploy <model>|--hfid <hf/repo> "),
@@ -273,9 +284,8 @@ CASES = [
         [r"get LLMInferenceService qwen-alt -n llm-inference -o jsonpath", 0, "llm-inference"],
         [r"get httproute direct-qwen-alt", 0, ""]]),
     case("undeploy-missing", "undeploy", "ghost"),
-    # Its own catalog, so adding models to the shipped one leaves this golden unchanged.
     case("undeploy-all-agentgateway", "undeploy", "all", "--wait", env={"MM_AI_GATEWAY_PROVIDER": "agentgateway"},
-         catalog=UNDEPLOY_ALL),
+         catalog=UNDEPLOY_ALL, deviations=[ovms_kind("ovms"), ovms_agw_route("ovms")]),
 ]
 
 

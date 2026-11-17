@@ -23,6 +23,6 @@ $ kubectl delete httproute direct-embed -n llm-inference --ignore-not-found
 $ kubectl delete LLMInferenceService rerank -n llm-inference --ignore-not-found
 $ kubectl delete configmap rerank-chat-template -n llm-inference --ignore-not-found
 $ kubectl delete httproute direct-rerank -n llm-inference --ignore-not-found
-$ kubectl delete LLMInferenceService ovms -n llm-inference --ignore-not-found
+$ kubectl delete InferenceService ovms -n llm-inference --ignore-not-found
 $ kubectl delete configmap ovms-chat-template -n llm-inference --ignore-not-found
-$ kubectl delete httproute aigw-ovms -n llm-inference --ignore-not-found
+$ kubectl delete httproute direct-ovms -n llm-inference --ignore-not-found
