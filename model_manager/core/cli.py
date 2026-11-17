@@ -470,7 +470,7 @@ def deploy(o: Options, target: str) -> None:
         scaling_only = (changed or m.gpu) and _only_scaling_changed(m, render)
         if m.gpu:
             policy.rolls = not scaling_only
-        if changed and scaling_only:
+        if scaling_only:
             running = _running_replicas(m)
             info("  Only the replica count or autoscaling changed: the running pods stay, so only the replicas "
                  "beyond them are checked.")

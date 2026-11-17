@@ -352,6 +352,21 @@ def test_gpu_pods_roll_unless_only_the_scaling_changed(monkeypatch, scaling_only
     assert seen == [(rolls, False)]  # and a GPU model is never held to the catalog's AMX requirement
 
 
+def test_a_forced_unchanged_gpu_reapply_credits_its_running_pods(monkeypatch):
+    for k, v in {**GPU, "MM_PLATFORM": "kubernetes", "MM_LLMISVC_API_VERSION": "v1alpha2",
+                 "MM_CONFIG": str(cli.MM_DIR / "models.yaml"), "MM_FORCE_REDEPLOY": "1"}.items():
+        monkeypatch.setenv(k, v)
+    seen, steps = [], []
+    monkeypatch.setattr(k8s, "exists", lambda *a: True)
+    monkeypatch.setattr(cli, "_only_scaling_changed", lambda m, render: True)
+    monkeypatch.setattr(cli, "_running_replicas", lambda m, node="": 1)
+    monkeypatch.setattr(cli, "_upgrade_credit", lambda m, annotations, cpu: 0)
+    monkeypatch.setattr(cli, "preflight_gate", lambda gate, *a, running=0, amx=False: seen.append((gate.rolls, running)))
+    _quiet_deploy(monkeypatch, steps)
+    cli.deploy(cli.parse_args(["deploy", "qwen3-0-6b-cuda", "--wait"]), "qwen3-0-6b-cuda")
+    assert seen == [(False, 1)]  # no new pods, and the running pod's CPU and memory are not counted twice
+
+
 def test_node_matches_required_terms():
     node = {"metadata": {"name": "n0", "labels": {"kubernetes.io/hostname": "n0", "zone": "a"}}}
     term = lambda *e, fields=(): [{"matchExpressions": list(e), "matchFields": list(fields)}]  # noqa: E731
