@@ -354,7 +354,7 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
              if m.draft_model_id else None)
     try:
         s = sizer.size(cfg, hf_weight_bytes(m.model_id, proxy), args, tp, draft, int(kv) if kv else None,
-                       None if m.memory_auto else sizer.to_gib(m.memory))
+                       None if m.memory_auto else mem_bytes(m.memory) / sizer.GIB or None)
     except (sizer.Unsupported, ValueError) as e:  # ValueError: a non-integer engine arg such as --max-num-seqs
         warn(f"Memory sizing unavailable for {m.name} ({e}); using memory {m.memory}.")
         return None

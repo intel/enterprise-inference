@@ -398,27 +398,14 @@ def preflight_gate(policy: BestEffort, m: Model, tp: int, cpu: str, running: int
 
 
 def memory_gate(m: Model, s: Sizing | None) -> None:
-    """Abort before the download when the pod's memory cannot hold the model (vLLM is OOM-killed at load) or is
-    larger than any schedulable node offers (the pod stays Pending). Every CPU policy runs it."""
-    if _preflight_skipped():
+    """Abort before the download when the pod's memory cannot hold the model: vLLM would be OOM-killed at load.
+    Whether a node has that memory free is preflight_gate's check."""
+    have = mem_bytes(m.memory) / sizer.GIB
+    if _preflight_skipped() or not s or not have or s.needed_gib <= have:
         return
-    have = sizer.to_gib(m.memory)
-    errors = []
-    if s and have is not None and s.needed_gib > have:
-        errors.append(f"memory {m.memory} is below the {math.ceil(s.needed_gib)}Gi {m.name} needs at tp={s.tp}: "
-                      f"weights {s.weights_gib:.1f} + KV {s.tp} x {s.kv_gib} + overhead {s.tp} x "
-                      f"{sizer.OVERHEAD_GIB} GiB. Raise --memory or lower VLLM_CPU_KVCACHE_SPACE.")
-    nodes = _schedulable_nodes(m) or []
-    largest = max((g for g in (sizer.to_gib(text(pick(pick(n.get("status"), "allocatable", {}), "memory")))
-                               for n in nodes) if g is not None), default=None)
-    if have is not None and largest is not None and have > largest:
-        errors.append(f"no schedulable node has {m.memory} allocatable memory; the largest offers "
-                      f"{largest:.0f}Gi, so the pod would stay Pending.")
-    if not errors:
-        return
-    for e in errors:
-        warn(f"Memory pre-flight: {e}")
+    warn(f"Memory pre-flight: memory {m.memory} is below the {math.ceil(s.needed_gib)}Gi {m.name} needs at "
+         f"tp={s.tp}: weights {s.weights_gib:.1f} + KV {s.tp} x {s.kv_gib} + overhead {s.tp} x {sizer.OVERHEAD_GIB} GiB.")
     if os.environ.get("MM_PREFLIGHT") == "warn":
         return warn("Memory pre-flight failed but MM_PREFLIGHT=warn — proceeding anyway.")
-    abort(f"Memory pre-flight failed for {m.name}. Override with MM_PREFLIGHT=warn (proceed anyway) or "
-          "MM_SKIP_PREFLIGHT=1 (skip check).")
+    abort(f"Memory pre-flight failed for {m.name}: raise --memory or lower VLLM_CPU_KVCACHE_SPACE. Override with "
+          "MM_PREFLIGHT=warn (proceed anyway) or MM_SKIP_PREFLIGHT=1 (skip check).")

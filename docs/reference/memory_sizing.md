@@ -185,14 +185,14 @@ These run before the weights download, for every CPU policy:
 |---|---|---|
 | Topology | TP does not split the attention / KV heads | Abort (also with `--dry-run`) |
 | Fit | A set `memory` is below weights + TP × KV + TP × 3 GiB (no headroom) | Abort with the numbers |
-| Placement | The pod's memory exceeds every schedulable node's allocatable memory | Abort; the pod would stay Pending |
+| Placement | No node the model can use has the pod's CPU **and** memory free (allocatable minus running pods' requests) | Abort; the pod would stay Pending. This is the CPU-policy pre-flight, which gets the sized memory |
 
 The fit check matters most for TP. A set memory does not grow with `--tp`, but each
 worker allocates the full `VLLM_CPU_KVCACHE_SPACE`. Without the check, `--tp 2` on a
 model with `memory: 64Gi` and a 40 GiB KV cache would be OOM-killed at load.
 
 `MM_PREFLIGHT=warn` reports a failure and carries on. `MM_SKIP_PREFLIGHT=1` skips the
-fit and placement checks.
+fit check; see [CPU Pinning & NUMA](cpu_pinning.md#pre-flight-capacity-check) for the placement check.
 
 ## Fallbacks
 

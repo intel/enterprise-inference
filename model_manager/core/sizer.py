@@ -7,7 +7,6 @@ the attention page. See docs/reference/memory_sizing.md.
 from __future__ import annotations
 
 import math
-import re
 from dataclasses import dataclass
 
 from .config import Sizing
@@ -175,12 +174,3 @@ def size(cfg: dict | None, weight_bytes: int, args: list[str], tp: int, draft: t
     return Sizing(weights_gib=weights / GIB, kv_gib=kv_gib, tp=tp, max_model_len=max_len,
                   needed_gib=needed, memory_gi=math.ceil(needed * HEADROOM))
 
-
-def to_gib(quantity: str) -> float | None:
-    """A Kubernetes memory quantity (16Gi, 16G, 512Mi, bytes) in GiB; None when unparseable."""
-    m = re.fullmatch(r"([0-9.]+)\s*([KMGTP]i?)?", quantity.strip())
-    if not m:
-        return None
-    unit = m.group(2) or ""
-    power = "KMGTP".index(unit[0]) + 1 if unit else 0
-    return float(m.group(1)) * (1024 if unit.endswith("i") else 1000) ** power / GIB

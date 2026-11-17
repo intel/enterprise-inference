@@ -134,10 +134,6 @@ def test_arg_value_last_wins_in_any_spelling():
     assert sizer.arg_value(["--dtype"], "--dtype") == "" and sizer.arg_value([], "--dtype") == ""
 
 
-@pytest.mark.parametrize("q, want", [("16Gi", 16), ("512Mi", 0.5), ("1Ti", 1024), (str(GIB), 1), ("auto", None)])
-def test_to_gib(q, want):
-    assert sizer.to_gib(q) == want
-
 
 @pytest.fixture
 def hub(monkeypatch):
@@ -235,23 +231,15 @@ def test_version_0191_takes_the_category_kv(hub, monkeypatch):
     assert _sized("qwen3-0-6b", "--server-version", "0.19.1")[3]["VLLM_CPU_KVCACHE_SPACE"] == "8"
 
 
-def _nodes(monkeypatch, memory: str | None):
-    nodes = None if memory is None else {"items": [{"spec": {}, "status": {"allocatable": {"memory": memory}}}]}
-    monkeypatch.setattr(k8s, "get_json", lambda *a: nodes)
-
-
-@pytest.mark.parametrize("memory, needed, node, env, aborts", [
-    ("64Gi", 101, None, {}, True),                         # tp 2 with a tp 1 KV: OOM at load
-    ("64Gi", 101, None, {"MM_PREFLIGHT": "warn"}, False),
-    ("64Gi", 101, None, {"MM_SKIP_PREFLIGHT": "1"}, False),
-    ("40Gi", 34, "32Gi", {}, True),                        # no node is big enough: Pending
-    ("40Gi", 34, "64Gi", {}, False),
-    ("40Gi", 34, None, {}, False),                         # nodes unreadable: not checked
+@pytest.mark.parametrize("memory, needed, env, aborts", [
+    ("64Gi", 101, {}, True),                         # tp 2 with a tp 1 KV: OOM at load
+    ("64Gi", 101, {"MM_PREFLIGHT": "warn"}, False),
+    ("64Gi", 101, {"MM_SKIP_PREFLIGHT": "1"}, False),
+    ("64Gi", 58, {}, False),
 ])
-def test_memory_gate(monkeypatch, memory, needed, node, env, aborts):
+def test_memory_gate(monkeypatch, memory, needed, env, aborts):
     for k, v in env.items():
         monkeypatch.setenv(k, v)
-    _nodes(monkeypatch, node)
     s = Sizing(weights_gib=15, kv_gib=40, tp=2, max_model_len=8192, needed_gib=needed, memory_gi=0)
     m = Model(name="m", namespace="n", memory=memory)
     if aborts:
