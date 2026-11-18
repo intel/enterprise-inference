@@ -81,16 +81,27 @@ def load_yaml(path: Path) -> Any:
         abort(f"Cannot read {path}: {e}")
 
 
-def hf_model_info(model_id: str, proxy: str) -> dict:
-    """HuggingFace model metadata, or {} when the Hub is unreachable."""
+def hf_model_info(model_id: str, proxy: str, blobs: bool = False) -> dict:
+    """HuggingFace model metadata (with file sizes when blobs), or {} when the Hub is unreachable."""
     cmd = ["curl", "-sf", "--max-time", "10", *(["--proxy", proxy] if proxy else []),
-           f"https://huggingface.co/api/models/{model_id}"]
+           f"https://huggingface.co/api/models/{model_id}" + ("?blobs=true" if blobs else "")]
     r = subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
     try:
         data = json.loads(r.stdout) if r.returncode == 0 else {}
     except ValueError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+# A copy of the weights in the publisher's own format (Meta's original/): vLLM loads the safetensors.
+HF_EXCLUDE = "original/*"
+
+
+def hf_download_bytes(model_id: str, proxy: str) -> int:
+    """Bytes `hf download --exclude HF_EXCLUDE` fetches; 0 when unknown (Hub unreachable, no sizes)."""
+    files = hf_model_info(model_id, proxy, blobs=True).get("siblings") or []
+    return sum(int(f.get("size") or 0) for f in files
+               if isinstance(f, dict) and not str(f.get("rfilename", "")).startswith(HF_EXCLUDE.rstrip("*")))
 
 
 class Catalog:

@@ -1640,3 +1640,49 @@ def test_a_node_must_fit_both_the_cpu_policy_and_the_requests(monkeypatch):
     m = Model(name="m", namespace="n", memory="16Gi", replicas="1")
     assert policy._request_errors(m, "8", False) == []                   # requests alone: a fits
     assert policy._request_errors(m, "8", False, Nri(), 1) != []         # combined: no node fits both
+
+
+def test_download_bytes_skip_the_original_copy(monkeypatch):
+    """The free-space check counts what `hf download --exclude original/*` fetches."""
+    files = [{"rfilename": "model-00001.safetensors", "size": 5_000_000_000},
+             {"rfilename": "original/consolidated.00.pth", "size": 5_000_000_000},
+             {"rfilename": "config.json", "size": 700}, {"rfilename": "README.md"}]
+    monkeypatch.setattr(config, "hf_model_info", lambda repo, proxy, blobs=False: {"siblings": files} if blobs else {})
+    assert config.hf_download_bytes("meta-llama/x", "") == 5_000_000_700
+    monkeypatch.setattr(config, "hf_model_info", lambda repo, proxy, blobs=False: {})
+    assert config.hf_download_bytes("meta-llama/x", "") == 0  # Hub unreachable: size unknown
+
+
+def _vllm(draft=""):
+    return Model(name="big", namespace="llm-inference", model_id="org/big", runtime="vllm", draft_model_id=draft)
+
+
+def test_download_script_excludes_original_and_checks_space_only_when_the_size_is_known(monkeypatch):
+    monkeypatch.setattr(download, "trust_remote_code", lambda m, args: False)
+    with_size = download._script(_vllm(draft="org/draft"), [], need_bytes=3 * 1024**3)
+    assert "hf download 'org/big' --local-dir /models/big --exclude 'original/*'" in with_size
+    assert "hf download 'org/draft' --local-dir /models/big/draft --exclude 'original/*'" in with_size
+    assert "need_kb=3145728" in with_size
+    assert with_size.index("need_kb=") < with_size.index("hf download")
+    assert "need_kb=" not in download._script(_vllm(), [], need_bytes=0)
+
+
+@pytest.mark.parametrize("free_kb, have_kb, fails", [(1048576, 0, True), (4194304, 0, False), (1048576, 2097152, False)])
+def test_space_check_fails_before_download_when_the_store_is_too_small(tmp_path, free_kb, have_kb, fails):
+    """3 GiB needed: 1 GiB free fails; 4 GiB free, or 2 GiB of it already downloaded, goes ahead."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "df").write_text(f"#!/bin/sh\necho 'Filesystem 1024-blocks Used Available Capacity Mounted'\n"
+                                f"echo 'nfs:/x 9999999 0 {free_kb} 0% /models'\n")
+    (bin_dir / "du").write_text(f"#!/bin/sh\nprintf '{have_kb}\\t%s\\n' \"$2\"\n")
+    for f in bin_dir.iterdir():
+        f.chmod(0o755)
+    check = download.SPACE_CHECK.replace("@NEED_KB@", str(3 * 1048576)).replace("@DIR@", str(tmp_path / "big")).replace(
+        "@NAME@", "big") + "\necho DOWNLOADING"
+    r = subprocess.run(["sh", "-c", check], capture_output=True, text=True, check=False,  # nosec B603 B607
+                       env={"PATH": f"{bin_dir}:{os.environ['PATH']}"})
+    assert (r.returncode == 1) is fails
+    assert ("DOWNLOADING" in r.stdout) is not fails
+    if fails:
+        assert "big needs 3 GiB, the model store has 1 GiB free" in r.stdout
+        assert "llm_services_model_store_size" in r.stdout

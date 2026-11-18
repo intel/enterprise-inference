@@ -178,6 +178,11 @@ ROOMY = [[r"^get pods -A --field-selector status\.phase!=Succeeded,status\.phase
              "status": {"allocatable": {"cpu": "1000", "memory": "4Ti"}}}]})]]
 
 
+# Downloads skip the publisher-format weight copy (original/*) the legacy CLI fetched; applies to every
+# case that renders a download, so it is not listed per case.
+HF_EXCLUDE_DEV = (r"^(\s+hf download '[^']+' --local-dir \S+)$", r"\1 --exclude 'original/*'")
+
+
 def case(name, *args, env=None, k8s=(), catalog=None, deviations=()):
     return pytest.param({"args": args, "env": env or {}, "k8s": list(k8s) + ROOMY, "catalog": catalog,
                          "deviations": deviations}, id=name)
@@ -314,6 +319,7 @@ def test_parity(c, tmp_path, request):
     for pattern, repl in c["deviations"]:
         expected, n = re.subn(pattern, repl, expected, flags=re.M)
         assert n, f"stale deviation: {pattern}"
+    expected = re.sub(*HF_EXCLUDE_DEV, expected, flags=re.M)
     assert run(MM / "model-manager", c, tmp_path) == expected
 
 
