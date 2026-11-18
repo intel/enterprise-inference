@@ -71,7 +71,7 @@ per_request = KV-pool bytes one full-length request holds on one worker (below)
 | Term | Meaning |
 |---|---|
 | `W` | Weight bytes: `metadata.total_size` of `model.safetensors.index.json`, else the size of the `.safetensors` files (`consolidated.*` excluded). For quantized checkpoints the file size is the resident size. A draft model's weights are added |
-| `TP` | `--tensor-parallel-size` / `--tp`: one vLLM worker per rank |
+| `TP` | The last `--tensor-parallel-size` of the model's `args` (category, version, model), then `--arg` / `--tp`, as vLLM receives it: one vLLM worker per rank |
 | `kv_gib` | `VLLM_CPU_KVCACHE_SPACE`. vLLM allocates it **on every worker**, so the pod holds `TP ×` it |
 | `3 GiB` | Per-worker runtime: Python, PyTorch, oneDNN, prefill activations, sampling buffers |
 | `1.15` | Headroom for fragmentation, load-time page cache, and estimate error |

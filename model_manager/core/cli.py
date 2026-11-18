@@ -215,6 +215,14 @@ def _engine_cli_args(o: Options) -> tuple[list[str], int]:
     return args, 1
 
 
+def _tensor_parallel(m: Model, cli_args: list[str]) -> int:
+    """TP as vLLM sees it: the last --tensor-parallel-size of the category, version and model args, then --arg/--tp."""
+    tp = sizer.arg_value([*renderer.engine_args(m), *cli_args], "--tensor-parallel-size") or "1"
+    if not (is_uint(tp) and int(tp) > 0):
+        abort(f"--tensor-parallel-size for {m.name} requires a positive integer, got: {tp}")
+    return int(tp)
+
+
 def _ready_condition(obj: dict) -> dict | None:
     """The condition that says the model serves. MainWorkloadReady, not Ready: for an LLMInferenceService
     Ready also needs the InferencePool Accepted, which model-manager itself patches once this is True.
@@ -425,7 +433,8 @@ def deploy(o: Options, target: str) -> None:
     m = resolve(catalog, target, o)
     resolve_autoscaling(m, o)
     m.check()
-    cli_args, tp = _engine_cli_args(o)
+    cli_args, _ = _engine_cli_args(o)
+    tp = _tensor_parallel(m, cli_args)
     info(f"Deploying {m.name} ({m.kind})")
     info(f"  Runtime: {m.runtime}{f' @ {m.version}' if m.version else ''} | Category: {m.category} | "
          f"Routing: {m.routing or 'default'}")

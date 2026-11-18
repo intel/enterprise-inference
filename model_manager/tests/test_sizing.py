@@ -152,8 +152,8 @@ def _sized(*argv, catalog=None):
     o = cli.parse_args(["deploy", *argv])
     cat = Catalog(catalog or cli.MM_DIR / "models.yaml")
     m = config.resolve(cat, o.positional[1] if len(o.positional) > 1 else "", o)
-    cli_args, tp = cli._engine_cli_args(o)
-    s = cli._apply_sizing(m, cat, o, cli_args, tp)
+    cli_args, _ = cli._engine_cli_args(o)
+    s = cli._apply_sizing(m, cat, o, cli_args, cli._tensor_parallel(m, cli_args))
     doc = yaml.safe_load(renderer.manifest(m, cat, o, {}, m.cpu, cli_args))
     main = doc["spec"]["template"]["containers"][0]
     return m, s, main, {e["name"]: e.get("value") for e in main["env"]}
@@ -237,6 +237,32 @@ def test_sizing_off(hub, monkeypatch, argv, env):
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     assert _sized(*argv)[1] is None
+
+
+@pytest.mark.parametrize("model_args, argv, tp, memory", [
+    (["--tensor-parallel-size", "2"], [], 2, "43Gi"),           # the catalog's TP, which vLLM gets
+    (["--tensor-parallel-size", "2"], ["--tp", "4"], 4, "50Gi"),  # --tp wins, as in the rendered args
+    (["--tensor_parallel_size=2"], [], 2, "43Gi"),
+    ([], [], 1, "40Gi"),
+])
+def test_tp_from_the_catalog_args(hub, tmp_path, model_args, argv, tp, memory):
+    catalog = tmp_path / "models.yaml"
+    data = yaml.safe_load((cli.MM_DIR / "models.yaml").read_text())
+    data["models"] = [{"name": "tp", "model_id": "meta-llama/Llama-3.1-8B-Instruct", "category": "llm",
+                       "args": model_args}]
+    catalog.write_text(yaml.safe_dump(data))
+    m, s, main, env = _sized("tp", *argv, catalog=catalog)
+    assert (s.tp, main["resources"]["limits"]["memory"]) == (tp, memory)
+
+
+def test_bad_catalog_tp_rejected(hub, tmp_path, capsys):
+    catalog = tmp_path / "models.yaml"
+    data = yaml.safe_load((cli.MM_DIR / "models.yaml").read_text())
+    data["models"] = [{"name": "tp", "model_id": "org/m", "category": "llm", "args": ["--tensor-parallel-size", "x"]}]
+    catalog.write_text(yaml.safe_dump(data))
+    with pytest.raises(SystemExit):
+        _sized("tp", catalog=catalog)
+    assert "positive integer" in capsys.readouterr().err
 
 
 def test_draft_from_the_catalog_is_sized(hub, tmp_path):
