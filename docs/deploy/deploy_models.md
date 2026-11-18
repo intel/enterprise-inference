@@ -141,7 +141,16 @@ too. When the model already fills its node, run `./model-manager undeploy <name>
 first, or set `MM_PREFLIGHT=warn` to apply anyway (for example for a label-only
 change; a new pod then waits for GPUs). A change of `--replicas` alone keeps the
 running pods: a scale-down needs no free GPUs, and a scale-up needs them only
-for the added replicas. GPU models take a fixed `--replicas`: autoscaling
+for the added replicas. The pre-flight checks room for the new replicas next to the
+running ones (at least one new pod when the change restarts them), and that every replica
+fits once the running pods are gone, but not every step of the rolling update in between.
+Three changes can still stall the rollout with a new pod Pending: raising `--gpus` or
+moving the model with `--node` when it has two or more replicas, and raising `--replicas`
+together with a change that restarts the pods. Undeploy the model first for those, or for
+the last one change `--replicas` in a deploy of its own. A stalled rollout stays as it is:
+deploy the model again with its previous settings and `MM_PREFLIGHT=warn` (the pre-flight
+counts the stalled pods as running), or undeploy it and deploy it again.
+GPU models take a fixed `--replicas`: autoscaling
 (`--min-replicas`/`--max-replicas`) is not available for `vllm-cuda` yet.
 
 The model store must be mountable on a GPU node. On node-local storage

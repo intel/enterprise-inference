@@ -248,7 +248,14 @@ class GpuRuntime(BestEffort):
         per_node = [max(f, 0) // need for f in free.values()]
         # A store that binds on first use lands on one node, and every replica must mount it there.
         fit = max(per_node, default=0) if unbound else sum(per_node)
-        if not fit and self.rolls and own_pods and any(alloc[name] - used.get(name, 0) >= need for name in free):
+        # A rollout must also end with every replica placed, once the model's own pods have released their GPUs.
+        final = [max(alloc[name] - used.get(name, 0), 0) // need for name in free]
+        room = max(final, default=0) if unbound else sum(final)
+        if self.rolls and own_pods and 0 < room < int(m.replicas):
+            where = f" on {m.node}" if m.node else " on the nodes its model store is on" if terms or unbound else ""
+            return [f"Once its running pods are replaced, only {room} of {m.replicas} replicas fit{where}, so the "
+                    f"rollout could not finish: lower --gpus or --replicas, or free {resource}."]
+        if not fit and self.rolls and own_pods and room:
             return [f"{m.name}'s own running pods hold the {resource} it needs: if this change restarts the pod (any "
                     "change but --replicas may), the rollout starts the new one next to the running one. Undeploy it "
                     f"first (./model-manager undeploy {m.name}), or use MM_PREFLIGHT=warn to apply anyway (e.g. a "

@@ -312,6 +312,26 @@ def test_a_replica_only_change_needs_no_room_for_the_running_pods(monkeypatch, n
     assert (preflight(monkeypatch, nodes, pods, rolls=False, replicas=replicas) == []) is fits
 
 
+@pytest.mark.parametrize("nodes, gpus, fits", [
+    (_nodes(5), "2", False),      # three 1-GPU replicas to 2 GPUs each: one surge pod fits, 3 x 2 never does
+    (_nodes(4), "2", False),      # the node is full, and undeploying would not help either
+    (_nodes(6), "2", True),       # the end state fits
+    (_nodes(5), "1", True),       # same size
+])
+def test_a_rollout_whose_end_state_cannot_fit_is_refused(monkeypatch, nodes, gpus, fits):
+    errors = preflight(monkeypatch, nodes, _pods(*[("n0", "m", 1)] * 3), gpus=gpus, replicas="3")
+    assert (errors == []) is fits
+    if not fits:
+        assert errors == ["Once its running pods are replaced, only 2 of 3 replicas fit, so the rollout could not "
+                          "finish: lower --gpus or --replicas, or free nvidia.com/gpu."]
+
+
+def test_the_end_state_refusal_names_the_pinned_node(monkeypatch):
+    # Three 1-GPU replicas on n1, moved with --node to n0, which has room for 2.
+    errors = preflight(monkeypatch, _nodes(2, 8), _pods(*[("n1", "m", 1)] * 3), gpus="1", replicas="3", node="n0")
+    assert errors[0].startswith("Once its running pods are replaced, only 2 of 3 replicas fit on n0,")
+
+
 def test_a_pending_replica_still_needs_room(monkeypatch):
     # One replica runs on n0, one is Pending: a scale-up to 3 needs room for two pods, and only one fits on n1.
     errors = preflight(monkeypatch, _nodes(8, 8), _pods(("n0", "m", 8), ("", "m", 8)), rolls=False, replicas="3")
