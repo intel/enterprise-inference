@@ -1,6 +1,7 @@
 """Model catalog (models.yaml) and resolution of a catalog entry or --hfid into a Model."""
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -97,11 +98,11 @@ def hf_model_info(model_id: str, proxy: str, blobs: bool = False) -> dict:
 HF_EXCLUDE = "original/*"
 
 
-def hf_download_bytes(model_id: str, proxy: str) -> int:
-    """Bytes `hf download --exclude HF_EXCLUDE` fetches; 0 when unknown (Hub unreachable, no sizes)."""
-    files = hf_model_info(model_id, proxy, blobs=True).get("siblings") or []
+def hf_download_bytes(info: dict) -> int:
+    """Bytes `hf download --exclude HF_EXCLUDE` fetches, from hf_model_info(blobs=True); 0 when unknown."""
+    files = info.get("siblings") or []
     return sum(int(f.get("size") or 0) for f in files
-               if isinstance(f, dict) and not str(f.get("rfilename", "")).startswith(HF_EXCLUDE.rstrip("*")))
+               if isinstance(f, dict) and not fnmatch.fnmatch(str(f.get("rfilename", "")), HF_EXCLUDE))
 
 
 class Catalog:

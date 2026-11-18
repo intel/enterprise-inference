@@ -108,7 +108,8 @@ def test_unsafe_draft_id_rejected():
 def test_gated_draft_needs_token(kubectl, monkeypatch, capsys):
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.setattr(download, "_curl_ok", lambda *_: True)
-    monkeypatch.setattr(download, "hf_model_info", lambda repo, _: {"gated": "manual"} if repo == "org/draft" else {})
+    monkeypatch.setattr(download, "hf_model_info",
+                        lambda repo, _, blobs=False: {"gated": "manual"} if repo == "org/draft" else {})
     m = Model(name="m", namespace="n", model_id="org/m", draft_model_id="org/draft", runtime="vllm",
               runtime_image="img")
     with pytest.raises(SystemExit):
@@ -1642,15 +1643,25 @@ def test_a_node_must_fit_both_the_cpu_policy_and_the_requests(monkeypatch):
     assert policy._request_errors(m, "8", False, Nri(), 1) != []         # combined: no node fits both
 
 
-def test_download_bytes_skip_the_original_copy(monkeypatch):
+def test_download_bytes_skip_the_original_copy():
     """The free-space check counts what `hf download --exclude original/*` fetches."""
     files = [{"rfilename": "model-00001.safetensors", "size": 5_000_000_000},
              {"rfilename": "original/consolidated.00.pth", "size": 5_000_000_000},
              {"rfilename": "config.json", "size": 700}, {"rfilename": "README.md"}]
-    monkeypatch.setattr(config, "hf_model_info", lambda repo, proxy, blobs=False: {"siblings": files} if blobs else {})
-    assert config.hf_download_bytes("meta-llama/x", "") == 5_000_000_700
-    monkeypatch.setattr(config, "hf_model_info", lambda repo, proxy, blobs=False: {})
-    assert config.hf_download_bytes("meta-llama/x", "") == 0  # Hub unreachable: size unknown
+    assert config.hf_download_bytes({"siblings": files}) == 5_000_000_700
+    assert config.hf_download_bytes({}) == 0  # Hub unreachable: size unknown
+
+
+def test_one_hub_call_per_repo_serves_the_gated_check_and_the_size(kubectl, monkeypatch):
+    calls = []
+    monkeypatch.setattr(download, "_curl_ok", lambda *_: True)
+    monkeypatch.setattr(download, "hf_model_info", lambda repo, _, blobs=False: calls.append((repo, blobs)) or {})
+    monkeypatch.setattr(download, "_wait_job", lambda m, job: "")
+    monkeypatch.setattr(download.subprocess, "Popen", lambda *a, **k: None)
+    monkeypatch.setattr(download.time, "sleep", lambda _: None)
+    m = Model(name="m", namespace="n", model_id="org/m", draft_model_id="org/d", runtime="vllm", runtime_image="img")
+    download.download_weights(m, Catalog(cli.MM_DIR / "models.yaml"), [])
+    assert calls == [("org/m", True), ("org/d", True)]
 
 
 def _vllm(draft=""):
@@ -1667,22 +1678,37 @@ def test_download_script_excludes_original_and_checks_space_only_when_the_size_i
     assert "need_kb=" not in download._script(_vllm(), [], need_bytes=0)
 
 
-@pytest.mark.parametrize("free_kb, have_kb, fails", [(1048576, 0, True), (4194304, 0, False), (1048576, 2097152, False)])
-def test_space_check_fails_before_download_when_the_store_is_too_small(tmp_path, free_kb, have_kb, fails):
-    """3 GiB needed: 1 GiB free fails; 4 GiB free, or 2 GiB of it already downloaded, goes ahead."""
-    bin_dir = tmp_path / "bin"
+MIB = 1024  # in the check's KiB
+
+
+@pytest.mark.parametrize("free, files, sentinels, draft, fails", [
+    (1 * MIB, {}, (), "", True),  # nothing there, 3 MiB needed, 1 free
+    (4 * MIB, {}, (), "", False),
+    (1 * MIB, {"part.safetensors": 2}, (), "", False),  # 2 MiB already downloaded
+    (1 * MIB, {"original/consolidated.pth": 2}, (), "", True),  # an excluded copy is not reusable
+    (0, {"model.safetensors": 1}, (".download_complete",), "", False),  # nothing to download: no check
+    (0, {"model.safetensors": 1}, (".download_complete",), "org/draft", True),  # the draft still downloads
+    (0, {"model.safetensors": 1}, (".download_complete", "draft/.download_complete"), "org/draft", False),
+])
+def test_space_check_runs_only_before_a_download_and_counts_reusable_bytes(tmp_path, free, files, sentinels, draft,
+                                                                          fails):
+    """3 MiB needed; du runs on real files, df is stubbed."""
+    bin_dir, model = tmp_path / "bin", tmp_path / "big"
     bin_dir.mkdir()
-    (bin_dir / "df").write_text(f"#!/bin/sh\necho 'Filesystem 1024-blocks Used Available Capacity Mounted'\n"
-                                f"echo 'nfs:/x 9999999 0 {free_kb} 0% /models'\n")
-    (bin_dir / "du").write_text(f"#!/bin/sh\nprintf '{have_kb}\\t%s\\n' \"$2\"\n")
-    for f in bin_dir.iterdir():
-        f.chmod(0o755)
-    check = download.SPACE_CHECK.replace("@NEED_KB@", str(3 * 1048576)).replace("@DIR@", str(tmp_path / "big")).replace(
-        "@NAME@", "big") + "\necho DOWNLOADING"
+    (bin_dir / "df").write_text("#!/bin/sh\necho 'Filesystem 1024-blocks Used Available Capacity Mounted'\n"
+                                f"echo 'nfs:/x 9999999 0 {free} 0% /models'\n")
+    (bin_dir / "df").chmod(0o755)
+    for name, mib in files.items():
+        (model / name).parent.mkdir(parents=True, exist_ok=True)
+        (model / name).write_bytes(os.urandom(mib * 1024 * 1024))
+    for name in sentinels:
+        (model / name).parent.mkdir(parents=True, exist_ok=True)
+        (model / name).touch()
+    check = download.SPACE_CHECK.replace("@NEED_KB@", str(3 * MIB)).replace("@DIR@", str(model)).replace(
+        "@NAME@", "big").replace("@DRAFT_ID@", draft) + "\necho GOING_AHEAD"
     r = subprocess.run(["sh", "-c", check], capture_output=True, text=True, check=False,  # nosec B603 B607
                        env={"PATH": f"{bin_dir}:{os.environ['PATH']}"})
-    assert (r.returncode == 1) is fails
-    assert ("DOWNLOADING" in r.stdout) is not fails
+    assert (r.returncode == 1) is fails, r.stdout + r.stderr
+    assert ("GOING_AHEAD" in r.stdout) is not fails
     if fails:
-        assert "big needs 3 GiB, the model store has 1 GiB free" in r.stdout
-        assert "llm_services_model_store_size" in r.stdout
+        assert "big needs" in r.stdout and "llm_services_model_store_size" in r.stdout

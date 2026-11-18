@@ -14,8 +14,7 @@ from .ui import YELLOW, RESET, abort, info, ok
 
 TIMEOUT = 7200
 
-# Sentinel-guarded so re-deploys skip work already on the PVC. The space check runs first, so a model
-# that cannot fit fails in seconds instead of filling the store; what is already on the PVC counts.
+# Sentinel-guarded so re-deploys skip work already on the PVC; the space check runs before the draft fetch.
 VLLM_PREP = """set -e
 export HOME=/tmp HF_HOME=/tmp/.hf XDG_CACHE_HOME=/tmp/.cache PIP_CACHE_DIR=/tmp/.pip@SPACE@@DRAFT@
 if [ -f @DIR@/.download_complete ]; then echo 'Weights already present, skipping download'; exit 0; fi
@@ -23,14 +22,17 @@ command -v hf >/dev/null 2>&1 || pip install -q huggingface_hub[hf_xet]
 hf download '@ID@' --local-dir @DIR@ --exclude '@EXCLUDE@'@TRC@
 touch @DIR@/.download_complete"""
 
+# Only when something will download; the excluded copy (from an older full download) is not counted as reusable.
 SPACE_CHECK = """
-need_kb=@NEED_KB@
-have_kb=$(du -sk @DIR@ 2>/dev/null | cut -f1); have_kb=${have_kb:-0}
-set -- $(df -Pk /models | tail -1); free_kb=$4
-if [ $((need_kb - have_kb)) -gt "$free_kb" ]; then
-  echo "ERROR: @NAME@ needs $((need_kb / 1048576)) GiB, the model store has $((free_kb / 1048576)) GiB free."
-  echo "Undeploy a model, or raise llm_services_model_store_size and re-run the inference install."
-  exit 1
+if [ ! -f @DIR@/.download_complete ] || { [ -n '@DRAFT_ID@' ] && [ ! -f @DIR@/draft/.download_complete ]; }; then
+  need_kb=@NEED_KB@
+  have_kb=$(du -sk --exclude=original @DIR@ 2>/dev/null | cut -f1); have_kb=${have_kb:-0}
+  set -- $(df -Pk /models | tail -1); free_kb=$4
+  if [ $((need_kb - have_kb)) -gt "$free_kb" ]; then
+    echo "ERROR: @NAME@ needs $((need_kb / 1048576)) GiB, the model store has $((free_kb / 1048576)) GiB free."
+    echo "Undeploy a model, or raise llm_services_model_store_size and re-run the inference install."
+    exit 1
+  fi
 fi"""
 
 # The serving pod mounts only the model's directory and runs offline, so a speculative-decoding draft
@@ -119,8 +121,9 @@ def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
         abort(f"Network check failed: cannot reach {catalog.connectivity_url} (proxy: {catalog.https_proxy or 'none'}). "
               "Check network/proxy settings in models.yaml or environment.")
     token = os.environ.get("HF_TOKEN", "")
-    for repo in filter(None, (m.model_id, m.draft_model_id)):  # the draft downloads with the same token
-        if not token and pick(hf_model_info(repo, catalog.https_proxy), "gated"):
+    repos = {r: hf_model_info(r, catalog.https_proxy, blobs=True) for r in filter(None, (m.model_id, m.draft_model_id))}
+    for repo, meta in repos.items():  # the draft downloads with the same token
+        if not token and pick(meta, "gated"):
             abort(f"Model '{repo}' is gated. Set HF_TOKEN with an authorized token.")
     info(f"Downloading model weights: {m.model_id} → PVC:/{m.name}")
     if token:  # via stdin, so the token never appears in a process listing
@@ -136,9 +139,8 @@ def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
         env_items.append("            - name: HF_TOKEN\n              valueFrom:\n                secretKeyRef:\n"
                          "                  name: hf-token\n                  key: token")
     env_items += [f"            - name: {k}\n              value: {quote(v)}" for k, v in proxy_env(catalog)]
-    # Unknown (Hub unreachable) means no check, not a refusal: the download itself still reports a full store.
-    need = 0 if m.runtime == "openvino" else sum(hf_download_bytes(r, catalog.https_proxy)
-                                                for r in filter(None, (m.model_id, m.draft_model_id)))
+    # Unknown (Hub unreachable) means no check, not a refusal.
+    need = 0 if m.runtime == "openvino" else sum(hf_download_bytes(meta) for meta in repos.values())
     uid = m.run_as_user
     job = f"download-{m.name}"
     manifest = render(

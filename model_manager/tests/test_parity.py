@@ -319,7 +319,8 @@ def test_parity(c, tmp_path, request):
     for pattern, repl in c["deviations"]:
         expected, n = re.subn(pattern, repl, expected, flags=re.M)
         assert n, f"stale deviation: {pattern}"
-    expected = re.sub(*HF_EXCLUDE_DEV, expected, flags=re.M)
+    expected, n = re.subn(*HF_EXCLUDE_DEV, expected, flags=re.M)
+    assert n == len(re.findall(r"^\s+hf download '", expected, re.M)), "stale deviation: HF_EXCLUDE_DEV"
     assert run(MM / "model-manager", c, tmp_path) == expected
 
 
