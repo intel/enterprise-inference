@@ -9,6 +9,12 @@ works out the pod's memory and the vLLM KV cache from the model itself. It reads
 - the safetensors index or file sizes, for the weight size;
 - the engine args the model is served with.
 
+> [!WARNING]
+> For a **gated** repo (Llama, Gemma, Mistral) `config.json` is gated too. Without
+> `HF_TOKEN` the model cannot be sized: a model without `memory:` gets the category default
+> (16Gi) and KV cache (8 GiB), whatever its size or `--tp`. The memory pre-flight then
+> aborts the deploy if those cannot hold the weights. Set `HF_TOKEN`, or set `memory:`.
+
 Nothing is downloaded for this: only those small JSON documents are fetched, before
 the weight download starts.
 
@@ -196,8 +202,9 @@ fit check; see [CPU Pinning & NUMA](cpu_pinning.md#pre-flight-capacity-check) fo
 
 ## Fallbacks
 
-Sizing never blocks a deploy because it cannot run. It warns and keeps the static values
-(the set memory, else the category default):
+When sizing cannot run, the deploy warns and keeps the static values: the set `memory`,
+else the category default (`16Gi`), and the set `VLLM_CPU_KVCACHE_SPACE`, else the
+category's `kv_cache_gb` (8 GiB). These values do not change with `--tp`.
 
 | Situation | Message |
 |---|---|
@@ -207,9 +214,12 @@ Sizing never blocks a deploy because it cannot run. It warns and keeps the stati
 | `--pipeline-parallel-size` or `--data-parallel-size` > 1 | `--pipeline-parallel-size > 1` |
 | `MM_AUTOSIZE=false` | No sizing, and no fit check |
 
-The weight size is public even for gated repos, so a set memory and KV are still
-fit-checked without a token. The topology check needs `config.json`, so it is skipped for
-a gated repo without `HF_TOKEN`.
+The weight size is public even for gated repos, so the static values are still checked:
+the memory pre-flight aborts when they cannot hold weights + TP × (KV + 3 GiB), and the
+warning says so (`…; using memory 16Gi, below the 26.0 GiB its weights 15.0 + KV 1 x 8 +
+overhead 1 x 3 need.`). Only when no weight size is known either (no safetensors) does the
+deploy proceed unchecked. The topology check needs `config.json`, so it is skipped for a
+gated repo without `HF_TOKEN`.
 
 Sizing covers vLLM `llm` models only. `embed` and `rerank` models and OpenVINO keep the
 category defaults.

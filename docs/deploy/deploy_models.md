@@ -116,6 +116,11 @@ The download Job receives the token automatically. Public models work without it
 gated model **without** a token fails fast with a clear "model is gated — set
 HF_TOKEN" message, and during auto-deploy is reported without aborting the install.
 
+Memory sizing needs the token too: it reads the model's `config.json`, which is gated. Without
+`HF_TOKEN`, a gated model without `memory:` keeps the category default (16Gi, 8 GiB KV cache)
+at any `--tp`, and the memory pre-flight aborts if that cannot hold the weights. See
+[Memory & KV-Cache Sizing](../reference/memory_sizing.md#fallbacks).
+
 ## Models with custom code (`--trust-remote-code`)
 
 Some Hugging Face models ship custom modeling code that vLLM only loads with
