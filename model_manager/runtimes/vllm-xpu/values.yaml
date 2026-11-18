@@ -1,0 +1,43 @@
+# =============================================================================
+# vLLM XPU runtime — low-level plumbing (Intel Arc Pro B-Series XPU)
+# =============================================================================
+# vLLM on Intel GPUs, as a runtime separate from the CPU `vllm` one: the XPU build
+# ships as its own image and needs GPU-specific env. A device: gpu runtime like
+# vllm-cuda, with its own `container:` because KServe's default command starts the
+# CPU/CUDA vLLM.
+#
+# Deploy config (env, per-category args/defaults) lives in models.yaml →
+# runtimes.vllm-xpu; this file holds only the plumbing merged in at load time
+# (models.yaml wins on any key clash). Flat runtime — no version axis — so `image:`
+# is the single image every model runs; --server-version aborts.
+#
+# Plumbing keys: see runtimes/vllm-cuda/values.yaml, plus
+#   container       the XPU image's entrypoint, args, probe paths, startup budget, and
+#                   `chat_template: true` (this is vLLM, so --chat-template applies).
+#                   The weights are the model PVC mounted at /mnt/models.
+#   device_groups   Supplemental GIDs of the host's render and video groups, so the
+#                   non-root container can open /dev/dri/renderD*. Distro-specific
+#                   (render has no fixed GID): set your GPU nodes' in models.yaml →
+#                   runtimes.vllm-xpu.device_groups.
+#   wait_timeout    default --wait-timeout (seconds)
+# The Intel GPU device plugin must be installed so nodes advertise gpu.intel.com/xe.
+# =============================================================================
+
+image: "vllm/vllm-openai-xpu:v0.33.0"   # Intel XPU build of vLLM
+device: gpu
+kind: LLMInferenceService
+routing: epp
+accelerator_resource: gpu.intel.com/xe
+shm_size: 16Gi                          # tensor-parallel workers exchange data through /dev/shm
+device_groups: [44, 990]
+wait_timeout: 3600                      # matches the startup probe's one-hour budget (first start JIT-compiles kernels)
+container:
+  command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+  args: ["--model", "/mnt/models", "--served-model-name", "$model", "--host", "0.0.0.0", "--port", "8000"]
+  ready_path: /health
+  live_path: /health
+  run_as_user: 1000
+  chat_template: true
+  startup_failures: 180                 # 180 x 20s: room for the weight load and kernel compilation
+  startup_period: 20
+  startup_timeout: 10

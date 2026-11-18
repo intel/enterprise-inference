@@ -587,6 +587,29 @@ models:
             --enable-auto-tool-choice, --tool-call-parser, qwen3_coder, --reasoning-parser, nemotron_v3 ]
     autodeploy: false
 
+  # ── GPU examples (runtime: vllm-xpu): Intel Arc Pro B-Series (XPU), see runtimes.vllm-xpu below ──
+  # Parameters follow the Arc Pro B70 model-qualification runs (9k context, TORCH_LLM_ALLREDUCE, eager mode,
+  # no prefix caching, sliding window off). `gpus` is the per-pod GPU count and the default
+  # --tensor-parallel-size. Single-GPU (TP=1) models only.
+
+  - name: vllm-xpu-llama-3-1-8b
+    model_id: meta-llama/Llama-3.1-8B-Instruct
+    category: llm
+    runtime: vllm-xpu
+    gpus: 1
+    memory: 32Gi
+    args: [ --dtype, bfloat16, --disable-sliding-window, --max-model-len, "9216" ]
+    autodeploy: false
+
+  - name: vllm-xpu-gpt-oss-20b
+    model_id: openai/gpt-oss-20b
+    category: llm
+    runtime: vllm-xpu
+    gpus: 1
+    memory: 32Gi
+    args: [ --dtype, auto, --disable-sliding-window, --max-model-len, "9216", --max-num-batched-tokens, "9216" ]
+    autodeploy: false
+
 
 # =============================================================================
 # Runtimes — per-engine deploy config (images, versions, env, categories)
@@ -702,6 +725,35 @@ runtimes:
       rerank:
         args: [ --dtype, bfloat16 ]
         defaults: { cpu: 4, memory: "16Gi", gpus: 1 }
+
+  # ── vLLM (Intel Arc Pro B-Series XPU) ─────────────────────────────────────────
+  # Flat runtime (no version axis); image + plumbing live in runtimes/vllm-xpu/values.yaml.
+  # `gpus` is the per-pod GPU count and the default --tensor-parallel-size; cpu/memory are host-side.
+  # Needs the Intel GPU device plugin (gpu.intel.com/xe). The pod is non-root: the env below points
+  # every cache at /tmp, and device_groups (render, video GIDs of the GPU nodes) lets it open /dev/dri.
+  # Add --trust-remote-code per model that needs it.
+  vllm-xpu:
+    env:
+      VLLM_NO_USAGE_STATS: "1"
+      DO_NOT_TRACK: "1"
+      VLLM_WORKER_MULTIPROC_METHOD: "spawn"     # XPU contexts cannot survive fork()
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+      TORCH_LLM_ALLREDUCE: "1"                  # IPEX's fused all-reduce for tensor parallelism
+      SYCL_CACHE_PERSISTENT: "1"                # keep compiled kernels across restarts
+      ZES_ENABLE_SYSMAN: "1"                    # lets vLLM read free device memory
+      ZE_ENABLE_PCI_ID_DEVICE_ORDER: "1"        # stable GPU order across ranks
+      CCL_PROCESS_LAUNCHER: "none"              # ranks are vLLM workers, not an MPI job
+      CCL_WORKER_OFFLOAD: "0"
+      CCL_ZE_IPC_EXCHANGE: "pidfd"
+      CCL_ALLREDUCE: "ring"
+      TRITON_CACHE_DIR: "/tmp/.triton"
+      XDG_CACHE_HOME: "/tmp/.cache"
+      HOME: "/tmp"                              # non-root UID 1000 has no writable home in the image
+    categories:
+      llm:
+        args: [ --dtype, float16, --block-size, "64", --gpu-memory-utilization, "0.9", --max-model-len, "32768",
+                --enforce-eager, --no-enable-prefix-caching ]
+        defaults: { cpu: 8, memory: "64Gi", gpus: 1 }
 
   # ── OpenVINO Model Server ─────────────────────────────────────────────────────
   # Flat runtime (no version axis). image + plumbing live in

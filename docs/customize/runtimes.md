@@ -2,7 +2,8 @@
 
 ## What is it?
 
-A **runtime** is the engine that actually serves a model. Two are supported:
+A **runtime** is the engine that actually serves a model. The CPU engines are vLLM and OpenVINO; GPU engines
+(`vllm-cuda`, `vllm-xpu`) are described below:
 
 | Runtime | Use case | Key optimizations |
 |---------|----------|-------------------|
@@ -103,9 +104,61 @@ shm_size: 10Gi                              # /dev/shm for NCCL tensor paralleli
 ```
 
 A runtime for another accelerator uses the same keys with that accelerator's image and
-resource, for example `gpu.intel.com/xe` from the Intel GPU device plugin. See
+resource, for example `vllm-xpu` below with `gpu.intel.com/xe` from the Intel GPU device plugin. See
 [Deploy on GPU nodes](../deploy/deploy_models.md#deploy-on-gpu-nodes) for the GPU
 pre-flight and what changes in the rendered manifest.
+
+### vLLM on Intel Arc Pro B-Series (`vllm-xpu`)
+
+A GPU runtime like `vllm-cuda`, for Intel Arc Pro B-Series (Battlemage) cards, using the XPU
+build of vLLM. It is flat (no version axis: `image:` is the one image every model runs) and an
+`LLMInferenceService`, so it gets the gateway route, the `Ready` condition that `--wait` and
+Headlamp read, and the same GPU pre-flight as `vllm-cuda`. Config lives under
+`runtimes.vllm-xpu`; the plumbing in `model_manager/runtimes/vllm-xpu/values.yaml`:
+
+```yaml
+image: "vllm/vllm-openai-xpu:v0.33.0"
+device: gpu
+kind: LLMInferenceService
+routing: epp
+accelerator_resource: gpu.intel.com/xe   # extended resource the Intel GPU device plugin advertises
+shm_size: 16Gi                           # /dev/shm for tensor-parallel workers
+device_groups: [44, 990]                 # GIDs of the GPU nodes' render and video groups
+wait_timeout: 3600                       # default --wait-timeout: first start compiles XPU kernels
+container:                               # the XPU image's own entrypoint, args and probes
+  command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+  args: ["--model", "/mnt/models", "--served-model-name", "$model", "--host", "0.0.0.0", "--port", "8000"]
+  run_as_user: 1000
+  chat_template: true                    # this is vLLM: --chat-template applies
+  startup_failures: 180                  # 180 x 20s
+  startup_period: 20
+  startup_timeout: 10
+```
+
+A model sets `gpus` (per pod; also the default `--tensor-parallel-size`):
+
+```yaml
+- name: vllm-xpu-llama-3-1-8b
+  model_id: meta-llama/Llama-3.1-8B-Instruct
+  runtime: vllm-xpu
+  gpus: 1
+```
+
+- **Non-root.** The pod runs as `runAsNonRoot` (uid 1000) with `supplementalGroups` from
+  `device_groups`, so it can open `/dev/dri/renderD*` under the restricted Pod Security level.
+  The `render` group has no fixed GID: set your GPU nodes' in `runtimes.vllm-xpu.device_groups`
+  in `models.yaml` (`getent group render video` on the node).
+- **No driver install.** The `xe` kernel driver ships with the Linux kernel, and the userspace
+  stack is in the image. A node needs a kernel and firmware recent enough for the card, and the
+  [Intel GPU device plugin](https://github.com/intel/intel-device-plugins-for-kubernetes) so it
+  advertises `gpu.intel.com/xe` (see
+  [enterprise-ai-solutions#134](https://github.com/intel/enterprise-ai-solutions/pull/134)).
+- **Where it deploys.** The pod requests `gpu.intel.com/xe`; the GPU pre-flight refuses the
+  deploy when no Ready node advertises it. This works on mixed NVIDIA and Intel clusters.
+- **Remote code is per model.** The category args do not set `--trust-remote-code`; add it to a
+  model's `args` only where the model needs it.
+- **Single-GPU catalog models.** The shipped models use one GPU. Tensor parallelism (`gpus` > 1)
+  needs oneCCL's `pidfd_getfd`, which the default seccomp profile may block on Arc Pro B70.
 
 ## OpenVINO (OVMS)
 

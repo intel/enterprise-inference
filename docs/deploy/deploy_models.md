@@ -50,7 +50,7 @@ apply. Set `MM_FORCE_REDEPLOY=1` to force a full re-apply regardless.
 | `--hfid <hf/repo>` | Deploy any Hugging Face model directly, without a catalog entry (`--id` still works but is deprecated) |
 | `--name <name>` | Set the name to serve under (use with `--hfid`) |
 | `--as <name>` | Deploy a catalog model under a different name — run several variants at once |
-| `--server <name>` | Which engine serves the model: `vllm` (default), `openvino` or `vllm-cuda` (alias: `--runtime`) |
+| `--server <name>` | Which engine serves the model: `vllm` (default), `openvino`, `vllm-cuda` or `vllm-xpu` (alias: `--runtime`) |
 | `--server-version <v>` | Which version of that engine to use — see [below](#pick-an-engine-and-version) |
 | `--cpu N` | Number of CPU cores to give the model. `--cpu auto` sizes it to a NUMA node — see [CPU auto](../customize/catalog.md#cpu-auto) |
 | `--memory NGi` | Memory limit, e.g. `32Gi` |
@@ -58,7 +58,7 @@ apply. Set `MM_FORCE_REDEPLOY=1` to force a full re-apply regardless.
 | `--min-replicas N` / `--max-replicas N` | Autoscale between N copies (default min: 1); a max above the min turns it on. Needs `keda_enabled: true` and KServe 0.21 (`envoy_gateway_upgrade: true`); not on OpenShift yet |
 | `--scale-target N` | Load per copy that triggers a scale-up: waiting requests for vLLM (default: 2), in-flight requests for OpenVINO (default: 4) |
 | `--tp N` | Split one model across N CPU sockets for more throughput (advanced); on a GPU engine, across N GPUs, which also sets `--gpus` |
-| `--gpus N` | GPUs per pod for a GPU engine (`vllm-cuda`); also the default `--tp` — see [below](#deploy-on-gpu-nodes) |
+| `--gpus N` | GPUs per pod for a GPU engine (`vllm-cuda`, `vllm-xpu`); also the default `--tp` — see [below](#deploy-on-gpu-nodes) |
 | `--category <cat>` | Force the workload type: `llm`, `embed`, `rerank`, or `vlm` |
 | `--node <name>` | Pin the model to a specific cluster node |
 | `--cpu-policy <p>` | Override the CPU-pinning policy for this model: `nri-balloons`, `kubelet-static`, or `best-effort`. Must match how the cluster was installed — see [CPU Pinning & NUMA](../reference/cpu_pinning.md) |
@@ -93,7 +93,9 @@ isn't listed fails with a clear message rather than deploying something untested
 
 ## Deploy on GPU nodes
 
-The catalog ships a GPU engine, `vllm-cuda`, alongside the default CPU `vllm`.
+The catalog ships GPU engines, `vllm-cuda` (NVIDIA) and `vllm-xpu` (Intel Arc Pro B-Series, see
+[vLLM on Intel Arc Pro B-Series](../customize/runtimes.md#vllm-on-intel-arc-pro-b-series-vllm-xpu)),
+alongside the default CPU `vllm`.
 A model runs on GPU by selecting that runtime and, optionally, a GPU count:
 
 ```yaml
@@ -151,7 +153,7 @@ the last one change `--replicas` in a deploy of its own. A stalled rollout stays
 deploy the model again with its previous settings and `MM_PREFLIGHT=warn` (the pre-flight
 counts the stalled pods as running), or undeploy it and deploy it again.
 GPU models take a fixed `--replicas`: autoscaling
-(`--min-replicas`/`--max-replicas`) is not available for `vllm-cuda` yet.
+(`--min-replicas`/`--max-replicas`) is not available for GPU runtimes (`vllm-cuda`, `vllm-xpu`) yet.
 
 The model store must be mountable on a GPU node. On node-local storage
 (`local-path`), a store already bound to a node without the GPUs stops the
