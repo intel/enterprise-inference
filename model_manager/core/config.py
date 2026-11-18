@@ -82,7 +82,7 @@ def load_yaml(path: Path) -> Any:
         abort(f"Cannot read {path}: {e}")
 
 
-def hf_model_info(model_id: str, proxy: str, blobs: bool = False, token: str = "") -> dict:
+def hf_model_info(model_id: str, proxy: str, blobs: bool = False, token: str | None = None) -> dict:
     """HuggingFace model metadata (with file sizes when blobs), or {} when the Hub is unreachable."""
     # A token reaches curl on stdin (-H @-), never in its arguments; private repos need it.
     cmd = ["curl", "-sf", "--max-time", "10", *(["--proxy", proxy] if proxy else []), *(["-H", "@-"] if token else []),

@@ -109,7 +109,7 @@ def test_gated_draft_needs_token(kubectl, monkeypatch, capsys):
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.setattr(download, "_curl_ok", lambda *_: True)
     monkeypatch.setattr(download, "hf_model_info",
-                        lambda repo, _, blobs=False, token="": {"gated": "manual"} if repo == "org/draft" else {})
+                        lambda repo, _, blobs=False, token=None: {"gated": "manual"} if repo == "org/draft" else {})
     m = Model(name="m", namespace="n", model_id="org/m", draft_model_id="org/draft", runtime="vllm",
               runtime_image="img")
     with pytest.raises(SystemExit):
@@ -1656,7 +1656,7 @@ def test_one_hub_call_per_repo_serves_the_gated_check_and_the_size(kubectl, monk
     calls = []
     monkeypatch.setattr(download, "_curl_ok", lambda *_: True)
     monkeypatch.setattr(download, "hf_model_info",
-                        lambda repo, _, blobs=False, token="": calls.append((repo, blobs)) or {})
+                        lambda repo, _, blobs=False, token=None: calls.append((repo, blobs)) or {})
     monkeypatch.setattr(download, "_wait_job", lambda m, job: "")
     monkeypatch.setattr(download.subprocess, "Popen", lambda *a, **k: None)
     monkeypatch.setattr(download.time, "sleep", lambda _: None)
@@ -1669,18 +1669,19 @@ def test_hub_token_goes_to_curl_on_stdin_never_in_its_arguments(monkeypatch):
     seen = []
     monkeypatch.setattr(config.subprocess, "run", lambda cmd, **kw: seen.append((cmd, kw.get("input"))) or
                         subprocess.CompletedProcess(cmd, 0, "{}", ""))
-    config.hf_model_info("org/private", "", blobs=True, token="hf_s3cret")
+    fake = "hf_" + "s3cret"  # a stand-in, built so it is no literal credential
+    config.hf_model_info("org/private", "", blobs=True, token=fake)
     config.hf_model_info("org/public", "", blobs=True)
     (with_token, stdin), (anonymous, no_stdin) = seen
-    assert "hf_s3cret" not in " ".join(with_token) and ["-H", "@-"] == with_token[-3:-1]
-    assert stdin == "Authorization: Bearer hf_s3cret\n"
+    assert fake not in " ".join(with_token) and ["-H", "@-"] == with_token[-3:-1]
+    assert stdin == f"Authorization: Bearer {fake}\n"
     assert "-H" not in anonymous and no_stdin is None
 
 
 def test_a_draft_that_is_the_model_itself_is_budgeted_twice(kubectl, monkeypatch):
     monkeypatch.setattr(download, "_curl_ok", lambda *_: True)
     monkeypatch.setattr(download, "hf_model_info",
-                        lambda repo, _, blobs=False, token="": {"siblings": [{"rfilename": "w.safetensors",
+                        lambda repo, _, blobs=False, token=None: {"siblings": [{"rfilename": "w.safetensors",
                                                                               "size": 3 * 1024**3}]})
     monkeypatch.setattr(download, "_wait_job", lambda m, job: "")
     monkeypatch.setattr(download.subprocess, "Popen", lambda *a, **k: None)
