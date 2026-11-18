@@ -29,6 +29,11 @@ ai_gateway_namespace: "{{ kserve_llmisvc_namespace | default('llm-inference') }}
 # Internal consumers can reach it at: <name>.<ai_gateway_namespace>.svc.cluster.local:80
 ai_gateway_service_name: "ai-gateway"
 
+# Per-connection buffer on the AI Gateway listener. The gateway buffers the whole
+# request body to read the model name, and Envoy's 32KiB default rejects larger
+# bodies with 413. Agent requests (system prompt, tool schemas, history) exceed it.
+ai_gateway_buffer_limit: "50Mi"
+
 # External inference hostname (eg-gateway TLS listener → ai-gateway)
 inference_hostname: "inference.{{ base_domain_name | default('inference-example.com') }}"
 # Path mode (routing_mode: path): <base>/inference, prefix stripped for the AI
