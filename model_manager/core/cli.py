@@ -36,7 +36,7 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
 {BOLD}{CYAN}Deploy Options:{RESET}
   {GREEN}--hfid{RESET} <hf/repo>     Ad-hoc deploy any HuggingFace model (--id still works, deprecated)
   {GREEN}--name{RESET} <name>        Override generated name (with --hfid)
-  {GREEN}--server{RESET} <name>      Model server/engine: vllm (default) | openvino | vllm-cuda  (alias: --runtime)
+  {GREEN}--server{RESET} <name>      Model server/engine: vllm (default) | openvino | vllm-cuda | sglang-xpu  (alias: --runtime)
   {GREEN}--server-version{RESET} V   Server version (must be declared for the model if it uses servers:)
   {GREEN}--as{RESET} <name>          Deploy under a distinct name (run multiple server/version variants at once)
   {GREEN}--cpu{RESET} N              CPU cores

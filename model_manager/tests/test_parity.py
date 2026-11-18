@@ -141,7 +141,7 @@ HELP_HFID = [
 HELP_GPU = [(r"^  --tp N .*\n",
              r"  --tp N               Tensor-parallel size (splits across N NUMA nodes; on a GPU runtime, also N GPUs)\n"
              r"  --gpus N             GPUs per pod (device: gpu runtimes, e.g. vllm-cuda); also the default --tp\n"),
-            (r"vllm \(default\) \| openvino  \(alias: --runtime\)$", "vllm (default) | openvino | vllm-cuda  (alias: --runtime)")]
+            (r"vllm \(default\) \| openvino  \(alias: --runtime\)$", "vllm (default) | openvino | vllm-cuda | sglang-xpu  (alias: --runtime)")]
 
 
 def nri_node(in_use: int) -> list:

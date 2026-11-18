@@ -33,8 +33,8 @@ spec:
           httpGet:
             path: {{READY_PATH}}
             port: 8000
-          failureThreshold: 120
-          periodSeconds: 10
+          failureThreshold: {{STARTUP_FAILURES}}
+          periodSeconds: {{STARTUP_PERIOD}}{{STARTUP_TIMEOUT}}
         livenessProbe:
           httpGet:
             path: {{LIVE_PATH}}
@@ -61,5 +61,5 @@ spec:
             type: RuntimeDefault
     securityContext:
       seccompProfile:
-        type: RuntimeDefault
+        type: RuntimeDefault{{SUPPLEMENTAL_GROUPS}}
 {{CHAT_TEMPLATE_VOLUME}}{{AFFINITY}}{{TOLERATIONS}}
