@@ -29,8 +29,10 @@ if [ ! -f @DIR@/.download_complete ]@DRAFT_PENDING@; then
   have_kb=$(du -sk --exclude=original @DIR@ 2>/dev/null | cut -f1); have_kb=${have_kb:-0}
   free_kb=$(df -Pk /models | tail -1 | { read -r _ _ _ f _; echo "$f"; })
   if [ $((need_kb - have_kb)) -gt "$free_kb" ]; then
-    echo "ERROR: @NAME@ needs $((need_kb / 1048576)) GiB, the model store has $((free_kb / 1048576)) GiB free."
-    echo "Undeploy a model, or raise llm_services_model_store_size and re-run the inference install."
+    echo "ERROR: @NAME@ needs $((need_kb / 1048576)) GiB, the model store has $((free_kb / 1048576)) GiB free. Largest on it:"
+    du -sk /models/* 2>/dev/null | sort -rn | head -5 | while read -r kb d; do echo "  $((kb / 1048576)) GiB  $d"; done
+    echo "Delete an unused model's weights there (undeploy keeps them), or raise llm_services_model_store_size:"
+    echo "an existing PVC grows only where its StorageClass allows volume expansion."
     exit 1
   fi
 fi"""
@@ -123,7 +125,8 @@ def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
         abort(f"Network check failed: cannot reach {catalog.connectivity_url} (proxy: {catalog.https_proxy or 'none'}). "
               "Check network/proxy settings in models.yaml or environment.")
     token = os.environ.get("HF_TOKEN", "")
-    repos = {r: hf_model_info(r, catalog.https_proxy, blobs=True) for r in filter(None, (m.model_id, m.draft_model_id))}
+    repos = {r: hf_model_info(r, catalog.https_proxy, blobs=True, token=token)
+             for r in filter(None, (m.model_id, m.draft_model_id))}
     for repo, meta in repos.items():  # the draft downloads with the same token
         if not token and pick(meta, "gated"):
             abort(f"Model '{repo}' is gated. Set HF_TOKEN with an authorized token.")
@@ -142,7 +145,8 @@ def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
                          "                  name: hf-token\n                  key: token")
     env_items += [f"            - name: {k}\n              value: {quote(v)}" for k, v in proxy_env(catalog)]
     # Unknown (Hub unreachable) means no check, not a refusal.
-    need = 0 if m.runtime == "openvino" else sum(hf_download_bytes(meta) for meta in repos.values())
+    # Per destination: a draft that is the model itself still downloads twice (<name>/ and <name>/draft).
+    need = 0 if m.runtime == "openvino" else sum(hf_download_bytes(repos[r]) for r in (m.model_id, m.draft_model_id) if r)
     uid = m.run_as_user
     job = f"download-{m.name}"
     manifest = render(
