@@ -287,6 +287,7 @@ def test_version_0191_takes_the_category_kv(hub, monkeypatch):
     ("64Gi", 58, {}, False),
 ])
 def test_memory_gate(monkeypatch, memory, needed, env, aborts):
+    monkeypatch.setattr(policy, "_schedulable_nodes", lambda m: [])
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     s = Sizing(weights_gib=15, kv_gib=40, tp=2, max_model_len=8192, needed_gib=needed, memory_gi=0)
@@ -296,6 +297,59 @@ def test_memory_gate(monkeypatch, memory, needed, env, aborts):
             policy.memory_gate(m, s)
     else:
         policy.memory_gate(m, s)
+
+
+def _numa_node(numa_nodes="6", max_tp="4", capacity="1584035764Ki"):
+    labels = {k: v for k, v in (("nri.intel.com/numa-nodes", numa_nodes), ("nri.intel.com/max-tp", max_tp)) if v}
+    return {"metadata": {"name": "w1", "labels": labels}, "spec": {}, "status": {"capacity": {"memory": capacity}}}
+
+
+@pytest.mark.parametrize("weights, kv, tp, node, error", [
+    (15, 16, 1, _numa_node(), None),                       # Llama-8B: 34 GiB per worker in a 252 GiB NUMA node
+    (280, 16, 1, _numa_node(), "--tp 2"),                  # 299 GiB per worker: two workers hold 140 GiB of weights each
+    (600, 16, 1, _numa_node(), "--tp 4"),
+    (600, 16, 1, _numa_node(max_tp="2"), "No TP the node supports"),
+    (280, 240, 1, _numa_node(), "No TP the node supports"),  # the KV alone fills the NUMA node
+    (280, 16, 2, _numa_node(), None),                      # already split: 159 GiB per worker
+    (280, 16, 1, _numa_node(numa_nodes=""), None),         # no published NUMA layout: not checked
+])
+def test_numa_gate(monkeypatch, capsys, weights, kv, tp, node, error):
+    """The node is this cluster's: 6 NUMA nodes (SNC3 on 2 sockets) of 252 GiB, max-tp 4."""
+    monkeypatch.setattr(policy, "_schedulable_nodes", lambda m: [node])
+    s = Sizing(weights_gib=weights, kv_gib=kv, tp=tp, max_model_len=8192,
+               needed_gib=weights + tp * (kv + sizer.OVERHEAD_GIB), memory_gi=0)
+    m = Model(name="m", namespace="n", memory="2000Gi")
+    if error is None:
+        policy.memory_gate(m, s)
+        return
+    with pytest.raises(SystemExit):
+        policy.memory_gate(m, s)
+    err = capsys.readouterr().err
+    assert "per TP worker" in err and "a NUMA node has 252 GiB" in err and error in err
+
+
+@pytest.mark.parametrize("nodes, weights, fits", [
+    ([_numa_node(numa_nodes="2", max_tp="2", capacity="1Ti")], 280, True),            # 2 x 512 GiB, no SNC
+    ([_numa_node(numa_nodes="1", max_tp="1", capacity="256Gi")], 280, False),         # one socket, one NUMA node
+    ([_numa_node(), _numa_node(numa_nodes="2", max_tp="2", capacity="1Ti")], 280, True),  # mixed: the 512 GiB node
+])
+def test_numa_gate_reads_each_nodes_layout(monkeypatch, nodes, weights, fits):
+    monkeypatch.setattr(policy, "_schedulable_nodes", lambda m: nodes)
+    s = Sizing(weights_gib=weights, kv_gib=16, tp=1, max_model_len=8192, needed_gib=weights + 19, memory_gi=0)
+    m = Model(name="m", namespace="n", memory="2000Gi")
+    if fits:
+        policy.memory_gate(m, s)
+    else:
+        with pytest.raises(SystemExit):
+            policy.memory_gate(m, s)
+
+
+def test_numa_gate_warn_mode_proceeds(monkeypatch, capsys):
+    monkeypatch.setenv("MM_PREFLIGHT", "warn")
+    monkeypatch.setattr(policy, "_schedulable_nodes", lambda m: [_numa_node()])
+    s = Sizing(weights_gib=280, kv_gib=16, tp=1, max_model_len=8192, needed_gib=299, memory_gi=0)
+    policy.memory_gate(Model(name="m", namespace="n", memory="400Gi"), s)
+    assert "--tp 2" in capsys.readouterr().err
 
 
 def test_hf_token_goes_on_stdin(monkeypatch):
