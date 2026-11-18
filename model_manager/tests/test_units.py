@@ -1705,7 +1705,8 @@ def test_space_check_runs_only_before_a_download_and_counts_reusable_bytes(tmp_p
         (model / name).parent.mkdir(parents=True, exist_ok=True)
         (model / name).touch()
     check = download.SPACE_CHECK.replace("@NEED_KB@", str(3 * MIB)).replace("@DIR@", str(model)).replace(
-        "@NAME@", "big").replace("@DRAFT_ID@", draft) + "\necho GOING_AHEAD"
+        "@NAME@", "big").replace("@DRAFT_PENDING@", download.DRAFT_PENDING if draft else "").replace(
+        "@DIR@", str(model)) + "\necho GOING_AHEAD"
     r = subprocess.run(["sh", "-c", check], capture_output=True, text=True, check=False,  # nosec B603 B607
                        env={"PATH": f"{bin_dir}:{os.environ['PATH']}"})
     assert (r.returncode == 1) is fails, r.stdout + r.stderr

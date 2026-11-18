@@ -24,16 +24,17 @@ touch @DIR@/.download_complete"""
 
 # Only when something will download; the excluded copy (from an older full download) is not counted as reusable.
 SPACE_CHECK = """
-if [ ! -f @DIR@/.download_complete ] || { [ -n '@DRAFT_ID@' ] && [ ! -f @DIR@/draft/.download_complete ]; }; then
+if [ ! -f @DIR@/.download_complete ]@DRAFT_PENDING@; then
   need_kb=@NEED_KB@
   have_kb=$(du -sk --exclude=original @DIR@ 2>/dev/null | cut -f1); have_kb=${have_kb:-0}
-  set -- $(df -Pk /models | tail -1); free_kb=$4
+  free_kb=$(df -Pk /models | tail -1 | { read -r _ _ _ f _; echo "$f"; })
   if [ $((need_kb - have_kb)) -gt "$free_kb" ]; then
     echo "ERROR: @NAME@ needs $((need_kb / 1048576)) GiB, the model store has $((free_kb / 1048576)) GiB free."
     echo "Undeploy a model, or raise llm_services_model_store_size and re-run the inference install."
     exit 1
   fi
 fi"""
+DRAFT_PENDING = " || [ ! -f @DIR@/draft/.download_complete ]"
 
 # The serving pod mounts only the model's directory and runs offline, so a speculative-decoding draft
 # (draft_model_id) is fetched into <name>/draft, served as /mnt/models/draft. It has its own sentinel,
@@ -87,7 +88,8 @@ def _script(m: Model, cli_args: list[str], need_bytes: int = 0) -> str:
         script = OVMS_PREP.replace("@WF@", f" --weight-format {wf}" if wf else "").replace(
             "@STAGE@", f"/models/.pull-{m.name}").replace("@DEVICE@", os.environ.get("MM_OVMS_TARGET_DEVICE") or "CPU")
     else:
-        space = SPACE_CHECK.replace("@NEED_KB@", str(-(-need_bytes // 1024))) if need_bytes > 0 else ""
+        space = SPACE_CHECK.replace("@NEED_KB@", str(-(-need_bytes // 1024))).replace(
+            "@DRAFT_PENDING@", DRAFT_PENDING if m.draft_model_id else "") if need_bytes > 0 else ""
         script = VLLM_PREP.replace("@TRC@", TRC_PREFETCH if trust_remote_code(m, cli_args) else "").replace(
             "@DRAFT@", DRAFT_FETCH if m.draft_model_id else "").replace("@SPACE@", space).replace(
             "@EXCLUDE@", HF_EXCLUDE)
