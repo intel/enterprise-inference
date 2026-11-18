@@ -90,7 +90,10 @@ def layout(cfg: dict) -> list[Layer]:
 
 def context_limit(cfg: dict) -> int:
     t = text_config(cfg)
-    return int(t.get("max_position_embeddings") or t.get("max_target_positions") or MAX_MODEL_LEN)
+    for key in ("max_position_embeddings", "max_target_positions", "n_positions", "seq_length", "max_sequence_length"):
+        if t.get(key):
+            return int(t[key])
+    raise Unsupported("context length unknown (no max_position_embeddings in config.json)")
 
 
 def topology_error(cfg: dict, tp: int) -> str:
@@ -122,54 +125,67 @@ def bytes_per_request(layers: list[Layer], tp: int, max_len: int, kv_bytes: int,
     """KV pool bytes one full-length request holds on one worker.
 
     Every layer's page is the widest attention layer's block (narrower layers fit more tokens per
-    block); with linear layers the block grows until a page also holds one linear state."""
+    block); with linear layers the block grows until a page also holds one linear state. Layers of one
+    kind form KV cache groups of equal size, the smallest kind's count (the largest's when under 1.5x
+    it), so a kind whose count is not a multiple is padded with layers that cost as much as its own
+    (vLLM 0.28 kv_cache_utils._get_kv_cache_groups_uniform_page_size)."""
     attention = [x for x in layers if x.kind != "linear"]
     linear = [x for x in layers if x.kind == "linear"]
     widest = max(_per_token(x, tp, kv_bytes) for x in attention)
     page = widest * block
     if linear:
         page = math.ceil(_linear_state(linear[0], tp, model_bytes) / page) * page
-    total = 0
+    kinds: dict[tuple, list[int]] = {}
     for x in attention:
         tokens_per_page = page // _per_token(x, tp, kv_bytes)
         # Cross-attention is reserved for the encoder budget, which defaults to the batched tokens.
         held = {"full": max_len, "cross": max(x.tokens, batched_tokens),
                 "sliding": min(x.tokens - 1 + batched_tokens, max_len)}[x.kind]
-        total += (math.ceil(held / tokens_per_page) + (x.kind == "sliding")) * page
-    return total + len(linear) * (2 if prefix_caching else 1) * page
+        cost = (math.ceil(held / tokens_per_page) + (x.kind == "sliding")) * page
+        kinds.setdefault((x.kind, x.tokens if x.kind == "sliding" else 0), []).append(cost)
+    if linear:
+        kinds[("linear", 0)] = [(2 if prefix_caching else 1) * page] * len(linear)
+    counts = [len(c) for c in kinds.values()]
+    group = max(counts) if max(counts) < 1.5 * min(counts) else min(counts)
+    return sum(math.ceil(len(c) / group) * group * sum(c) // len(c) for c in kinds.values())
 
 
-def size(cfg: dict | None, weight_bytes: int, args: list[str], tp: int, draft: tuple[dict, int] | None = None,
-         kv_gib: int | None = None, memory_gib: float | None = None) -> Sizing:
-    """Memory for one pod. kv_gib, when given, is the explicit VLLM_CPU_KVCACHE_SPACE and needs no config.
-    With an explicit memory_gib the KV cache takes what fits beside the weights, up to what the streams need."""
+def resident_bytes(cfg: dict | None, weight_bytes: int, args: list[str]) -> int:
+    """Weight bytes once loaded: an unquantized checkpoint served with a wider --dtype (bf16 as float32) grows."""
+    if not cfg or "quantization_config" in cfg or "quantization_config" in text_config(cfg):
+        return weight_bytes
+    stored = DTYPE_BYTES.get(text_config(cfg).get("torch_dtype") or text_config(cfg).get("dtype"), 0)
+    served = DTYPE_BYTES.get(arg_value(args, "--dtype"), stored)
+    return weight_bytes * served // stored if stored and served > stored else weight_bytes
+
+
+def size(cfg: dict | None, weight_bytes: int, args: list[str], tp: int,
+         draft: tuple[dict | None, int] | None = None) -> Sizing:
+    """Memory and VLLM_CPU_KVCACHE_SPACE for one pod; raises Unsupported when the model cannot be sized."""
     if not weight_bytes:
         raise Unsupported("no safetensors size on HuggingFace")
+    if draft and not draft[1]:
+        raise Unsupported("no safetensors size for the draft model")
+    if cfg is None or (draft and draft[0] is None):
+        raise Unsupported("config.json not readable (gated repo without HF_TOKEN?)")
     for flag in ("--pipeline-parallel-size", "--data-parallel-size"):
         if int(arg_value(args, flag) or 1) > 1:
             raise Unsupported(f"{flag} > 1")
-    weights = weight_bytes + (draft[1] if draft else 0)
-    max_len = MAX_MODEL_LEN
-    if kv_gib is None:
-        if cfg is None or (draft and draft[0] is None):
-            raise Unsupported("config.json not readable (gated repo without HF_TOKEN?)")
-        layers = layout(cfg) + (layout(draft[0]) if draft else [])
-        max_len = int(arg_value(args, "--max-model-len") or min(MAX_MODEL_LEN, context_limit(cfg)))
-        dtype = arg_value(args, "--dtype")
-        if dtype in ("", "auto"):
-            dtype = text_config(cfg).get("torch_dtype") or text_config(cfg).get("dtype")
-        model_bytes = DTYPE_BYTES.get(dtype, 2)
-        kv_bytes = 1 if arg_value(args, "--kv-cache-dtype").startswith("fp8") else model_bytes
-        per_request = bytes_per_request(
-            layers, tp, max_len, kv_bytes, model_bytes, int(arg_value(args, "--block-size") or 128),
-            int(arg_value(args, "--max-num-batched-tokens") or max_len),
-            _enabled(args, "--enable-prefix-caching", True))
-        streams = min(CONCURRENCY, int(arg_value(args, "--max-num-seqs") or CONCURRENCY))
-        floor = max(KV_MIN_GIB, math.ceil(per_request / GIB))
-        kv_gib = max(floor, math.ceil(per_request * streams / GIB))
-        if memory_gib is not None:
-            room = math.floor((memory_gib - weights / GIB) / tp - OVERHEAD_GIB)
-            kv_gib = min(kv_gib, room) if room >= floor else kv_gib
+    weights = resident_bytes(cfg, weight_bytes, args) + (resident_bytes(draft[0], draft[1], args) if draft else 0)
+    layers = layout(cfg) + (layout(draft[0]) if draft else [])
+    given = arg_value(args, "--max-model-len")  # "auto": vLLM fits the context to the KV cache, sized for 8K here
+    max_len = int(given) if given.isdigit() else min(MAX_MODEL_LEN, context_limit(cfg))
+    dtype = arg_value(args, "--dtype")
+    if dtype in ("", "auto"):
+        dtype = text_config(cfg).get("torch_dtype") or text_config(cfg).get("dtype")
+    model_bytes = DTYPE_BYTES.get(dtype, 2)
+    kv_bytes = 1 if arg_value(args, "--kv-cache-dtype").startswith("fp8") else model_bytes
+    per_request = bytes_per_request(
+        layers, tp, max_len, kv_bytes, model_bytes, int(arg_value(args, "--block-size") or 128),
+        int(arg_value(args, "--max-num-batched-tokens") or max_len),
+        _enabled(args, "--enable-prefix-caching", True))
+    streams = min(CONCURRENCY, int(arg_value(args, "--max-num-seqs") or CONCURRENCY))
+    kv_gib = max(KV_MIN_GIB, math.ceil(per_request / GIB), math.ceil(per_request * streams / GIB))
     needed = weights / GIB + tp * (kv_gib + OVERHEAD_GIB)
     return Sizing(weights_gib=weights / GIB, kv_gib=kv_gib, tp=tp, max_model_len=max_len,
                   needed_gib=needed, memory_gi=math.ceil(needed * HEADROOM))

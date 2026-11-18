@@ -116,12 +116,14 @@ class NriBalloons(BestEffort):
 
 
 def _schedulable_nodes(m: Model) -> list[dict] | None:
-    """Nodes without a NoSchedule taint (m.node only, when pinned); None when nodes can't be read."""
+    """Nodes a new pod can land on (m.node only, when pinned): not cordoned, no NoSchedule/NoExecute taint; None when
+    nodes can't be read."""
     nodes = k8s.get_json("node", m.node) if m.node else k8s.get_json("nodes")
     if not nodes:
         return None
     return [n for n in ([nodes] if m.node else nodes.get("items", []))
-            if not any(t.get("effect") == "NoSchedule" for t in pick(n.get("spec"), "taints", []))]
+            if not pick(n.get("spec"), "unschedulable")
+            and not any(t.get("effect") in ("NoSchedule", "NoExecute") for t in pick(n.get("spec"), "taints", []))]
 
 
 def _allocatable(m: Model) -> list[int] | None:
@@ -289,6 +291,11 @@ def _preflight_skipped() -> bool:
     return truthy(os.environ.get("MM_SKIP_PREFLIGHT", ""))
 
 
+def _preflight_warns() -> bool:
+    """MM_PREFLIGHT=warn, or the legacy MM_NRI_PREFLIGHT=warn: report pre-flight failures, don't block."""
+    return "warn" in (os.environ.get("MM_PREFLIGHT"), os.environ.get("MM_NRI_PREFLIGHT"))
+
+
 _MEM_UNITS = {"Ki": 2**10, "Mi": 2**20, "Gi": 2**30, "Ti": 2**40, "Pi": 2**50,
               "k": 10**3, "K": 10**3, "M": 10**6, "G": 10**9, "T": 10**12, "P": 10**15}
 
@@ -392,7 +399,7 @@ def preflight_gate(policy: BestEffort, m: Model, tp: int, cpu: str, running: int
     warn(f"{policy.label} pre-flight: {m.name} cannot place {what}:")
     for e in errors:
         warn(f"  - {e}")
-    if "warn" in (os.environ.get("MM_PREFLIGHT"), os.environ.get("MM_NRI_PREFLIGHT")):
+    if _preflight_warns():
         return warn(f"{policy.name} pre-flight failed but MM_PREFLIGHT=warn — proceeding anyway.")
     abort(policy.failure(placed, tp) if placement else placement_failure(probe))
 
@@ -444,7 +451,7 @@ def memory_gate(m: Model, s: Sizing | None) -> None:
         return
     for e in errors:
         warn(f"Memory pre-flight: {e}")
-    if os.environ.get("MM_PREFLIGHT") == "warn":
+    if _preflight_warns():
         return warn("Memory pre-flight failed but MM_PREFLIGHT=warn — proceeding anyway.")
     abort(f"Memory pre-flight failed for {m.name}. Override with MM_PREFLIGHT=warn (proceed anyway) or "
           "MM_SKIP_PREFLIGHT=1 (skip check).")

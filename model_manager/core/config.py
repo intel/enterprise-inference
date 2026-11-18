@@ -81,14 +81,22 @@ def load_yaml(path: Path) -> Any:
         abort(f"Cannot read {path}: {e}")
 
 
+_HUB_UNREACHABLE = set()  # proxies whose Hub connection failed: later calls through them fail at once
+_CONNECT_ERRORS = (5, 6, 7, 28, 35)  # curl: proxy or host unresolved, connect refused, timeout, TLS
+
+
 @cache
 def _hf_json(url: str, proxy: str) -> dict:
     """A HuggingFace JSON document, or {} when unreachable. HF_TOKEN goes in on stdin, never in argv."""
+    if proxy in _HUB_UNREACHABLE:
+        return {}
     token = os.environ.get("HF_TOKEN", "")
     cmd = ["curl", "-sfL", "--max-time", "10", *(["--proxy", proxy] if proxy else []),
            *(["--config", "-"] if token else []), url]
     r = subprocess.run(cmd, input=f'header = "Authorization: Bearer {token}"\n' if token else None,  # nosec B603: argv list, no shell
                        capture_output=True, text=True, check=False)
+    if r.returncode in _CONNECT_ERRORS:
+        _HUB_UNREACHABLE.add(proxy)
     try:
         data = json.loads(r.stdout) if r.returncode == 0 and r.stdout else {}
     except ValueError:
@@ -96,9 +104,13 @@ def _hf_json(url: str, proxy: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def hub_unreachable(proxy: str) -> bool:
+    return proxy in _HUB_UNREACHABLE
+
+
 def hf_model_info(model_id: str, proxy: str) -> dict:
-    """HuggingFace model metadata, or {} when the Hub is unreachable."""
-    return _hf_json(f"https://huggingface.co/api/models/{model_id}", proxy)
+    """HuggingFace model metadata with every file's size, or {} when the Hub is unreachable."""
+    return _hf_json(f"https://huggingface.co/api/models/{model_id}?blobs=true", proxy)
 
 
 def hf_config(model_id: str, proxy: str) -> dict | None:
@@ -107,15 +119,12 @@ def hf_config(model_id: str, proxy: str) -> dict | None:
 
 
 def hf_weight_bytes(model_id: str, proxy: str) -> int:
-    """Bytes of the safetensors weights the server loads (consolidated.* is Mistral's duplicate format); 0 if unknown."""
-    index = _hf_json(f"https://huggingface.co/{model_id}/resolve/main/model.safetensors.index.json", proxy)
-    total = pick(pick(index, "metadata", {}), "total_size", 0)
-    if total:
-        return int(total)
-    files = pick(_hf_json(f"https://huggingface.co/api/models/{model_id}?blobs=true", proxy), "siblings", [])
-    return sum(int(pick(f, "size", 0)) for f in files if isinstance(f, dict)
-               and text(pick(f, "rfilename")).endswith(".safetensors")
-               and not text(pick(f, "rfilename")).startswith("consolidated"))
+    """Bytes of the repo-root safetensors the server loads (subfolders such as original/ or onnx/ hold other formats;
+    consolidated.* is Mistral's duplicate); 0 if unknown. Public even for a gated repo."""
+    names = ((text(pick(f, "rfilename")), f) for f in pick(hf_model_info(model_id, proxy), "siblings", [])
+             if isinstance(f, dict))
+    return sum(int(pick(f, "size", 0)) for name, f in names
+               if name.endswith(".safetensors") and "/" not in name and not name.startswith("consolidated"))
 
 
 class Catalog:
@@ -197,7 +206,7 @@ class Model:
     routing: str = ""
     cpu: str = ""
     memory: str = ""
-    memory_auto: bool = False                 # no memory set: sized from the model (core/sizer.py)
+    memory_auto: bool = False                 # memory: auto: sized from the model (core/sizer.py)
     kv_cache_gb: str = ""                     # sized VLLM_CPU_KVCACHE_SPACE
     max_model_len: str = ""                   # sized --max-model-len
     replicas: str = "1"
@@ -272,9 +281,9 @@ def resolve(catalog: Catalog, target: str, o: Any) -> Model:
 
     defaults = pick(m.cat, "defaults", {})
     m.cpu = o.cpu or m.cpu or text(pick(defaults, "cpu", 8))
-    explicit_memory = "" if (o.memory or m.memory) == "auto" else o.memory or m.memory
-    m.memory_auto = not explicit_memory
-    m.memory = explicit_memory or text(pick(defaults, "memory", "16Gi"))
+    m.memory_auto = (o.memory or m.memory) == "auto"
+    m.memory = "" if m.memory_auto else o.memory or m.memory
+    m.memory = m.memory or text(pick(defaults, "memory", "16Gi"))
     m.replicas = o.replicas or m.replicas
     m.node = o.node or m.node
     if o.routing:

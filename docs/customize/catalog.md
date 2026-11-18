@@ -87,7 +87,7 @@ models:
 | `name` | Deploy name, and the `model` id used in API requests |
 | `model_id` | The Hugging Face repo to pull weights from |
 | `category` | Workload class — `llm`, `embed`, `rerank`, or `vlm`. Drives default args, CPU, and memory |
-| `cpu` / `memory` | Resource requests (default: from the category). `cpu: auto` sizes CPU to a NUMA node — see [below](#cpu-auto). Without `memory:` (or with `memory: auto`), a vLLM `llm` model's memory and KV cache are sized from its Hugging Face config — see [Memory & KV-Cache Sizing](../reference/memory_sizing.md). A set value is used as is and checked to fit |
+| `cpu` / `memory` | Resource requests (default: from the category). `cpu: auto` sizes CPU to a NUMA node — see [below](#cpu-auto). `memory: auto` sizes a vLLM `llm` model's memory and KV cache from its Hugging Face config — see [Memory & KV-Cache Sizing](../reference/memory_sizing.md). A set value, or the category default, is used as is and checked to fit |
 | `replicas` | Replica count (default: 1) |
 | `autoscaling` | `{min_replicas, max_replicas, scale_target}`: autoscale with KEDA between the two counts (default min: 1), scaling up when the load per replica exceeds `scale_target`: waiting requests for vLLM (default: 2), in-flight requests for OpenVINO (default: 4). Replaces `replicas`. Needs `keda_enabled: true` and KServe 0.21 (`envoy_gateway_upgrade: true`). The signal and its default are set per runtime (`autoscaling` in `runtimes/<name>/values.yaml`) |
 | `--tensor-parallel-size N` in `args` | Tensor parallelism — split the model across N NUMA nodes. Memory sizing, `cpu: auto`, the NRI balloon and the pre-flight all use it; `--tp N` overrides it for one deploy |

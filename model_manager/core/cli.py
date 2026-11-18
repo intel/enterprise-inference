@@ -15,8 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import __version__, k8s, platform, renderer, routing, sizer
-from .config import (MM_DIR, Catalog, Model, Sizing, hf_config, hf_weight_bytes, is_uint, mm_path, pick, resolve,
-                     resolve_autoscaling, text, truthy)
+from .config import (MM_DIR, Catalog, Model, Sizing, hf_config, hf_weight_bytes, hub_unreachable, is_uint, mm_path,
+                     pick, resolve, resolve_autoscaling, text, truthy)
 from .download import download_weights
 from .policy import ANN, mem_bytes, memory_gate, preflight_gate, resolve_auto_cpu, resolve_policy, whole_cpus
 from .stuck import Watch
@@ -85,7 +85,6 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
   {GREEN}MM_NRI_ENABLED{RESET}        Legacy: false ⇒ best-effort (no pinning)
   {GREEN}MM_PREFLIGHT{RESET}          'warn' ⇒ report placement failures, don't block
   {GREEN}MM_SKIP_PREFLIGHT{RESET}     1 ⇒ skip the placement pre-flight entirely
-  {GREEN}MM_AUTOSIZE{RESET}           false ⇒ no memory/KV sizing from HuggingFace metadata
   {GREEN}MM_INFERENCE_HOSTNAME{RESET} Override inference gateway hostname
   {GREEN}MM_PLATFORM{RESET}           openshift | kubernetes (default: detected). On
                         OpenShift models attach to OpenShift AI's inference
@@ -343,57 +342,82 @@ def _spawn_reconciler(m: Model, timeout: int) -> tuple[Path, bool]:
     return log, True
 
 
+def _vllm_on_cpu(m: Model) -> bool:
+    """KServe's vLLM command (no runtime container) on a CPU device: what VLLM_CPU_KVCACHE_SPACE sizing models."""
+    return not m.container and text(pick(m.rt, "device", "cpu")) == "cpu"
+
+
 def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], tp: int) -> Sizing | None:
-    """Size memory and VLLM_CPU_KVCACHE_SPACE of a vLLM LLM from its HuggingFace metadata; explicit values win.
-    When the layout cannot be read the static values stay, checked against the weights alone; None when sizing
-    is off or not even the weight size is known."""
-    if m.runtime != "vllm" or m.category != "llm" or not truthy(os.environ.get("MM_AUTOSIZE", "true")):
+    """memory: auto sizes memory and VLLM_CPU_KVCACHE_SPACE from the model's HuggingFace metadata and aborts when it
+    cannot. Otherwise the set memory and KV stay, and only their fit is checked (memory_gate) when the weight size
+    is known. None when nothing can be checked."""
+    if not (_vllm_on_cpu(m) and m.category == "llm"):
+        if m.memory_auto:
+            abort(f"memory: auto sizes vLLM llm models on CPU only; set memory for {m.name}.")
         return None
     kv = renderer.explicit_kv_cache(m, cli_args, o.env)
     if kv and not is_uint(kv):
         abort(f"VLLM_CPU_KVCACHE_SPACE for {m.name} must be a whole number of GiB, got '{kv}'.")
-    if kv and m.memory_auto:
-        abort(f"{m.name} sets VLLM_CPU_KVCACHE_SPACE={kv} but no memory. Set memory as well (models.yaml memory: or "
-              "--memory), or remove both to size them automatically.")
     proxy, args = catalog.https_proxy, [*renderer.engine_args(m), *cli_args]
+    if m.memory_auto and kv:
+        abort(f"{m.name} has memory: auto and VLLM_CPU_KVCACHE_SPACE={kv}: memory: auto sizes both. Set memory "
+              "instead, or remove the KV setting.")
+    if m.memory_auto and o.memory != "auto" and _keep_live_sizing(m, args):
+        return None
     cfg = hf_config(m.model_id, proxy)
+    weights = hf_weight_bytes(m.model_id, proxy)
+    draft_weights = hf_weight_bytes(m.draft_model_id, proxy) if m.draft_model_id else 0
+    if not m.memory_auto:
+        draft_cfg = hf_config(m.draft_model_id, proxy) if m.draft_model_id else None
+        return _static_fit(m, sizer.resident_bytes(cfg, weights, args),
+                           sizer.resident_bytes(draft_cfg, draft_weights, args), int(kv or renderer.category_kv_cache(m)),
+                           tp)
     if cfg and sizer.topology_error(cfg, tp):
         abort(f"{m.name}: {sizer.topology_error(cfg, tp)}; vLLM would fail at start-up.")
-    draft = ((hf_config(m.draft_model_id, proxy), hf_weight_bytes(m.draft_model_id, proxy))
-             if m.draft_model_id else None)
-    weights = hf_weight_bytes(m.model_id, proxy)
+    draft = (hf_config(m.draft_model_id, proxy), draft_weights) if m.draft_model_id else None
     try:
-        s = sizer.size(cfg, weights, args, tp, draft, int(kv) if kv else None,
-                       None if m.memory_auto else mem_bytes(m.memory) / sizer.GIB or None)
+        s = sizer.size(cfg, weights, args, tp, draft)
     except (sizer.Unsupported, ValueError) as e:  # ValueError: a non-integer engine arg such as --max-num-seqs
-        known = weights + (draft[1] if draft else 0) if weights else 0
-        return _static_fit(m, e, known, int(kv or renderer.category_kv_cache(m)), tp)
-    if m.memory_auto:
-        m.memory = f"{s.memory_gi}Gi"
-    if not kv:
-        m.kv_cache_gb = str(s.kv_gib)
-        if not sizer.arg_value(args, "--max-model-len"):
-            m.max_model_len = str(s.max_model_len)
-    info(f"  Memory: {m.memory} ({'sized' if m.memory_auto else 'set'}) | needs {s.needed_gib:.1f} GiB = weights "
-         f"{s.weights_gib:.1f} + KV {s.tp} x {s.kv_gib} + overhead {s.tp} x {sizer.OVERHEAD_GIB}"
-         + (f", x {sizer.HEADROOM} headroom" if m.memory_auto else "")
-         + ("" if kv else f" | KV for up to {sizer.CONCURRENCY} x {s.max_model_len} tokens"))
+        reason = f"Hugging Face is unreachable (proxy: {proxy or 'none'})" if hub_unreachable(proxy) else e
+        abort(f"memory: auto cannot size {m.name}: {reason}. Set HF_TOKEN for a gated repo, or set memory (and "
+              "VLLM_CPU_KVCACHE_SPACE) for it.")
+    m.memory, m.kv_cache_gb = f"{s.memory_gi}Gi", str(s.kv_gib)
+    if not sizer.arg_value(args, "--max-model-len"):
+        m.max_model_len = str(s.max_model_len)
+    info(f"  Memory: {m.memory} (auto) | needs {s.needed_gib:.1f} GiB = weights {s.weights_gib:.1f} + KV {s.tp} x "
+         f"{s.kv_gib} + overhead {s.tp} x {sizer.OVERHEAD_GIB}, x {sizer.HEADROOM} headroom | KV for up to "
+         f"{sizer.CONCURRENCY} x {s.max_model_len} tokens")
     return s
 
 
-def _static_fit(m: Model, reason: Exception, weight_bytes: int, kv_gib: int, tp: int) -> Sizing | None:
-    """The static memory and KV a deploy keeps when it cannot be sized, for memory_gate to check against the weights
-    (their size is public even for a gated repo)."""
-    if not weight_bytes:
-        warn(f"Memory sizing unavailable for {m.name} ({reason}); using memory {m.memory}.")
+def _keep_live_sizing(m: Model, args: list[str]) -> bool:
+    """A deployed memory: auto model keeps the memory, KV and context it was sized with (as cpu: auto keeps its CPU), so
+    a re-deploy does not depend on HuggingFace or change a running model; --memory auto re-sizes it."""
+    live = k8s.get_json(m.kind, m.name, "-n", m.namespace) if m.kind == "LLMInferenceService" else None
+    main = (pick(pick(pick(live, "spec", {}), "template", {}), "containers", []) or [{}])[0]
+    memory = text(pick(pick(pick(main, "resources", {}), "limits", {}), "memory"))
+    kv = next((text(e.get("value")) for e in pick(main, "env", []) if e.get("name") == renderer.KV_CACHE_ENV), "")
+    if not (memory and is_uint(kv)):
+        return False
+    live_len = sizer.arg_value([text(a) for a in pick(main, "args", [])], "--max-model-len")
+    m.memory, m.kv_cache_gb = memory, kv
+    if not sizer.arg_value(args, "--max-model-len") and live_len:
+        m.max_model_len = live_len
+    info(f"  Memory: {memory} (auto, as deployed) | KV {kv} GiB per worker; --memory auto re-sizes it")
+    return True
+
+
+def _static_fit(m: Model, weight_bytes: int, draft_bytes: int, kv_gib: int, tp: int) -> Sizing | None:
+    """The set memory and KV, for memory_gate to check against the weights (their size is public even for a gated
+    repo). None when the weight size, or a draft's, is unknown."""
+    if not weight_bytes or (m.draft_model_id and not draft_bytes):
         return None
-    weights = weight_bytes / sizer.GIB
+    weights = (weight_bytes + draft_bytes) / sizer.GIB
     s = Sizing(weights_gib=weights, kv_gib=kv_gib, tp=tp, max_model_len=0,
                needed_gib=weights + tp * (kv_gib + sizer.OVERHEAD_GIB), memory_gi=0)
-    short = s.needed_gib > mem_bytes(m.memory) / sizer.GIB
-    warn(f"Memory sizing unavailable for {m.name} ({reason}); using memory {m.memory}"
-         + (f", below the {s.needed_gib:.1f} GiB its weights {weights:.1f} + KV {tp} x {kv_gib} + overhead "
-            f"{tp} x {sizer.OVERHEAD_GIB} need." if short else "."))
+    if s.needed_gib > mem_bytes(m.memory) / sizer.GIB:
+        warn(f"Memory {m.memory} of {m.name} is below the {s.needed_gib:.1f} GiB its weights {weights:.1f} + KV "
+             f"{tp} x {kv_gib} + overhead {tp} x {sizer.OVERHEAD_GIB} need.")
     return s
 
 

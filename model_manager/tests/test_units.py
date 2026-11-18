@@ -27,9 +27,9 @@ def fresh_nri_reads():
 
 
 @pytest.fixture(autouse=True)
-def no_sizing(monkeypatch):
-    """Tests stay offline: sizing reads HuggingFace, so it is on only where a test turns it on."""
-    monkeypatch.setenv("MM_AUTOSIZE", "false")
+def offline_hub(monkeypatch):
+    """Tests stay offline: deploy reads HuggingFace metadata for its memory checks."""
+    monkeypatch.setattr(config, "_hf_json", lambda url, proxy: {})
 
 
 @pytest.fixture

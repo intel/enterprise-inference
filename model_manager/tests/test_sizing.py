@@ -87,6 +87,32 @@ def test_encoder_decoder_caches_decoder_and_audio_frames():
     assert (s.kv_gib, s.memory_gi, s.max_model_len) == (3, 8, 448)  # context capped at max_target_positions
 
 
+def test_kinds_are_padded_to_equal_kv_cache_groups():
+    # vLLM groups layers by kind in groups of equal size: 8 full + 9 sliding is allocated as 9 + 9.
+    full, sliding = Layer("full", 8, 128), Layer("sliding", 8, 128, 1024)
+    padded = sizer.bytes_per_request([full] * 8 + [sliding] * 9, 1, 8192, 2, 2, 128, 2048, True)
+    assert padded == sizer.bytes_per_request([full] * 9 + [sliding] * 9, 1, 8192, 2, 2, 128, 2048, True)
+    # Within 1.5x of each other no kind is padded past the larger count; a multiple needs no padding (Gemma 4).
+    assert sizer.bytes_per_request([full] * 5 + [sliding] * 25, 1, 8192, 2, 2, 128, 2048, True) == \
+        (5 * 64 + 25 * 25) * 512 * 1024  # 512 KiB pages: 64 per full layer, 25 per sliding one
+
+
+@pytest.mark.parametrize("cfg, args, factor", [
+    (LLAMA_8B, ["--dtype", "float32"], 2),                                   # bf16 weights widened at load
+    (LLAMA_8B, ["--dtype", "bfloat16"], 1),
+    ({**LLAMA_8B, "torch_dtype": "float32"}, ["--dtype", "bfloat16"], 1),     # narrowing: the files are the bound
+    ({**LLAMA_8B, "quantization_config": {"quant_method": "awq"}}, ["--dtype", "float32"], 1),
+])
+def test_resident_weights_follow_the_serving_dtype(cfg, args, factor):
+    assert sizer.resident_bytes(cfg, gib(15), args) == gib(15) * factor
+
+
+def test_widened_weights_are_sized():
+    s = sizer.size(LLAMA_8B, gib(14.96), [*LLM_ARGS, "--dtype", "float32", "--max-model-len", "128",
+                                          "--max-num-seqs", "1"], 1)
+    assert round(s.weights_gib, 2) == 29.92
+
+
 def test_draft_model_adds_weights_and_kv():
     s = sizer.size(LLAMA_8B, gib(14.96), LLM_ARGS, 1, draft=(LLAMA_1B, gib(2.30)))
     assert (round(s.weights_gib, 2), s.kv_gib, s.memory_gi) == (17.26, 20, 47)
@@ -98,16 +124,15 @@ def test_engine_args_change_the_kv_cache(extra, kv):
     assert sizer.size(LLAMA_8B, gib(14.96), LLM_ARGS + extra, 1).kv_gib == kv
 
 
-def test_explicit_kv_needs_no_config():
-    s = sizer.size(None, gib(14.96), LLM_ARGS, 2, kv_gib=40)
-    assert s.kv_gib == 40 and round(s.needed_gib, 2) == 100.96  # 14.96 + 2 x (40 + 3)
+def test_auto_max_model_len_is_kept_and_kv_sized_for_8k():
+    s = sizer.size(LLAMA_8B, gib(14.96), [*LLM_ARGS, "--max-model-len", "auto"], 1)
+    assert (s.kv_gib, s.max_model_len) == (16, 8192)
 
 
-def test_fixed_memory_takes_the_kv_that_fits():
-    # qwen3-0-6b at a fixed 16Gi: 16 x 8K streams want 14 GiB, 11 GiB fits beside 1.4 GiB weights + 3 GiB overhead.
-    assert sizer.size(QWEN3_06B, gib(1.40), LLM_ARGS, 1, memory_gib=16).kv_gib == 11
-    assert sizer.size(QWEN3_06B, gib(1.40), LLM_ARGS, 1, memory_gib=64).kv_gib == 14
-    assert sizer.size(QWEN3_06B, gib(1.40), LLM_ARGS, 1, memory_gib=4).kv_gib == 14  # too small: the gate reports it
+@pytest.mark.parametrize("key", ["max_position_embeddings", "n_positions", "seq_length", "max_sequence_length"])
+def test_context_limit_keys(key):
+    cfg = {k: v for k, v in LLAMA_8B.items() if k != "max_position_embeddings"}
+    assert sizer.size({**cfg, key: 2048}, gib(14.96), LLM_ARGS, 1).max_model_len == 2048
 
 
 @pytest.mark.parametrize("cfg, weights, args, reason", [
@@ -117,10 +142,16 @@ def test_fixed_memory_takes_the_kv_that_fits():
     (LLAMA_8B, 0, [], "no safetensors"),
     (None, 1, [], "gated"),
     (LLAMA_8B, 1, ["--pipeline-parallel-size", "2"], "pipeline"),
+    ({k: v for k, v in LLAMA_8B.items() if k != "max_position_embeddings"}, 1, [], "context length unknown"),
 ])
 def test_unsizable_models(cfg, weights, args, reason):
     with pytest.raises(Unsupported, match=reason):
         sizer.size(cfg, weights, args, 1)
+
+
+def test_unknown_draft_weights_cannot_be_sized():
+    with pytest.raises(Unsupported, match="draft"):
+        sizer.size(LLAMA_8B, gib(14.96), LLM_ARGS, 1, draft=(LLAMA_1B, 0))
 
 
 @pytest.mark.parametrize("cfg, tp, ok", [(LLAMA_8B, 3, False), (QWEN25_15B, 4, True), (LLAMA_8B, 1, True),
@@ -137,8 +168,8 @@ def test_arg_value_last_wins_in_any_spelling():
 
 @pytest.fixture
 def hub(monkeypatch):
-    """Sizing on, with the HuggingFace answers of a Llama-8B (draft: Llama-1B); kubectl unreachable."""
-    for k, v in {"MM_AUTOSIZE": "true", "MM_PLATFORM": "kubernetes", "MM_LLMISVC_API_VERSION": "v1alpha2",
+    """HuggingFace answers for a Llama-8B (draft: Llama-1B); org/gated has no readable config; kubectl unreachable."""
+    for k, v in {"MM_PLATFORM": "kubernetes", "MM_LLMISVC_API_VERSION": "v1alpha2",
                  "MM_CPU_POLICY": "best-effort"}.items():
         monkeypatch.setenv(k, v)
     configs = {"meta-llama/Llama-3.1-8B-Instruct": LLAMA_8B, "org/draft": LLAMA_1B}
@@ -159,55 +190,71 @@ def _sized(*argv, catalog=None):
     return m, s, main, {e["name"]: e.get("value") for e in main["env"]}
 
 
-def test_hfid_deploy_is_sized(hub):
-    m, s, main, env = _sized("--hfid", "meta-llama/Llama-3.1-8B-Instruct", "--category", "llm")
+LLAMA = ("--hfid", "meta-llama/Llama-3.1-8B-Instruct", "--category", "llm")
+
+
+def _catalog(tmp_path, **entry):
+    catalog = tmp_path / "models.yaml"
+    data = yaml.safe_load((cli.MM_DIR / "models.yaml").read_text())
+    data["models"] = [{"name": "m", "model_id": "meta-llama/Llama-3.1-8B-Instruct", "category": "llm", **entry}]
+    catalog.write_text(yaml.safe_dump(data))
+    return catalog
+
+
+def test_memory_auto_is_sized(hub):
+    m, s, main, env = _sized(*LLAMA, "--memory", "auto")
     assert main["resources"]["limits"]["memory"] == main["resources"]["requests"]["memory"] == "40Gi"
     assert env["VLLM_CPU_KVCACHE_SPACE"] == "16"
-    assert "--max-model-len" in main["args"] and main["args"][main["args"].index("--max-model-len") + 1] == "8192"
+    assert main["args"][main["args"].index("--max-model-len") + 1] == "8192"
 
 
-def test_cli_max_model_len_wins_and_is_not_repeated(hub):
-    m, s, main, env = _sized("--hfid", "meta-llama/Llama-3.1-8B-Instruct", "--category", "llm",
-                             "--arg", "--max-model-len=4096")
-    assert m.max_model_len == "" and main["args"].count("--max-model-len=4096") == 1
-    assert env["VLLM_CPU_KVCACHE_SPACE"] == "8" and s.max_model_len == 4096
+def test_catalog_memory_auto_is_sized(hub, tmp_path):
+    m, s, main, env = _sized("m", catalog=_catalog(tmp_path, memory="auto"))
+    assert main["resources"]["limits"]["memory"] == "40Gi"
+
+
+def test_without_memory_auto_nothing_is_sized(hub):
+    # Opt-in: an omitted memory keeps the category default and KV, as before sizing; only their fit is checked.
+    m, s, main, env = _sized(*LLAMA)
+    assert main["resources"]["limits"]["memory"] == "16Gi" and env["VLLM_CPU_KVCACHE_SPACE"] == "8"
+    assert "--max-model-len" not in main["args"] and round(s.needed_gib, 2) == 25.96  # 14.96 + 8 + 3
+
+
+@pytest.mark.parametrize("argv, kv", [(["--arg", "--max-model-len=4096"], "8"), (["--arg", "--max-model-len=auto"], "16")])
+def test_a_given_max_model_len_wins_and_is_not_repeated(hub, argv, kv):
+    m, s, main, env = _sized(*LLAMA, "--memory", "auto", *argv)
+    assert m.max_model_len == "" and main["args"].count(argv[1]) == 1 and env["VLLM_CPU_KVCACHE_SPACE"] == kv
 
 
 def test_explicit_memory_and_kv_are_kept(hub):
-    m, s, main, env = _sized("--hfid", "meta-llama/Llama-3.1-8B-Instruct", "--category", "llm", "--memory", "64Gi",
-                             "--env", "VLLM_CPU_KVCACHE_SPACE=40")
+    m, s, main, env = _sized(*LLAMA, "--memory", "64Gi", "--env", "VLLM_CPU_KVCACHE_SPACE=40")
     assert main["resources"]["limits"]["memory"] == "64Gi" and env["VLLM_CPU_KVCACHE_SPACE"] == "40"
     assert "--max-model-len" not in main["args"] and round(s.needed_gib, 2) == 57.96
 
 
+def test_kv_without_memory_deploys_with_the_category_memory(hub):
+    # deploy qwen3-0-6b --env VLLM_CPU_KVCACHE_SPACE=20 works as before sizing.
+    m, s, main, env = _sized(*LLAMA, "--env", "VLLM_CPU_KVCACHE_SPACE=20")
+    assert main["resources"]["limits"]["memory"] == "16Gi" and env["VLLM_CPU_KVCACHE_SPACE"] == "20"
+
+
 @pytest.mark.parametrize("argv, error", [
-    (["--env", "VLLM_CPU_KVCACHE_SPACE=40"], "but no memory"),
+    (["--memory", "auto", "--env", "VLLM_CPU_KVCACHE_SPACE=40"], "sizes both"),
     (["--memory", "64Gi", "--env", "VLLM_CPU_KVCACHE_SPACE=40G"], "whole number"),
-    (["--tp", "3"], "does not divide"),
+    (["--memory", "auto", "--tp", "3"], "does not divide"),
+    (["--memory", "auto", "--arg", "--max-num-seqs=abc"], "cannot size"),
+    (["--hfid", "org/gated", "--memory", "auto"], "Set HF_TOKEN"),
 ])
 def test_sizing_rejects(hub, capsys, argv, error):
     with pytest.raises(SystemExit):
-        _sized("--hfid", "meta-llama/Llama-3.1-8B-Instruct", "--category", "llm", *argv)
+        _sized(*LLAMA, *argv)
     assert error in capsys.readouterr().err
 
 
-def test_memory_auto_on_the_cli_is_sized(hub):
-    m, s, main, env = _sized("--hfid", "meta-llama/Llama-3.1-8B-Instruct", "--category", "llm", "--memory", "auto")
-    assert main["resources"]["limits"]["memory"] == "40Gi"
-
-
-def test_bad_engine_arg_falls_back(hub, capsys):
-    m, s, main, env = _sized("--hfid", "meta-llama/Llama-3.1-8B-Instruct", "--category", "llm",
-                             "--arg", "--max-num-seqs=abc")
-    assert main["resources"]["limits"]["memory"] == "16Gi" and s.kv_gib == 8
-    assert "sizing unavailable" in capsys.readouterr().err
-
-
-def test_unreadable_config_keeps_static_values_checked_against_the_weights(hub, capsys):
+def test_static_values_below_the_weights_are_flagged(hub, capsys):
     # A gated repo without HF_TOKEN: no config.json, but its weight size is public.
     m, s, main, env = _sized("--hfid", "org/gated", "--category", "llm")
-    assert main["resources"]["limits"]["memory"] == "16Gi" and env["VLLM_CPU_KVCACHE_SPACE"] == "8"
-    assert round(s.needed_gib, 2) == 25.96  # 14.96 + 8 + 3
+    assert main["resources"]["limits"]["memory"] == "16Gi" and round(s.needed_gib, 2) == 25.96
     assert "below the 26.0 GiB" in capsys.readouterr().err
     with pytest.raises(SystemExit):
         policy.memory_gate(m, s)
@@ -228,15 +275,31 @@ def test_static_values_fit_check(hub, capsys, argv, fits):
 def test_unknown_weights_skip_the_check(hub, monkeypatch, capsys):
     monkeypatch.setattr(cli, "hf_weight_bytes", lambda repo, _: 0)
     m, s, main, env = _sized("--hfid", "org/unknown", "--category", "llm")
-    assert s is None and main["resources"]["limits"]["memory"] == "16Gi"
-    assert "sizing unavailable" in capsys.readouterr().err
+    assert s is None and main["resources"]["limits"]["memory"] == "16Gi" and not capsys.readouterr().err
 
 
-@pytest.mark.parametrize("argv, env", [(["bge-base-en"], {}), (["qwen3-0-6b"], {"MM_AUTOSIZE": "false"})])
-def test_sizing_off(hub, monkeypatch, argv, env):
-    for k, v in env.items():
-        monkeypatch.setenv(k, v)
-    assert _sized(*argv)[1] is None
+def test_unknown_draft_weights_skip_the_check(hub, monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "hf_weight_bytes", lambda repo, _: 0 if repo == "org/draft" else gib(14.96))
+    assert _sized("m", catalog=_catalog(tmp_path, draft_model_id="org/draft"))[1] is None
+
+
+@pytest.mark.parametrize("runtime_config", [{"container": {"command": ["ovms"]}}, {"device": "gpu"}])
+def test_only_vllm_on_cpu_is_sized(hub, monkeypatch, capsys, runtime_config):
+    monkeypatch.setattr(Catalog, "runtime_config", lambda self, name, required=True: runtime_config)
+    o = cli.parse_args(["deploy", *LLAMA, "--memory", "auto"])
+    cat = Catalog(cli.MM_DIR / "models.yaml")
+    m = config.resolve(cat, "", o)
+    with pytest.raises(SystemExit):
+        cli._apply_sizing(m, cat, o, [], 1)
+    assert "vLLM llm models on CPU only" in capsys.readouterr().err
+    o = cli.parse_args(["deploy", *LLAMA])
+    assert cli._apply_sizing(config.resolve(cat, "", o), cat, o, [], 1) is None
+
+
+def test_memory_auto_outside_llm_is_rejected(hub, capsys):
+    with pytest.raises(SystemExit):
+        _sized("bge-base-en", "--memory", "auto")
+    assert "CPU only" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("model_args, argv, tp, memory", [
@@ -246,43 +309,50 @@ def test_sizing_off(hub, monkeypatch, argv, env):
     ([], [], 1, "40Gi"),
 ])
 def test_tp_from_the_catalog_args(hub, tmp_path, model_args, argv, tp, memory):
-    catalog = tmp_path / "models.yaml"
-    data = yaml.safe_load((cli.MM_DIR / "models.yaml").read_text())
-    data["models"] = [{"name": "tp", "model_id": "meta-llama/Llama-3.1-8B-Instruct", "category": "llm",
-                       "args": model_args}]
-    catalog.write_text(yaml.safe_dump(data))
-    m, s, main, env = _sized("tp", *argv, catalog=catalog)
+    m, s, main, env = _sized("m", *argv, catalog=_catalog(tmp_path, memory="auto", args=model_args))
     assert (s.tp, main["resources"]["limits"]["memory"]) == (tp, memory)
 
 
 def test_bad_catalog_tp_rejected(hub, tmp_path, capsys):
-    catalog = tmp_path / "models.yaml"
-    data = yaml.safe_load((cli.MM_DIR / "models.yaml").read_text())
-    data["models"] = [{"name": "tp", "model_id": "org/m", "category": "llm", "args": ["--tensor-parallel-size", "x"]}]
-    catalog.write_text(yaml.safe_dump(data))
     with pytest.raises(SystemExit):
-        _sized("tp", catalog=catalog)
+        _sized("m", catalog=_catalog(tmp_path, args=["--tensor-parallel-size", "x"]))
     assert "positive integer" in capsys.readouterr().err
 
 
 def test_draft_from_the_catalog_is_sized(hub, tmp_path):
-    catalog = tmp_path / "models.yaml"
-    data = yaml.safe_load((cli.MM_DIR / "models.yaml").read_text())
-    data["models"] = [{"name": "spec", "model_id": "meta-llama/Llama-3.1-8B-Instruct", "draft_model_id": "org/draft",
-                       "category": "llm"}]
-    catalog.write_text(yaml.safe_dump(data))
-    m, s, main, env = _sized("spec", catalog=catalog)
+    m, s, main, env = _sized("m", catalog=_catalog(tmp_path, memory="auto", draft_model_id="org/draft"))
     assert main["resources"]["limits"]["memory"] == "47Gi" and env["VLLM_CPU_KVCACHE_SPACE"] == "20"
 
 
-def test_version_0191_takes_the_category_kv(hub, monkeypatch):
-    monkeypatch.setenv("MM_AUTOSIZE", "false")
+def _live(memory="40Gi", kv="16", args=("--max-model-len", "8192")):
+    return {"spec": {"template": {"containers": [{"resources": {"limits": {"memory": memory}},
+                                                  "env": [{"name": "VLLM_CPU_KVCACHE_SPACE", "value": kv}],
+                                                  "args": list(args)}]}}}
+
+
+def test_a_deployed_memory_auto_model_keeps_its_sizing(hub, monkeypatch, tmp_path):
+    # Re-deploys (e.g. an Ansible re-run with the Hub unreachable) render the live values, not a fallback.
+    monkeypatch.setattr(k8s, "get_json", lambda *a: _live("44Gi", "17"))
+    monkeypatch.setattr(cli, "hf_config", lambda *a: pytest.fail("no HuggingFace call"))
+    m, s, main, env = _sized("m", catalog=_catalog(tmp_path, memory="auto"))
+    assert main["resources"]["limits"]["memory"] == "44Gi" and env["VLLM_CPU_KVCACHE_SPACE"] == "17"
+    assert main["args"][main["args"].index("--max-model-len") + 1] == "8192"
+
+
+def test_memory_auto_on_the_cli_re_sizes_a_deployed_model(hub, monkeypatch):
+    monkeypatch.setattr(k8s, "get_json", lambda *a: _live("44Gi", "17"))
+    m, s, main, env = _sized(*LLAMA, "--memory", "auto")
+    assert main["resources"]["limits"]["memory"] == "40Gi" and env["VLLM_CPU_KVCACHE_SPACE"] == "16"
+
+
+def test_version_0191_takes_the_category_kv(hub):
     assert _sized("qwen3-0-6b", "--server-version", "0.19.1")[3]["VLLM_CPU_KVCACHE_SPACE"] == "8"
 
 
 @pytest.mark.parametrize("memory, needed, env, aborts", [
     ("64Gi", 101, {}, True),                         # tp 2 with a tp 1 KV: OOM at load
     ("64Gi", 101, {"MM_PREFLIGHT": "warn"}, False),
+    ("64Gi", 101, {"MM_NRI_PREFLIGHT": "warn"}, False),          # the legacy override, as for the CPU gate
     ("64Gi", 101, {"MM_SKIP_PREFLIGHT": "1"}, False),
     ("64Gi", 58, {}, False),
 ])
@@ -344,12 +414,51 @@ def test_numa_gate_reads_each_nodes_layout(monkeypatch, nodes, weights, fits):
             policy.memory_gate(m, s)
 
 
+@pytest.mark.parametrize("spec", [{"unschedulable": True}, {"taints": [{"effect": "NoExecute"}]},
+                                  {"taints": [{"effect": "NoSchedule"}]}])
+def test_numa_gate_ignores_nodes_a_pod_cannot_land_on(monkeypatch, spec):
+    # A cordoned or tainted node with larger NUMA nodes does not let a worker through that fits nowhere else.
+    big = {**_numa_node(numa_nodes="2", max_tp="2", capacity="1Ti"), "spec": spec}
+    monkeypatch.setattr(k8s, "get_json", lambda *a: {"items": [_numa_node(), big]})
+    s = Sizing(weights_gib=280, kv_gib=16, tp=1, max_model_len=8192, needed_gib=299, memory_gi=0)
+    with pytest.raises(SystemExit):
+        policy.memory_gate(Model(name="m", namespace="n", memory="400Gi"), s)
+
+
 def test_numa_gate_warn_mode_proceeds(monkeypatch, capsys):
     monkeypatch.setenv("MM_PREFLIGHT", "warn")
     monkeypatch.setattr(policy, "_schedulable_nodes", lambda m: [_numa_node()])
     s = Sizing(weights_gib=280, kv_gib=16, tp=1, max_model_len=8192, needed_gib=299, memory_gi=0)
     policy.memory_gate(Model(name="m", namespace="n", memory="400Gi"), s)
     assert "--tp 2" in capsys.readouterr().err
+
+
+def test_weights_are_the_repo_root_safetensors(monkeypatch):
+    files = [("model-00001-of-00002.safetensors", 4), ("model-00002-of-00002.safetensors", 4),
+             ("original/consolidated.safetensors", 8), ("onnx/model.safetensors", 8), ("consolidated.safetensors", 8),
+             ("pytorch_model.bin", 8)]
+    monkeypatch.setattr(config, "_hf_json", lambda url, proxy: {"siblings": [{"rfilename": n, "size": gib(g)}
+                                                                             for n, g in files]})
+    assert config.hf_weight_bytes("org/m", "") == gib(8)
+
+
+def test_an_unreachable_hub_is_tried_once(monkeypatch):
+    calls = []
+    monkeypatch.setattr(config.subprocess, "run", lambda cmd, **kw: calls.append(cmd)
+                        or subprocess.CompletedProcess(cmd, 28, "", ""))
+    monkeypatch.setattr(config, "_HUB_UNREACHABLE", set())
+    config._hf_json.cache_clear()
+    assert config.hf_config("org/a", "http://proxy:1") is None and config.hf_weight_bytes("org/a", "http://proxy:1") == 0
+    assert len(calls) == 1
+    config._hf_json.cache_clear()
+
+
+def test_memory_auto_names_an_unreachable_hub(hub, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "hub_unreachable", lambda proxy: True)
+    monkeypatch.setattr(cli, "hf_weight_bytes", lambda *a: 0)
+    with pytest.raises(SystemExit):
+        _sized(*LLAMA, "--memory", "auto")
+    assert "Hugging Face is unreachable" in capsys.readouterr().err
 
 
 def test_hf_token_goes_on_stdin(monkeypatch):

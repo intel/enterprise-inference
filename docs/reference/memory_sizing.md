@@ -2,18 +2,22 @@
 
 ## What it does
 
-When a vLLM chat model (category `llm`) has no `memory:` set, `model-manager deploy`
-works out the pod's memory and the vLLM KV cache from the model itself. It reads:
+`memory: auto` in a model's catalog entry, or `--memory auto` on the command line, makes
+`model-manager deploy` work out a vLLM chat model's (category `llm`) pod memory and KV
+cache from the model itself, like `cpu: auto` does for CPUs. It reads:
 
 - the model's `config.json` on Hugging Face, for the layer layout;
 - the safetensors index or file sizes, for the weight size;
 - the engine args the model is served with.
 
+Sizing is opt-in: a model without `memory: auto` deploys with its set `memory` (or the
+category default) and KV cache, as before; only their [fit](#pre-flight-checks) is checked.
+
 > [!WARNING]
 > For a **gated** repo (Llama, Gemma, Mistral) `config.json` is gated too. Without
-> `HF_TOKEN` the model cannot be sized: a model without `memory:` gets the category default
-> (16Gi) and KV cache (8 GiB), whatever its size or `--tp`. The memory pre-flight then
-> aborts the deploy if those cannot hold the weights. Set `HF_TOKEN`, or set `memory:`.
+> `HF_TOKEN`, `memory: auto` cannot size the model and the deploy stops with
+> `memory: auto cannot size …: config.json not readable (gated repo without HF_TOKEN?)`.
+> Set `HF_TOKEN`, or set `memory:` for that model.
 
 Nothing is downloaded for this: only those small JSON documents are fetched, before
 the weight download starts.
@@ -29,7 +33,7 @@ The result sets three things in the manifest:
 The deploy prints the calculation:
 
 ```
-[INFO ]    Memory: 40Gi (sized) | needs 34.0 GiB = weights 15.0 + KV 1 x 16 + overhead 1 x 3, x 1.15 headroom | KV for up to 16 x 8192 tokens
+[INFO ]    Memory: 40Gi (auto) | needs 34.0 GiB = weights 15.0 + KV 1 x 16 + overhead 1 x 3, x 1.15 headroom | KV for up to 16 x 8192 tokens
 ```
 
 ## Where the values come from
@@ -38,25 +42,28 @@ The deploy prints the calculation:
 
 | # | Source | Example |
 |---|---|---|
-| 1 | `--memory` | `--memory 96Gi` |
-| 2 | `memory:` in the model's catalog entry | `memory: 128Gi` |
-| 3 | **Sized** (no `memory:`, or `memory: auto`) | weights + KV + overhead |
-| 4 | The category default, used when sizing is not possible (see [Fallbacks](#fallbacks)) | `16Gi` |
+| 1 | `--memory` | `--memory 96Gi`, or `--memory auto` to size it |
+| 2 | `memory:` in the model's catalog entry | `memory: 128Gi`, or `memory: auto` to size it |
+| 3 | The category default | `16Gi` |
 
 **KV cache and context**, depending on what is set:
 
 | Memory | `VLLM_CPU_KVCACHE_SPACE` | Result |
 |---|---|---|
-| sized | not set | KV for 16 streams of `max_model_len` tokens; memory sized around it; `--max-model-len` emitted |
-| set | set | Used as is; only the [pre-flight](#pre-flight-checks) checks that they fit |
-| set | not set | KV takes what fits beside the weights, up to what 16 streams need; `--max-model-len` emitted |
-| sized | set | Rejected: set `memory:` as well, or remove both |
+| `auto` | not set | KV for 16 streams of `max_model_len` tokens; memory sized around it; `--max-model-len` emitted |
+| `auto` | set | Rejected: `memory: auto` sizes both. Set `memory` instead, or remove the KV setting |
+| set, or the category default | set, or the category `kv_cache_gb` | Used as is; the [pre-flight](#pre-flight-checks) checks that they fit |
 
 - **Where the KV setting counts as set:** in the model's `env:`, a version's `env:`, or
   `--env`. The category's `${KV_CACHE_GB}` placeholder does not count.
 - **`max_model_len`** is `--max-model-len` from the model's `args:` or `--arg`. Otherwise
-  it is 8192, capped at the model's own limit (`max_position_embeddings`, or
-  `max_target_positions` for Whisper). An explicit value is never emitted twice.
+  it is 8192, capped at the model's own limit (`max_position_embeddings`, `n_positions`,
+  `seq_length` or `max_sequence_length`; `max_target_positions` for Whisper). With
+  `--max-model-len auto` the KV cache is sized for 8192 tokens and vLLM fits the context
+  to it. A given value is never emitted twice.
+- **Which runtimes:** vLLM on CPU, i.e. a runtime with no `container:` (KServe's vLLM
+  command) and `device: cpu` (the default): `vllm`, and runtimes built the same way. GPU
+  runtimes and OpenVINO are not sized; `memory: auto` on them is rejected.
 
 ## The formula
 
@@ -70,7 +77,7 @@ per_request = KV-pool bytes one full-length request holds on one worker (below)
 
 | Term | Meaning |
 |---|---|
-| `W` | Weight bytes: `metadata.total_size` of `model.safetensors.index.json`, else the size of the `.safetensors` files (`consolidated.*` excluded). For quantized checkpoints the file size is the resident size. A draft model's weights are added |
+| `W` | Weight bytes: the size of the repo-root `.safetensors` files (subfolders such as `original/` and `consolidated.*` hold other formats). For quantized checkpoints the file size is the resident size; an unquantized checkpoint served with a wider `--dtype` (bf16 as float32) is scaled up. A draft model's weights are added |
 | `TP` | The last `--tensor-parallel-size` of the model's `args` (category, version, model), then `--arg` / `--tp`, as vLLM receives it: one vLLM worker per rank |
 | `kv_gib` | `VLLM_CPU_KVCACHE_SPACE`. vLLM allocates it **on every worker**, so the pod holds `TP ×` it |
 | `3 GiB` | Per-worker runtime: Python, PyTorch, oneDNN, prefill activations, sampling buffers |
@@ -109,6 +116,12 @@ page = widest layer's bytes per token × block size (128); narrower layers fit m
 | Sliding window | `min(sliding_window − 1 + --max-num-batched-tokens, max_model_len)` + 1 page | `layer_types: sliding_attention`, `sliding_window` |
 | Linear attention (Gated DeltaNet) | a fixed state: 1 page, 2 with prefix caching | `layer_types: linear_attention`, `linear_num_key_heads`, `linear_num_value_heads`, `linear_key_head_dim`, `linear_value_head_dim`, `linear_conv_kernel_dim` |
 | Cross-attention (encoder-decoder) | `max(max_source_positions, --max-num-batched-tokens)`: vLLM reserves the encoder budget | `is_encoder_decoder`, `decoder_layers`, `decoder_attention_heads`, `d_model`, `max_source_positions` |
+
+Layers of one kind (full, each sliding window, cross, linear; a draft model's full-attention
+layers join the model's) form KV cache groups of equal size: the smallest kind's layer count,
+or the largest's when it is under 1.5× the smallest. A kind whose count is not a multiple of
+it is padded with layers that cost as much as its own, e.g. 8 full + 9 sliding is allocated
+as 9 + 9. The validated layouts below need no padding.
 
 How the layout is chosen:
 1. **Encoder-decoder** (`is_encoder_decoder: true`, e.g. Whisper): every decoder layer has
@@ -200,40 +213,44 @@ The fit check matters most for TP. A set memory does not grow with `--tp`, but e
 worker allocates the full `VLLM_CPU_KVCACHE_SPACE`. Without the check, `--tp 2` on a
 model with `memory: 64Gi` and a 40 GiB KV cache would be OOM-killed at load.
 
-`MM_PREFLIGHT=warn` reports a failure and carries on. `MM_SKIP_PREFLIGHT=1` skips the
-fit check; see [CPU Pinning & NUMA](cpu_pinning.md#pre-flight-capacity-check) for the placement check.
+`MM_PREFLIGHT=warn` (or the legacy `MM_NRI_PREFLIGHT=warn`) reports a failure and carries on.
+`MM_SKIP_PREFLIGHT=1` skips the fit and NUMA checks; see [CPU Pinning & NUMA](cpu_pinning.md#pre-flight-capacity-check) for the placement check.
 
-## Fallbacks
+## When a model cannot be sized
 
-When sizing cannot run, the deploy warns and keeps the static values: the set `memory`,
-else the category default (`16Gi`), and the set `VLLM_CPU_KVCACHE_SPACE`, else the
-category's `kv_cache_gb` (8 GiB). These values do not change with `--tp`.
+`memory: auto` stops the deploy, before anything is applied, with the reason:
 
-| Situation | Message |
+| Situation | Reason |
 |---|---|
 | Hugging Face unreachable, or a gated repo (Llama, Gemma) without `HF_TOKEN` | `config.json not readable (gated repo without HF_TOKEN?)` |
-| No safetensors files (`.bin` only) | `no safetensors size on HuggingFace` |
+| No safetensors files (`.bin` only), for the model or its draft | `no safetensors size on HuggingFace` / `… for the draft model` |
+| No context length in `config.json` | `context length unknown` |
 | MLA (`kv_lora_rank`) or state-space (`state_size`) attention, or an unknown `layer_types` entry | `MLA or state-space attention` / `layer type …` |
 | `--pipeline-parallel-size` or `--data-parallel-size` > 1 | `--pipeline-parallel-size > 1` |
-| `MM_AUTOSIZE=false` | No sizing, and no fit check |
 
-The weight size is public even for gated repos, so the static values are still checked:
-the memory pre-flight aborts when they cannot hold weights + TP × (KV + 3 GiB), and the
-warning says so (`…; using memory 16Gi, below the 26.0 GiB its weights 15.0 + KV 1 x 8 +
-overhead 1 x 3 need.`). Only when no weight size is known either (no safetensors) does the
-deploy proceed unchecked. The topology check needs `config.json`, so it is skipped for a
-gated repo without `HF_TOKEN`.
+Set `memory:` (and `VLLM_CPU_KVCACHE_SPACE`) for such a model instead.
 
-Sizing covers vLLM `llm` models only. `embed` and `rerank` models and OpenVINO keep the
-category defaults.
+A model already deployed with a catalog `memory: auto` keeps the memory, KV cache and
+`--max-model-len` it was sized with, read from its live spec, as `cpu: auto` keeps its CPU.
+A re-deploy, such as an Ansible re-run, then neither calls Hugging Face nor changes a
+running model. `--memory auto` on the command line sizes it again.
+
+Hugging Face is asked for two documents per model (the file list with sizes, and
+`config.json`); after a connection failure the deploy stops asking.
+
+Without `memory: auto`, the set or default values are checked against the weights, whose
+size is public even for gated repos: the deploy warns when they cannot hold weights +
+TP × (KV + 3 GiB) (`Memory 16Gi of llama-3-1-8b is below the 26.0 GiB its weights 15.0 +
+KV 1 x 8 + overhead 1 x 3 need.`), and the memory pre-flight then stops it. When the weight
+size is unknown, nothing is checked. These values do not change with `--tp`.
 
 ## Tuning
 
 | Goal | Change |
 |---|---|
-| Less memory | `--arg --max-model-len=4096`, or a fixed `memory:` (the KV cache then takes what fits) |
+| Less memory | `--arg --max-model-len=4096` with `memory: auto` |
 | Longer context | `--arg --max-model-len=32768`: KV grows linearly with it |
-| More concurrent long requests | Set `memory:` and `VLLM_CPU_KVCACHE_SPACE` (in `env:`) together; sized KV stops at 16 full-length streams |
+| More concurrent long requests | Set `memory:` and `VLLM_CPU_KVCACHE_SPACE` (in `env:`) instead of `memory: auto`; sized KV stops at 16 full-length streams |
 | A known-good fixed setup | Set both `memory:` and `VLLM_CPU_KVCACHE_SPACE` in the model's `env:` |
 
 ## Limits
