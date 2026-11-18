@@ -231,7 +231,7 @@ def litellm_register(m: Model) -> None:
     url = _internal_url(m)
     mode = {"embed": "embedding", "rerank": "rerank"}.get(m.category)
     # LiteLLM's openai provider has no rerank and sends encoding_format: null on embeddings
-    provider = "hosted_vllm" if mode and m.runtime == "vllm" else "openai"
+    provider = "hosted_vllm" if mode and m.runtime in ("vllm", "vllm-cuda") else "openai"
     payload = {"model_name": m.name, "litellm_params": {"model": f"{provider}/{m.name}", "api_base": url, "api_key": "unused"}}
     if mode:
         payload["model_info"] = {"mode": mode}
