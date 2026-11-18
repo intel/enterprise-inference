@@ -337,7 +337,8 @@ def _spawn_reconciler(m: Model, timeout: int) -> tuple[Path, bool]:
 
 def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], tp: int) -> Sizing | None:
     """Size memory and VLLM_CPU_KVCACHE_SPACE of a vLLM LLM from its HuggingFace metadata; explicit values win.
-    None when sizing is off or impossible: the static values stay, and an explicit memory is not fit-checked."""
+    When the layout cannot be read the static values stay, checked against the weights alone; None when sizing
+    is off or not even the weight size is known."""
     if m.runtime != "vllm" or m.category != "llm" or not truthy(os.environ.get("MM_AUTOSIZE", "true")):
         return None
     kv = renderer.explicit_kv_cache(m, cli_args, o.env)
@@ -352,12 +353,13 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
         abort(f"{m.name}: {sizer.topology_error(cfg, tp)}; vLLM would fail at start-up.")
     draft = ((hf_config(m.draft_model_id, proxy), hf_weight_bytes(m.draft_model_id, proxy))
              if m.draft_model_id else None)
+    weights = hf_weight_bytes(m.model_id, proxy)
     try:
-        s = sizer.size(cfg, hf_weight_bytes(m.model_id, proxy), args, tp, draft, int(kv) if kv else None,
+        s = sizer.size(cfg, weights, args, tp, draft, int(kv) if kv else None,
                        None if m.memory_auto else mem_bytes(m.memory) / sizer.GIB or None)
     except (sizer.Unsupported, ValueError) as e:  # ValueError: a non-integer engine arg such as --max-num-seqs
-        warn(f"Memory sizing unavailable for {m.name} ({e}); using memory {m.memory}.")
-        return None
+        known = weights + (draft[1] if draft else 0) if weights else 0
+        return _static_fit(m, e, known, int(kv or renderer.category_kv_cache(m)), tp)
     if m.memory_auto:
         m.memory = f"{s.memory_gi}Gi"
     if not kv:
@@ -368,6 +370,22 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
          f"{s.weights_gib:.1f} + KV {s.tp} x {s.kv_gib} + overhead {s.tp} x {sizer.OVERHEAD_GIB}"
          + (f", x {sizer.HEADROOM} headroom" if m.memory_auto else "")
          + ("" if kv else f" | KV for up to {sizer.CONCURRENCY} x {s.max_model_len} tokens"))
+    return s
+
+
+def _static_fit(m: Model, reason: Exception, weight_bytes: int, kv_gib: int, tp: int) -> Sizing | None:
+    """The static memory and KV a deploy keeps when it cannot be sized, for memory_gate to check against the weights
+    (their size is public even for a gated repo)."""
+    if not weight_bytes:
+        warn(f"Memory sizing unavailable for {m.name} ({reason}); using memory {m.memory}.")
+        return None
+    weights = weight_bytes / sizer.GIB
+    s = Sizing(weights_gib=weights, kv_gib=kv_gib, tp=tp, max_model_len=0,
+               needed_gib=weights + tp * (kv_gib + sizer.OVERHEAD_GIB), memory_gi=0)
+    short = s.needed_gib > mem_bytes(m.memory) / sizer.GIB
+    warn(f"Memory sizing unavailable for {m.name} ({reason}); using memory {m.memory}"
+         + (f", below the {s.needed_gib:.1f} GiB its weights {weights:.1f} + KV {tp} x {kv_gib} + overhead "
+            f"{tp} x {sizer.OVERHEAD_GIB} need." if short else "."))
     return s
 
 

@@ -199,13 +199,36 @@ def test_memory_auto_on_the_cli_is_sized(hub):
 def test_bad_engine_arg_falls_back(hub, capsys):
     m, s, main, env = _sized("--hfid", "meta-llama/Llama-3.1-8B-Instruct", "--category", "llm",
                              "--arg", "--max-num-seqs=abc")
-    assert s is None and main["resources"]["limits"]["memory"] == "16Gi"
+    assert main["resources"]["limits"]["memory"] == "16Gi" and s.kv_gib == 8
     assert "sizing unavailable" in capsys.readouterr().err
 
 
-def test_unavailable_metadata_keeps_the_static_memory(hub, capsys):
+def test_unreadable_config_keeps_static_values_checked_against_the_weights(hub, capsys):
+    # A gated repo without HF_TOKEN: no config.json, but its weight size is public.
+    m, s, main, env = _sized("--hfid", "org/gated", "--category", "llm")
+    assert main["resources"]["limits"]["memory"] == "16Gi" and env["VLLM_CPU_KVCACHE_SPACE"] == "8"
+    assert round(s.needed_gib, 2) == 25.96  # 14.96 + 8 + 3
+    assert "below the 26.0 GiB" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        policy.memory_gate(m, s)
+
+
+@pytest.mark.parametrize("argv, fits", [(["--memory", "32Gi"], True), (["--tp", "2", "--memory", "32Gi"], False),
+                                        (["--memory", "64Gi", "--env", "VLLM_CPU_KVCACHE_SPACE=40"], True)])
+def test_static_values_fit_check(hub, capsys, argv, fits):
+    m, s, main, env = _sized("--hfid", "org/gated", "--category", "llm", *argv)
+    assert ("below the" not in capsys.readouterr().err) == fits
+    if fits:
+        policy.memory_gate(m, s)
+    else:
+        with pytest.raises(SystemExit):
+            policy.memory_gate(m, s)
+
+
+def test_unknown_weights_skip_the_check(hub, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "hf_weight_bytes", lambda repo, _: 0)
     m, s, main, env = _sized("--hfid", "org/unknown", "--category", "llm")
-    assert s is None and main["resources"]["limits"]["memory"] == "16Gi" and env["VLLM_CPU_KVCACHE_SPACE"] == "8"
+    assert s is None and main["resources"]["limits"]["memory"] == "16Gi"
     assert "sizing unavailable" in capsys.readouterr().err
 
 

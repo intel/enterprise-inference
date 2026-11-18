@@ -85,9 +85,14 @@ def explicit_kv_cache(m: Model, cli_args: list[str], cli_env: list[str]) -> str:
     return "" if KV_CACHE_GB in value else value
 
 
+def category_kv_cache(m: Model) -> str:
+    """The category's kv_cache_gb, which fills its ${KV_CACHE_GB}."""
+    return text(pick(pick(m.cat, "defaults", {}), "kv_cache_gb", 8))
+
+
 def _env(m: Model, catalog: Catalog, cli_args: list[str], cli_env: list[str]) -> str:
     merged = merged_env(m, cli_args, cli_env)
-    kv_gb = m.kv_cache_gb or text(pick(pick(m.cat, "defaults", {}), "kv_cache_gb", 8))
+    kv_gb = m.kv_cache_gb or category_kv_cache(m)
     items = [f"        - name: {k}\n          value: {quote(text(v).replace(KV_CACHE_GB, kv_gb))}"
              for k, v in sorted(merged.items())]
     if m.runtime == "openvino":  # OVMS fetches inside the serving pod, so it needs proxy + token there
