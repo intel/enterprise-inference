@@ -5,7 +5,7 @@
 
 defaults:
   namespace: llm-inference
-  runtime: iim-vllm
+  runtime: iims
   replicas: 1
   require_amx: true
 
@@ -250,8 +250,8 @@ models:
 
 runtimes:
 
-  # IIM launcher (python -m inference_runtime.cli serve); plumbing in runtimes/iim-vllm.
-  iim-vllm:
+  # IIM launcher (python -m inference_runtime.cli serve); plumbing in runtimes/iims.
+  iims:
     image: "docker.io/intel/inference-xeon-base:0.1.0"   # models without their own IIM image
     categories:
       llm:

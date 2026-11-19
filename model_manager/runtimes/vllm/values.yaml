@@ -13,7 +13,7 @@
 #   container                the runtime's own serving command: command, args, ready_path,
 #                            live_path ($model filled in), run_as_user (see runtimes/openvino),
 #                            args_env (a launcher that reads the vLLM args as JSON from that env
-#                            var; see runtimes/iim-vllm). Unset: KServe's vLLM command
+#                            var; see runtimes/iims). Unset: KServe's vLLM command
 #   env values               ${KV_CACHE_GB} (category kv_cache_gb) and ${MODEL_ID} are filled in
 #   autoscaling              KEDA signal: query (PromQL, $namespace/$model filled in)
 #                            and scale_target, its default per-replica threshold

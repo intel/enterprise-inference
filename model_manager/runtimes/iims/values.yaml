@@ -1,5 +1,5 @@
 # Intel Inference Microservices (IIM) vLLM runtime: low-level plumbing (CPU).
-# Image and per-category defaults live in models.yaml → runtimes.iim-vllm (models.yaml wins).
+# Image and per-category defaults live in models.yaml → runtimes.iims (models.yaml wins).
 
 device: cpu
 kind: LLMInferenceService

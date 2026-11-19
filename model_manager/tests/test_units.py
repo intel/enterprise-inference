@@ -346,14 +346,14 @@ def test_litellm_called_directly_in_a_pod(monkeypatch):
 
 
 RT = {"vllm": {}, "ovms": {"container": {"command": ["/ovms/bin/ovms"]}},
-      "iim-vllm": {"container": {"command": ["python3"], "args_env": "INFERENCE_ENGINE_ARGS"}}}
+      "iims": {"container": {"command": ["python3"], "args_env": "INFERENCE_ENGINE_ARGS"}}}
 
 
 @pytest.mark.parametrize("category, runtime, provider_model, mode", [
     ("llm", "vllm", "openai/m", None),
     ("embed", "vllm", "hosted_vllm/m", "embedding"),
     ("rerank", "vllm", "hosted_vllm/m", "rerank"),
-    ("rerank", "iim-vllm", "hosted_vllm/m", "rerank"),   # the IIM launcher serves vLLM's API
+    ("rerank", "iims", "hosted_vllm/m", "rerank"),   # the IIM launcher serves vLLM's API
     ("embed", "ovms", "openai/m", "embedding"),
 ])
 def test_litellm_register_payload(monkeypatch, category, runtime, provider_model, mode):
@@ -935,7 +935,7 @@ def test_iim_on_openshift_runs_kserves_vllm_command(monkeypatch):
 
 
 def test_server_override_uses_the_selected_runtimes_image(monkeypatch):
-    # An IIM model's own image belongs to iim-vllm; --server vllm takes that runtime's image and version.
+    # An IIM model's own image belongs to iims; --server vllm takes that runtime's image and version.
     m, doc = _render(monkeypatch, "iim-qwen3-4b", "--server", "vllm", "--server-version", "0.28.0")
     assert m.image == "docker.io/vllm/vllm-openai-cpu:v0.28.0" and "command" not in _main(doc)
     m, _ = _render(monkeypatch, "iim-qwen3-4b")
@@ -970,7 +970,7 @@ def test_launcher_args_env_cannot_be_overridden(monkeypatch):
 
 
 def test_args_json_rejects_positional_args():
-    m = Model(name="m", namespace="ns", runtime="iim-vllm")
+    m = Model(name="m", namespace="ns", runtime="iims")
     assert json.loads(renderer.args_json(m, ["--a", "1", "--b", "--c=x"])) == {"a": "1", "b": True, "c": "x"}
     # Multi-value options (nargs="+") become a list, which the IIM launcher expands to `--flag v1 v2`.
     assert json.loads(renderer.args_json(m, ["--lora-modules", "a=x", "b=y", "--max-num-seqs", "8"])) == {
@@ -1009,7 +1009,7 @@ def test_files_belong_to_the_serving_user(monkeypatch):
     monkeypatch.setenv("MM_PLATFORM", "kubernetes")  # platform detection elsewhere writes it to os.environ
     cat = Catalog(cli.MM_DIR / "models.yaml")
     assert config.resolve(cat, "qwen3-5-2b-ovms", cli.Options()).run_as_user == "5000"
-    assert config.resolve(cat, "qwen3-0-6b", cli.Options()).run_as_user == "1001"  # iim-vllm: the image's user
+    assert config.resolve(cat, "qwen3-0-6b", cli.Options()).run_as_user == "1001"  # iims: the image's user
     assert config.resolve(cat, "qwen3-0-6b", cli.parse_args(["deploy", "qwen3-0-6b", "--server", "vllm"])
                           ).run_as_user == "1000"
 

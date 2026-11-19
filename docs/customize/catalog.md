@@ -24,7 +24,7 @@ models:              # 2. The models you can deploy — one entry per model
     vllm: { versions: ["0.24.0", "0.19.1"], default: "0.24.0" }
 
 runtimes:            # 3. The engines themselves — images, versions, shared settings
-  iim-vllm: { ... }
+  iims: { ... }
   vllm: { ... }
   openvino: { ... }
 ```
@@ -49,7 +49,7 @@ Applied to every model that doesn't override them.
 | Field | Default | Meaning |
 |---|---|---|
 | `namespace` | `llm-inference` | Target namespace for deployments |
-| `runtime` | `iim-vllm` | Engine used when a model omits one. See [Runtimes](runtimes.md) |
+| `runtime` | `iims` | Engine used when a model omits one. See [Runtimes](runtimes.md) |
 | `replicas` | `1` | Replica count |
 | `require_amx` | `true` | Only schedule model pods on nodes with Intel® AMX. Relies on the NFD labels; NFD comes from the core platform layer's `node_feature_discovery` |
 

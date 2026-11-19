@@ -6,7 +6,7 @@ A **runtime** is the engine that actually serves a model. Three are supported:
 
 | Runtime | Use case | Key optimizations |
 |---------|----------|-------------------|
-| **IIM vLLM** (`iim-vllm`, the default) | LLMs, VLMs, embedding, reranking | Intel® Inference Microservices images: Intel-validated vLLM profiles per model |
+| **IIMs** (`iims`, the default) | LLMs, VLMs, embedding, reranking | Intel® Inference Microservices images: Intel-validated vLLM profiles per model |
 | **vLLM** (`vllm`) | LLMs, VLMs, embedding, reranking | Upstream vLLM CPU images; NUMA auto-bind, AMX kernels, prefix caching, chunked prefill |
 | **OpenVINO (OVMS)** (`openvino`) | Embedding, reranking, INT4/INT8 LLMs | OpenVINO IR, MediaPipe graph |
 
@@ -35,7 +35,7 @@ Version selection, highest precedence first:
 --server-version   >   the model's server_version:   >   the runtime's default_version
 ```
 
-## IIM vLLM
+## IIMs
 
 The default runtime. It runs the [Intel® Inference Microservices](https://hub.docker.com/u/intel)
 launcher (`python3 -m inference_runtime.cli serve`), which picks a tuned vLLM profile for
@@ -46,7 +46,7 @@ generic bf16 profile.
 
 ```yaml
 runtimes:
-  iim-vllm:
+  iims:
     image: "docker.io/intel/inference-xeon-base:0.1.0"
     categories:
       llm:    { args: [--max-model-len, auto], defaults: { cpu: 8,  memory: "32Gi", kv_cache_gb: 16 } }
@@ -56,7 +56,7 @@ runtimes:
 ```
 
 The launcher takes no command-line arguments. The plumbing in
-`model_manager/runtimes/iim-vllm/values.yaml` sets `container.args_env: INFERENCE_ENGINE_ARGS`, so
+`model_manager/runtimes/iims/values.yaml` sets `container.args_env: INFERENCE_ENGINE_ARGS`, so
 the vLLM args (category, model and `--arg`) reach it as one JSON object and are applied
 after the profile. `INFERENCE_MODEL_ID` is set from `model_id`, the weights are read from
 `/mnt/models`, and `HF_HUB_OFFLINE=1` keeps the launcher off the Hub. Memory is
@@ -114,7 +114,7 @@ when an LLM already runs on that node. So they set it too, from `kv_cache_gb: 16
 
 Env values in the runtime, category, version and model layers can use two placeholders, which
 are filled in when the manifest is rendered: `${KV_CACHE_GB}` (the category's `kv_cache_gb`) and
-`${MODEL_ID}` (the model's Hugging Face `model_id`; the `iim-vllm` runtime uses it for
+`${MODEL_ID}` (the model's Hugging Face `model_id`; the `iims` runtime uses it for
 `INFERENCE_MODEL_ID`).
 
 ### Plumbing
@@ -188,7 +188,7 @@ The runtime's `kind` decides what `model-manager` creates:
 | Runtime | Object | Template |
 |---|---|---|
 | vLLM | `LLMInferenceService` | `model_manager/templates/llm-inference-service.yaml` |
-| IIM vLLM, OpenVINO | `LLMInferenceService` | the same template, with the runtime's `container` |
+| IIMs, OpenVINO | `LLMInferenceService` | the same template, with the runtime's `container` |
 | A runtime with `kind: InferenceService` | `InferenceService` | `model_manager/templates/inference-service.yaml`, with the `ClusterServingRuntime` under `model_manager/runtimes/<name>/` |
 
 A model whose runtime changes kind replaces its old object on the next deploy (or undeploy).
