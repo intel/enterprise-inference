@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
-# Fake curl: the HuggingFace model API answers FAKE_HF_JSON (or fails); other URLs succeed silently.
+# Fake curl: the HuggingFace model API answers FAKE_HF_JSON, a repo config.json FAKE_HF_CONFIG (either unset: fail
+# or empty); other URLs succeed silently. FAKE_CURL_LOG, when set, records each call's arguments.
+[[ -n "${FAKE_CURL_LOG:-}" ]] && printf '%s\n' "$*" >> "$FAKE_CURL_LOG"
 for a in "$@"; do
     if [[ "$a" == https://huggingface.co/api/models/* ]]; then
         [[ -n "${FAKE_HF_JSON:-}" ]] || exit 22
         printf '%s' "$FAKE_HF_JSON"
+        exit 0
+    fi
+    if [[ "$a" == https://huggingface.co/*/resolve/main/config.json ]]; then
+        printf '%s' "${FAKE_HF_CONFIG:-}"
         exit 0
     fi
 done

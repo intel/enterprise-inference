@@ -373,12 +373,13 @@ def deploy(o: Options, target: str) -> None:
     info(f"  Runtime: {m.runtime}{f' @ {m.version}' if m.version else ''} | Category: {m.category} | "
          f"Routing: {m.routing or 'default'}")
     cli_args, tp = _engine_cli_args(o)
+    tp_arg = sizing.flag(renderer.engine_args(m) + cli_args, "--tensor-parallel-size")  # catalog args count too
+    tp = int(tp_arg) if is_uint(tp_arg) and int(tp_arg) > 0 else tp
+    unsized = False
     if m.auto_size:
-        args = renderer.engine_args(m) + cli_args
-        env = {**pick(m.rt, "env", {}), **pick(m.cat, "env", {}), **pick(m.ver, "env", {}), **m.env,
-               **dict(p.split("=", 1) for p in o.env if "=" in p)}
-        tp_arg = sizing.flag(args, "--tensor-parallel-size")
-        cli_args += sizing.size(m, catalog, args, env, int(tp_arg) if is_uint(tp_arg) else tp)
+        extra = sizing.size(m, catalog, renderer.engine_args(m) + cli_args, renderer.merged_env(m, o.env), tp)
+        unsized = extra is None
+        cli_args += extra or []
     replicas = (f"{m.min_replicas}-{m.max_replicas} (autoscaled, target {m.scale_target} per replica)"
                 if m.autoscaled else m.replicas)
     info(f"  CPU: {m.cpu} | Memory: {m.memory} | Replicas: {replicas}")
@@ -398,6 +399,9 @@ def deploy(o: Options, target: str) -> None:
     # Unchanged spec: skip pre-flight and apply (the running pods would count against their own cores).
     action, changed = "apply", False
     existed = k8s.exists(m.kind, m.name, "-n", m.namespace)  # decides the rollback: never guess on a failed get
+    if unsized and existed:  # the category default could shrink a model that was sized when it was deployed
+        abort(f"{m.name} is deployed and its memory is sized from Hugging Face, which could not be reached (gated "
+              "repos need HF_TOKEN): set memory in the catalog or pass --memory to redeploy it.")
     if existed and not truthy(os.environ.get("MM_FORCE_REDEPLOY", "")):
         rc = k8s.run("diff", *k8s.SSA, "-f", "-", stdin=manifest).returncode
         if rc == 0:

@@ -68,12 +68,19 @@ def dedupe_args(args: list[str]) -> list[str]:
     return [t for n, (key, tokens) in enumerate(entries) if last[key] == n for t in tokens]
 
 
-def _env(m: Model, catalog: Catalog, cli_args: list[str], cli_env: list[str]) -> str:
-    """Env, lowest to highest: trust-remote-code offline < runtime < category < version < model < --env."""
-    merged = {"HF_HUB_OFFLINE": "1"} if trust_remote_code(m, cli_args) else {}
+def merged_env(m: Model, cli_env: list[str]) -> dict:
+    """Env layers, lowest to highest: runtime < category < version < model < --env."""
+    merged: dict = {}
     for layer in (pick(m.rt, "env", {}), pick(m.cat, "env", {}), pick(m.ver, "env", {}), m.env,
-                  dict((p.split("=", 1)[0], p.split("=", 1)[-1]) for p in cli_env)):
+                  {p.split("=", 1)[0]: p.split("=", 1)[-1] for p in cli_env}):
         merged.update(layer)
+    return merged
+
+
+def _env(m: Model, catalog: Catalog, cli_args: list[str], cli_env: list[str]) -> str:
+    """Env, lowest to highest: trust-remote-code offline < the merged_env layers."""
+    merged = {"HF_HUB_OFFLINE": "1"} if trust_remote_code(m, cli_args) else {}
+    merged.update(merged_env(m, cli_env))
     kv_gb = m.kv_cache_gb or text(pick(pick(m.cat, "defaults", {}), "kv_cache_gb", 8))
     items = [f"        - name: {k}\n          value: {quote(text(v).replace('${KV_CACHE_GB}', kv_gb))}"
              for k, v in sorted(merged.items())]

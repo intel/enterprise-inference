@@ -34,7 +34,7 @@ sizing:
   categories: [llm, vlm]
   context_arg: --max-model-len
   kv: { env: VLLM_CPU_KVCACHE_SPACE, unit: GiB }     # filled through ${KV_CACHE_GB} in the category env
-  kv_dtype_bytes: 2                                   # bf16
+  kv_dtype_bytes: 2
   weight_headroom: 1.2                                # activations and buffers grow with the model
   quantized_headroom: 1.6                             # AWQ/GPTQ: repacked for the CPU kernel at load
   process_gib: 4                                      # Python, torch and vLLM themselves (~4 GiB on Xeon)

@@ -128,7 +128,6 @@ def ovms_agw_route(name: str) -> tuple[str, str]:
 
 OVMS_KIND = ovms_kind("qwen3-5-2b-ovms")
 OVMS_AIGATEWAY_ROUTE = (r"^\$ kubectl delete (aiservicebackend|backend) qwen3-5-2b-ovms .*\n", "")
-# Memory sizing: --memory auto sizes it from Hugging Face.
 HELP_MEMORY = (r"^  --memory NGi         Memory \(e.g. 32Gi\)$",
                "  --memory NGi|auto    Memory (e.g. 32Gi); auto sizes it from Hugging Face")
 

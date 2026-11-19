@@ -1700,7 +1700,7 @@ def test_sizing_counts_only_the_weights_vllm_loads(monkeypatch):
 def test_sizing_keeps_category_defaults_when_the_hub_is_unreachable(monkeypatch):
     sizing, m, cat = _sizing(monkeypatch, cfg={}, files={})
     cat.https_proxy = ""
-    assert sizing.size(m, cat, [], {}, 1) == [] and (m.kv_cache_gb, m.memory) == ("", "16Gi")
+    assert sizing.size(m, cat, [], {}, 1) is None and (m.kv_cache_gb, m.memory) == ("", "16Gi")
 
 
 def test_kv_layout_follows_the_attention_layers():
@@ -1711,7 +1711,8 @@ def test_kv_layout_follows_the_attention_layers():
     # 4 are full attention with 512-wide heads. vLLM fits 995126 tokens in 16 GiB (~17264 B/token).
     gemma4 = {"text_config": {"num_hidden_layers": 42, "num_attention_heads": 8, "num_key_value_heads": 2,
                               "head_dim": 256, "global_head_dim": 512, "num_kv_shared_layers": 18,
-                              "sliding_window": 512, "layer_types": (["sliding_attention"] * 5 + ["full_attention"]) * 7}}
+                              "sliding_window": 512,
+                              "layer_types": (["sliding_attention"] * 5 + ["full_attention"]) * 7}}
     assert kv_layout(gemma4) == (4 * 2 * 2 * 512 * 2, 512 * 20 * 2 * 2 * 256 * 2)
     # Qwen3.5/3.6 style hybrid: linear-attention layers keep a fixed state, no per-token KV.
     hybrid = {**SIZING_CFG, "layer_types": ["linear_attention", "linear_attention", "linear_attention",
@@ -1754,7 +1755,7 @@ def test_explicit_auto_memory_falls_back_loudly(monkeypatch, capsys):
     assert m.memory == "8Gi"                                       # the category default until sized
     sizing, _, cat = _sizing(monkeypatch, cfg={}, files={})
     cat.https_proxy = ""
-    assert sizing.size(m, cat, [], {}, 1) == [] and "could not be sized" in capsys.readouterr().err
+    assert sizing.size(m, cat, [], {}, 1) is None and "could not be sized" in capsys.readouterr().err
     o = cli.parse_args(["deploy", "auto-cpu", "--memory", "auto", "--category", "embed"])
     assert config.resolve(Catalog(FIXTURE_CATALOG), "auto-cpu", o).memory == "16Gi"
     assert "does not size embed models" in capsys.readouterr().err
@@ -1820,8 +1821,8 @@ def test_quantized_and_multimodal_overheads(monkeypatch):
 def test_video_capable_vlms_get_the_video_allowance(monkeypatch):
     # Qwen2.5-VL-3B on a live cluster: profiling one max-size video peaked at 41 GiB, 21 GiB with video off.
     knobs = {**VLLM_SIZING, "multimodal_gib": 10, "video_gib": 24}
-    sizing, m, cat = _sizing(monkeypatch, cfg={**SIZING_CFG, "vision_config": {}, "video_token_id": 151656},
-                             knobs=knobs)
+    video_vlm = {**SIZING_CFG, "vision_config": {}, "video_token_id": 151656}  # nosec B105 - a token id, no secret
+    sizing, m, cat = _sizing(monkeypatch, cfg=video_vlm, knobs=knobs)
     cat.https_proxy = ""
     sizing.size(m, cat, [], {}, 1)
     assert m.memory == "54Gi"                                              # ceil(6 + 10 + 4 + 10 towers + 24 video)
@@ -1829,3 +1830,75 @@ def test_video_capable_vlms_get_the_video_allowance(monkeypatch):
     assert m.memory == "30Gi"                                              # video off: images only
     sizing.size(m, cat, ["--limit-mm-per-prompt.image=0", "--limit-mm-per-prompt.video=0"], {}, 1)
     assert m.memory == "20Gi"                                              # text only
+
+
+def _deploy_dry_run(tmp_path, catalog_text, *argv, env=None, k8s=(), dry_run=True):
+    """`deploy` through the real CLI, with fake kubectl/curl serving a Granite-like model."""
+    from test_parity import MM, ROOMY  # noqa: PLC0415 - the parity harness's fake cluster
+    catalog = tmp_path / "models.yaml"
+    catalog.write_text(catalog_text)
+    log = tmp_path / "curl.log"
+    files = [{"rfilename": "model.safetensors", "size": 5 * GIB}, {"rfilename": "original/consolidated.00.pth",
+                                                                  "size": 5 * GIB}]
+    run_env = {"PATH": f"{MM / 'tests' / 'fakebin'}:{os.environ['PATH']}", "HOME": str(tmp_path),
+               "TMPDIR": str(tmp_path), "MM_CONFIG": str(catalog), "MM_CPU_POLICY": "best-effort",
+               "MM_INFERENCE_HOSTNAME": "inference.example.com", "MM_LITELLM_ENABLED": "false",
+               "MM_AI_GATEWAY_PROVIDER": "envoy", "FAKE_K8S": json.dumps(list(k8s) + ROOMY),
+               "FAKE_K8S_LOG": str(tmp_path / "k"),
+               "FAKE_HF_JSON": json.dumps({"siblings": files}), "FAKE_HF_CONFIG": json.dumps(SIZING_CFG),
+               "FAKE_CURL_LOG": str(log), "HF_TOKEN": "hf_test", **(env or {})}
+    cmd = [str(MM / "model-manager"), "deploy", *argv, *(["--dry-run"] if dry_run else [])]
+    p = subprocess.run(cmd, env=run_env, capture_output=True, text=True, timeout=120, check=False)  # nosec B603
+    manifest = p.stdout[p.stdout.find("apiVersion:"):] if "apiVersion:" in p.stdout else ""
+    docs = [d for d in yaml.safe_load_all(manifest) if d]
+    return p, docs, log.read_text() if log.exists() else ""
+
+
+SIZED_CATALOG = """
+models:
+  - name: sized
+    model_id: org/sized
+    category: llm
+    runtime: vllm
+    args: [--tensor-parallel-size, "2"]
+runtimes:
+  vllm:
+    default_version: "0.28.0"
+    versions: { "0.28.0": { image: "img/vllm:0.28.0" } }
+    categories:
+      llm:
+        env: { VLLM_CPU_KVCACHE_SPACE: "${KV_CACHE_GB}" }
+        defaults: { cpu: 4, memory: 8Gi, kv_cache_gb: 4 }
+"""
+
+
+def test_deploy_wires_sizing_into_the_manifest(tmp_path):
+    p, docs, curl_log = _deploy_dry_run(tmp_path, SIZED_CATALOG, "sized")
+    assert p.returncode == 0, p.stderr
+    main = _main(next(d for d in docs if d.get("kind") == "LLMInferenceService"))
+    env = {e["name"]: e.get("value") for e in main["env"]}
+    # TP 2 from the catalog args: each rank holds 4 of 8 KV heads (40960 B/token); 4 GiB caps the 131072 context.
+    assert env["VLLM_CPU_KVCACHE_SPACE"] == "4" and main["resources"]["limits"]["memory"] == "18Gi"  # 6 + 2x4 + 4
+    assert main["args"][main["args"].index("--max-model-len") + 1] == "104448"
+    assert "Sized from Hugging Face: 5.0 GiB weights" in p.stdout + p.stderr       # original/ copy not counted
+    assert "?blobs=true" in curl_log and "-H @-" in curl_log and "hf_test" not in curl_log
+
+
+def test_unsized_redeploy_of_a_live_model_aborts(tmp_path):
+    # Hub unreachable: the category default could shrink a model that was sized when it was deployed.
+    unreachable = {"FAKE_HF_JSON": "", "FAKE_HF_CONFIG": ""}
+    live = [[r"get LLMInferenceService sized -n llm-inference -o name$", 0, "llminferenceservice/sized"]]
+    p, _, _ = _deploy_dry_run(tmp_path, SIZED_CATALOG, "sized", env=unreachable, k8s=live, dry_run=False)
+    assert p.returncode == 1 and "set memory in the catalog or pass --memory" in p.stderr
+    p, docs, _ = _deploy_dry_run(tmp_path, SIZED_CATALOG, "sized", env=unreachable)
+    assert p.returncode == 0 and _main(docs[-1])["resources"]["limits"]["memory"] == "8Gi"  # new: category default
+
+
+def test_context_comes_from_any_key_vllm_reads(monkeypatch):
+    sizing, m, cat = _sizing(monkeypatch, cfg={k: v for k, v in SIZING_CFG.items() if k != "max_position_embeddings"})
+    cat.https_proxy = ""
+    assert sizing.size(m, cat, [], {}, 1) is None and m.memory == "16Gi"           # no context: category default
+    sizing, m, cat = _sizing(monkeypatch, cfg={**{k: v for k, v in SIZING_CFG.items()
+                                                 if k != "max_position_embeddings"}, "seq_length": 131072})
+    cat.https_proxy = ""
+    assert sizing.size(m, cat, [], {}, 1) == [] and m.kv_cache_gb == "10"

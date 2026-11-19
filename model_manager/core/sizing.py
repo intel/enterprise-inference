@@ -8,6 +8,8 @@ from .config import Catalog, Model, hf_json, hf_model_info, is_uint, pick, text
 from .ui import info, warn
 
 GIB = 1 << 30
+# Where configs keep the context length; vLLM reads the same keys.
+CONTEXT_KEYS = ("max_position_embeddings", "n_positions", "max_seq_len", "seq_length", "max_sequence_length")
 BLOCK = 1024            # a capped context is rounded down to whole blocks
 HYBRID_FIT = 0.9        # mixed layer types: vLLM pads its per-group pages (~5% on Gemma 4)
 
@@ -41,8 +43,8 @@ def kv_layout(cfg: dict, dtype_bytes: int = 2, tp: int = 1) -> tuple[int, int]:
     layers, heads = int(pick(c, "num_hidden_layers", 0) or 0), int(pick(c, "num_attention_heads", 0) or 0)
     if not (layers and heads):
         return 0, 0
-    head_dim, kv_heads = pick(c, "head_dim", 0) or pick(c, "hidden_size", 0) // heads, \
-        pick(c, "num_key_value_heads", 0) or heads
+    head_dim = pick(c, "head_dim", 0) or pick(c, "hidden_size", 0) // heads
+    kv_heads = pick(c, "num_key_value_heads", 0) or heads
     if pick(c, "kv_lora_rank", 0):  # MLA (DeepSeek): one compressed latent per token and layer
         local = full = (c["kv_lora_rank"] + pick(c, "qk_rope_head_dim", 0)) * dtype_bytes
     else:
@@ -57,24 +59,27 @@ def kv_layout(cfg: dict, dtype_bytes: int = 2, tp: int = 1) -> tuple[int, int]:
     return per_token, window * local * sliding
 
 
-def size(m: Model, catalog: Catalog, args: list[str], env: dict, tp: int) -> list[str]:
-    """Set m.memory (and m.kv_cache_gb for an env-set cache); return the engine args the sizing adds."""
+def size(m: Model, catalog: Catalog, args: list[str], env: dict, tp: int) -> list[str] | None:
+    """Set m.memory (and m.kv_cache_gb for an env-set cache); return the engine args to add, None if unsizable."""
     s = pick(m.rt, "sizing", {})
-    kv_knob, context_arg = pick(s, "kv", {}), text(pick(s, "context_arg"))
-    kv_env, kv_arg, kv_tokens = text(pick(kv_knob, "env")), text(pick(kv_knob, "arg")), \
-        text(pick(kv_knob, "unit", "GiB")) == "tokens"
+    kv_knob = pick(s, "kv", {})
+    context_arg = text(pick(s, "context_arg"))
+    kv_env = text(pick(kv_knob, "env"))
+    kv_arg = text(pick(kv_knob, "arg"))
+    kv_tokens = text(pick(kv_knob, "unit", "GiB")) == "tokens"
     proxy = catalog.https_proxy
     cfg = hf_json(f"{m.model_id}/resolve/main/config.json", proxy)
     per_token, fixed = kv_layout(cfg, int(text(pick(s, "kv_dtype_bytes", 2))), tp)
     weights = weight_bytes(m.model_id, proxy) + (weight_bytes(m.draft_model_id, proxy) if m.draft_model_id else 0)
-    if not (per_token and weights):  # Hub unreachable or gated without HF_TOKEN: the category defaults, as before
+    max_len = flag(args, context_arg)
+    c = pick(cfg, "text_config", {}) or cfg
+    known = [int(c[k]) for k in CONTEXT_KEYS if is_uint(text(pick(c, k)))]
+    context = int(max_len) if is_uint(max_len) else (known or [0])[0]
+    if not (per_token and weights and context):  # Hub unreachable, gated without HF_TOKEN, or no context length
         if m.auto_size == "auto":
             warn(f"memory: auto: {m.model_id} could not be sized from Hugging Face; using {m.memory}.")
-        return []
+        return None
 
-    max_len = flag(args, context_arg)
-    context = int(max_len) if is_uint(max_len) else int(pick(pick(cfg, "text_config", {}) or cfg,
-                                                              "max_position_embeddings", 0) or 0)
     set_kv = text(env.get(kv_env)) if kv_env else flag(args, kv_arg)   # an explicit cache always wins
     if is_uint(set_kv):
         kv = math.ceil(int(set_kv) * per_token / GIB) if kv_tokens else int(set_kv)
@@ -98,6 +103,6 @@ def size(m: Model, catalog: Catalog, args: list[str], env: dict, tp: int) -> lis
     towers = int(pick(s, "multimodal_gib", 10)) if any(limits[k] != "0" for k in present) else 0
     video = int(pick(s, "video_gib", 24)) if pick(cfg, "video_token_id") and limits["video"] != "0" else 0
     m.memory = f"{math.ceil(weights * headroom / GIB + tp * kv + process + towers + video)}Gi"
-    info(f"  Memory: {m.memory} (sized from Hugging Face: {weights / GIB:.1f} GiB weights, {kv} GiB KV cache"
-         f"{f' x {tp} ranks' if tp > 1 else ''}, context {max_len or min(context, fits)})")
+    info(f"  Sized from Hugging Face: {weights / GIB:.1f} GiB weights, {kv} GiB KV cache"
+         f"{f' x {tp} ranks' if tp > 1 else ''}, context {max_len or min(context, fits)}")
     return extra
