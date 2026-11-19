@@ -345,10 +345,15 @@ def test_litellm_called_directly_in_a_pod(monkeypatch):
     assert seen == {"url": "http://litellm.litellm.svc:4000/model/new", "auth": "Bearer k", "method": "POST"}
 
 
+RT = {"vllm": {}, "ovms": {"container": {"command": ["/ovms/bin/ovms"]}},
+      "iim-vllm": {"container": {"command": ["python3"], "args_env": "INFERENCE_ENGINE_ARGS"}}}
+
+
 @pytest.mark.parametrize("category, runtime, provider_model, mode", [
     ("llm", "vllm", "openai/m", None),
     ("embed", "vllm", "hosted_vllm/m", "embedding"),
     ("rerank", "vllm", "hosted_vllm/m", "rerank"),
+    ("rerank", "iim-vllm", "hosted_vllm/m", "rerank"),   # the IIM launcher serves vLLM's API
     ("embed", "ovms", "openai/m", "embedding"),
 ])
 def test_litellm_register_payload(monkeypatch, category, runtime, provider_model, mode):
@@ -359,7 +364,7 @@ def test_litellm_register_payload(monkeypatch, category, runtime, provider_model
     monkeypatch.setattr(routing, "_internal_url", lambda m: "http://backend/v1")
     monkeypatch.setattr(routing, "_litellm_ids", lambda name, base: ["id"])
     monkeypatch.setattr(routing, "_litellm", lambda method, url, payload=None: sent.append((url, payload)) or "{}")
-    routing.litellm_register(Model(name="m", namespace="n", category=category, runtime=runtime))
+    routing.litellm_register(Model(name="m", namespace="n", category=category, runtime=runtime, rt=RT[runtime]))
     url, payload = sent[0]
     assert url == "http://litellm/model/new"
     assert payload["litellm_params"]["model"] == provider_model
@@ -915,6 +920,26 @@ def test_iim_launcher_takes_vllm_args_as_json(monkeypatch):
     assert main["securityContext"]["runAsUser"] == 1001
 
 
+def test_iim_on_openshift_runs_kserves_vllm_command(monkeypatch):
+    # OpenShift AI's template starts vLLM itself; the IIM image ships vLLM, so the launcher is skipped there.
+    monkeypatch.setattr(config.platform, "is_openshift", lambda: True)
+    monkeypatch.setattr(renderer.platform, "is_openshift", lambda: True)
+    monkeypatch.setattr(renderer.platform, "adapt_llmisvc", lambda manifest: manifest)
+    m, doc = _render(monkeypatch, "iim-qwen3-4b")
+    main = _main(doc)
+    assert m.container == {} and m.serves_vllm and "command" not in main
+    assert main["image"] == "docker.io/intel/inference-xeon-qwen-qwen3-4b:0.1.0"
+    assert {"--served-model-name", "--enable-auto-tool-choice", "--max-model-len"} <= set(main["args"])
+
+
+def test_server_override_uses_the_selected_runtimes_image(monkeypatch):
+    # An IIM model's own image belongs to iim-vllm; --server vllm takes that runtime's image and version.
+    m, doc = _render(monkeypatch, "iim-qwen3-4b", "--server", "vllm", "--server-version", "0.28.0")
+    assert m.image == "docker.io/vllm/vllm-openai-cpu:v0.28.0" and "command" not in _main(doc)
+    m, _ = _render(monkeypatch, "iim-qwen3-4b")
+    assert m.image == "docker.io/intel/inference-xeon-qwen-qwen3-4b:0.1.0"
+
+
 def test_args_json_rejects_positional_args():
     m = Model(name="m", namespace="ns", runtime="iim-vllm")
     assert json.loads(renderer.args_json(m, ["--a", "1", "--b", "--c=x"])) == {"a": "1", "b": True, "c": "x"}
@@ -937,7 +962,8 @@ def test_servers_sorted_default_is_an_llmisvc():
     assert (m.runtime, m.kind) == ("openvino", "LLMInferenceService")
 
 
-def test_files_belong_to_the_serving_user():
+def test_files_belong_to_the_serving_user(monkeypatch):
+    monkeypatch.setenv("MM_PLATFORM", "kubernetes")  # platform detection elsewhere writes it to os.environ
     cat = Catalog(cli.MM_DIR / "models.yaml")
     assert config.resolve(cat, "qwen3-5-2b-ovms", cli.Options()).run_as_user == "5000"
     assert config.resolve(cat, "qwen3-0-6b", cli.Options()).run_as_user == "1001"  # iim-vllm: the image's user

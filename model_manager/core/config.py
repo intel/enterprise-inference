@@ -180,7 +180,14 @@ class Model:
     @property
     def container(self) -> dict:
         """The runtime's own serving container (command, args, probes, user); {} means KServe's vLLM command."""
-        return pick(self.rt, "container", {})
+        c = pick(self.rt, "container", {})
+        # OpenShift AI's template starts vLLM itself: a vLLM launcher image (args_env) runs that way there.
+        return {} if pick(c, "args_env") and platform.is_openshift() else c
+
+    @property
+    def serves_vllm(self) -> bool:
+        """vLLM's API: KServe's vLLM command, or a launcher that hands it vLLM args (args_env)."""
+        return not self.container or bool(pick(self.container, "args_env"))
 
     @property
     def run_as_user(self) -> str:
@@ -283,6 +290,8 @@ def _from_catalog(catalog: Catalog, name: str, o: Any) -> Model:
         default_server = text(pick(e, "runtime")) or catalog.runtime
         servers = {default_server: {"default": text(pick(e, "server_version"))}}
     m.runtime = o.server or default_server or min(servers, default="") or catalog.runtime
+    if o.server and o.server != default_server:
+        m.image = ""  # a model's image belongs to its own runtime, not to the one --server picks
     if explicit and m.runtime not in servers:
         abort(f"Model '{name}' does not declare server '{m.runtime}'. Declared: {', '.join(sorted(servers))}")
     entry = pick(servers, m.runtime, {})

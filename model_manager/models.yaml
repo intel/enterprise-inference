@@ -54,7 +54,10 @@ models:
     category: llm
     cpu: auto
     memory: 128Gi
-    args: [ --enable-auto-tool-choice, --tool-call-parser, qwen3_xml ]
+    # Linear attention on CPU rejects prefix caching and chunked prefill; vision tower off (AMX kernel crash).
+    args: [ --enable-auto-tool-choice, --tool-call-parser, qwen3_xml, --no-enable-prefix-caching,
+            --no-enable-chunked-prefill, --max-model-len, "32768", --max-num-batched-tokens, "32768",
+            --limit-mm-per-prompt.image, "0", --limit-mm-per-prompt.video, "0" ]
 
   - name: qwen2-5-coder-7b
     model_id: Qwen/Qwen2.5-Coder-7B-Instruct
@@ -113,12 +116,16 @@ models:
     memory: 128Gi
     chat_template_file: tool_chat_template_gemma4.jinja
     args: [ --enable-auto-tool-choice, --tool-call-parser, gemma4 ]
+    env: { VLLM_CPU_SGL_KERNEL: "0" }  # its vision tower feeds the AMX SGL kernel a 3D tensor (vllm runtime sets 1)
 
   - name: whisper-small                # speech-to-text (/v1/audio/transcriptions)
     model_id: openai/whisper-small
     category: llm
     cpu: auto
     memory: 24Gi
+    # Encoder-decoder: prefix caching kills the engine on the first request (no cross-attention caching).
+    args: [ --dtype, float32, --enforce-eager, --no-enable-prefix-caching ]
+    env: { TORCHDYNAMO_DISABLE: "1" }
 
   # Backs the LiteLLM guardrail, which is fail-closed: an OOM here blocks every request.
   - name: qwen3guard
