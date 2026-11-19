@@ -45,8 +45,8 @@ network:
 # Common fields:
 #   category:        llm | embed | rerank | vlm   (drives default args + cpu/memory)
 #   cpu / memory:    resource requests            (default from category)
-#                    memory: auto — a vLLM llm model is sized from its
-#                    HuggingFace config.json (weights + KV + overhead); see
+#                    memory: auto — a vLLM llm or vlm model is sized from its
+#                    HuggingFace config.json (weights + load + KV + overhead); see
 #                    docs/reference/memory_sizing.md. A value (memory: 128Gi),
 #                    or the category default, is used as is and checked to fit.
 #                    cpu: auto — NUMA-aware: under nri-balloons, the free

@@ -6,6 +6,7 @@ the attention page. See docs/reference/memory_sizing.md.
 """
 from __future__ import annotations
 
+import json
 import math
 import re
 from dataclasses import dataclass
@@ -18,6 +19,12 @@ CONCURRENCY = 16
 OVERHEAD_GIB = 3
 HEADROOM = 1.15
 KV_MIN_GIB = 2
+# Load-time allowances (measured on Xeon, intel/enterprise-inference#86): a quantized checkpoint is repacked
+# into the CPU kernel's layout at load, with both copies briefly resident; vLLM profiles a multimodal model's
+# encoders with their largest input at start-up, a full-size video costing the most.
+QUANTIZED_REPACK = 0.4    # x the quantized weight bytes
+MULTIMODAL_GIB = 10       # vision / audio towers
+VIDEO_GIB = 24            # video-capable models (Qwen2.5-VL-3B: ~21 GiB); a minimum
 DTYPE_BYTES = {"float32": 4, "float": 4, "bfloat16": 2, "float16": 2, "half": 2}
 
 
@@ -27,7 +34,7 @@ class Unsupported(Exception):
 
 @dataclass(frozen=True)
 class Layer:
-    kind: str                # full | sliding | cross | linear
+    kind: str                # full | sliding | cross | linear | mla
     kv_heads: int = 0
     head_dim: int = 0
     tokens: int = 0          # sliding: the window; cross: the encoder length
@@ -77,8 +84,13 @@ def layout(cfg: dict) -> list[Layer]:
             dim = t["d_model"] // heads
             return ([Layer("full", heads, dim)] * t["decoder_layers"]
                     + [Layer("cross", heads, dim, t["max_source_positions"])] * t["decoder_layers"])
-        if any(k in t for k in ("kv_lora_rank", "state_size", "ssm_state_size")):
-            raise Unsupported("MLA or state-space attention")
+        if any(k in t for k in ("state_size", "ssm_state_size")):
+            raise Unsupported("state-space attention")
+        # Layers that reuse an earlier layer's KV (Gemma 3n / Gemma 4 E2B, E4B: the last num_kv_shared_layers)
+        # hold none of their own.
+        own = (t.get("num_hidden_layers") or len(t["layer_types"])) - (t.get("num_kv_shared_layers") or 0)
+        if t.get("kv_lora_rank"):  # MLA (DeepSeek V2/V3, Kimi): one latent + rope key per token, on every worker
+            return [Layer("mla", 1, t["kv_lora_rank"] + (t.get("qk_rope_head_dim") or 0))] * own
         heads = t["num_attention_heads"]
         kv = t.get("num_key_value_heads") or heads
         dim = t.get("head_dim") or t["hidden_size"] // heads
@@ -91,7 +103,7 @@ def layout(cfg: dict) -> list[Layer]:
                 t["linear_num_key_heads"], t["linear_num_value_heads"], t["linear_key_head_dim"],
                 t["linear_value_head_dim"], t["linear_conv_kernel_dim"])),
         }
-        types = t.get("layer_types") or ["full_attention"] * t["num_hidden_layers"]
+        types = (t.get("layer_types") or ["full_attention"] * t["num_hidden_layers"])[:own]
         unknown = sorted(set(types) - set(kinds))
         if unknown:
             raise Unsupported(f"layer type {', '.join(unknown)}")
@@ -122,7 +134,10 @@ def topology_error(cfg: dict, tp: int) -> str:
 
 
 def _per_token(layer: Layer, tp: int, kv_bytes: int) -> int:
-    """K and V of one token in one layer on one worker; KV heads are replicated when tp exceeds them."""
+    """K and V of one token in one layer on one worker; KV heads are replicated when tp exceeds them. MLA keeps
+    one latent per token, replicated on every worker (vLLM MLAAttentionSpec)."""
+    if layer.kind == "mla":
+        return layer.head_dim * kv_bytes
     return 2 * math.ceil(layer.kv_heads / tp) * layer.head_dim * kv_bytes
 
 
@@ -152,7 +167,7 @@ def bytes_per_request(layers: list[Layer], tp: int, max_len: int, kv_bytes: int,
     for x in attention:
         tokens_per_page = page // _per_token(x, tp, kv_bytes)
         # Cross-attention is reserved for the encoder budget, which defaults to the batched tokens.
-        held = {"full": max_len, "cross": max(x.tokens, batched_tokens),
+        held = {"full": max_len, "mla": max_len, "cross": max(x.tokens, batched_tokens),
                 "sliding": min(x.tokens - 1 + batched_tokens, max_len)}[x.kind]
         cost = (math.ceil(held / tokens_per_page) + (x.kind == "sliding")) * page
         kinds.setdefault((x.kind, x.tokens if x.kind == "sliding" else 0), []).append(cost)
@@ -165,11 +180,44 @@ def bytes_per_request(layers: list[Layer], tp: int, max_len: int, kv_bytes: int,
 
 def resident_bytes(cfg: dict | None, weight_bytes: int, args: list[str]) -> int:
     """Weight bytes once loaded: an unquantized checkpoint served with a wider --dtype (bf16 as float32) grows."""
-    if not cfg or "quantization_config" in cfg or "quantization_config" in text_config(cfg):
+    if not cfg or _quantized(cfg):
         return weight_bytes
     stored = DTYPE_BYTES.get(text_config(cfg).get("torch_dtype") or text_config(cfg).get("dtype"), 0)
     served = DTYPE_BYTES.get(arg_value(args, "--dtype"), stored)
     return weight_bytes * served // stored if stored and served > stored else weight_bytes
+
+
+def _quantized(cfg: dict | None) -> bool:
+    return bool(cfg) and ("quantization_config" in cfg or "quantization_config" in text_config(cfg))
+
+
+def _mm_limit(args: list[str], modality: str) -> int | None:
+    """--limit-mm-per-prompt for one modality: the dotted flag (--limit-mm-per-prompt.image 0), else the JSON
+    form ('{"image": 0}', a count or {"count": n}); None when not set."""
+    value = arg_value(args, f"--limit-mm-per-prompt.{modality}")
+    if not value:
+        try:
+            value = json.loads(arg_value(args, "--limit-mm-per-prompt") or "{}").get(modality, "")
+        except (ValueError, AttributeError):
+            value = ""
+    if isinstance(value, dict):
+        value = value.get("count", "")
+    return int(value) if str(value).isdigit() else None
+
+
+def load_allowance_gib(cfg: dict | None, weight_bytes: int, args: list[str]) -> float:
+    """Memory beyond weights, KV and the per-worker runtime that a deploy needs while loading: the repack copy of
+    quantized weights, and the encoder profiling of a multimodal model unless --limit-mm-per-prompt sets every
+    modality it has to 0 (and video, separately)."""
+    if not cfg:
+        return 0.0
+    extra = QUANTIZED_REPACK * weight_bytes / GIB if _quantized(cfg) else 0.0
+    present = ["image", "video"] * ("vision_config" in cfg) + ["audio"] * ("audio_config" in cfg)
+    if any(_mm_limit(args, k) != 0 for k in present):
+        extra += MULTIMODAL_GIB
+    if cfg.get("video_token_id") is not None and _mm_limit(args, "video") != 0:
+        extra += VIDEO_GIB
+    return extra
 
 
 def size(cfg: dict | None, weight_bytes: int, args: list[str], tp: int,
@@ -199,7 +247,8 @@ def size(cfg: dict | None, weight_bytes: int, args: list[str], tp: int,
         _enabled(args, "--enable-prefix-caching", True))
     streams = min(CONCURRENCY, int(arg_value(args, "--max-num-seqs") or CONCURRENCY))
     kv_gib = max(KV_MIN_GIB, math.ceil(per_request / GIB), math.ceil(per_request * streams / GIB))
-    needed = weights / GIB + tp * (kv_gib + OVERHEAD_GIB)
+    load = load_allowance_gib(cfg, weight_bytes, args) + (load_allowance_gib(draft[0], draft[1], args) if draft else 0)
+    needed = weights / GIB + load + tp * (kv_gib + OVERHEAD_GIB)
     return Sizing(weights_gib=weights / GIB, kv_gib=kv_gib, tp=tp, max_model_len=max_len,
-                  needed_gib=needed, memory_gi=math.ceil(needed * HEADROOM))
+                  needed_gib=needed, memory_gi=math.ceil(needed * HEADROOM), load_gib=load)
 

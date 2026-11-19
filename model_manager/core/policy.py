@@ -423,19 +423,21 @@ def _numa_node_gib(m: Model) -> tuple[float, int] | None:
 
 def _numa_error(m: Model, s: Sizing) -> str:
     """vLLM binds each TP worker's memory to its NUMA node, so a worker's share must fit in one."""
-    per_worker = s.weights_gib / s.tp + s.kv_gib + sizer.OVERHEAD_GIB
+    # Weights and load allowances (repack, encoder profiling) split across the workers, each on its NUMA node.
+    per_worker = (s.weights_gib + s.load_gib) / s.tp + s.kv_gib + sizer.OVERHEAD_GIB
     numa = _numa_node_gib(m)
     if numa is None or per_worker <= numa[0]:
         return ""
     size, max_tp = numa
     fits = next((t for t in (2, 4, 8) if s.tp < t <= max_tp
-                 and s.weights_gib / t + s.kv_gib + sizer.OVERHEAD_GIB <= size), 0)
+                 and (s.weights_gib + s.load_gib) / t + s.kv_gib + sizer.OVERHEAD_GIB <= size), 0)
     hint = (f"Deploy with --tp {fits} (or --tensor-parallel-size {fits} in its args): each worker then holds 1/{fits} "
             "of the weights on its own NUMA node." if fits else
             "No TP the node supports fits the weights; lower VLLM_CPU_KVCACHE_SPACE or --max-model-len, or use a "
             "smaller (e.g. quantized) model.")
-    return (f"{m.name} needs {per_worker:.0f} GiB per TP worker at tp={s.tp} (weights {s.weights_gib / s.tp:.1f} + "
-            f"KV {s.kv_gib} + overhead {sizer.OVERHEAD_GIB} GiB), but a NUMA node has {size:.0f} GiB and vLLM binds "
+    return (f"{m.name} needs {per_worker:.0f} GiB per TP worker at tp={s.tp} (weights {s.weights_gib / s.tp:.1f}"
+            f"{f' + load {s.load_gib / s.tp:.1f}' if s.load_gib else ''} + KV {s.kv_gib} + overhead "
+            f"{sizer.OVERHEAD_GIB} GiB), but a NUMA node has {size:.0f} GiB and vLLM binds "
             f"each worker's memory to its NUMA node. {hint}")
 
 
@@ -446,7 +448,8 @@ def memory_gate(m: Model, s: Sizing | None) -> None:
         return
     have = mem_bytes(m.memory) / sizer.GIB
     errors = [f"memory {m.memory} is below the {math.ceil(s.needed_gib)}Gi {m.name} needs at tp={s.tp}: weights "
-              f"{s.weights_gib:.1f} + KV {s.tp} x {s.kv_gib} + overhead {s.tp} x {sizer.OVERHEAD_GIB} GiB. Raise "
+              f"{s.weights_gib:.1f}{f' + load {s.load_gib:.1f}' if s.load_gib else ''} + KV {s.tp} x {s.kv_gib} + "
+              f"overhead {s.tp} x {sizer.OVERHEAD_GIB} GiB. Raise "
               "--memory or lower VLLM_CPU_KVCACHE_SPACE."] if have and s.needed_gib > have else []
     errors += [e for e in (_numa_error(m, s),) if e]
     if not errors:

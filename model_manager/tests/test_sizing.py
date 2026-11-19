@@ -1,6 +1,7 @@
 """Memory and KV-cache sizing (core/sizer.py) and its use by deploy. Configs are trimmed from the real repos."""
 from __future__ import annotations
 
+import math
 import subprocess  # nosec B404
 import sys
 from pathlib import Path
@@ -34,6 +35,12 @@ WHISPER = {"model_type": "whisper", "is_encoder_decoder": True, "decoder_layers"
            "d_model": 768, "max_target_positions": 448, "max_source_positions": 1500, "torch_dtype": "float32"}
 LLM_ARGS = ["--dtype", "bfloat16", "--max-num-seqs", "128", "--max-num-batched-tokens", "2048",
             "--enable-prefix-caching", "--block-size", "128"]
+DEEPSEEK_V2_LITE = {"num_hidden_layers": 27, "num_attention_heads": 16, "num_key_value_heads": 16,
+                    "kv_lora_rank": 512, "qk_rope_head_dim": 64, "hidden_size": 2048,
+                    "max_position_embeddings": 163840, "torch_dtype": "bfloat16"}
+GEMMA4_E4B = {"model_type": "gemma4", "vision_config": {}, "audio_config": {}, "video_token_id": 258884,
+              "text_config": {**GEMMA4["text_config"], "num_hidden_layers": 42, "num_kv_shared_layers": 18,
+                              "layer_types": (["sliding_attention"] * 5 + ["full_attention"]) * 7}}
 MIB = 1024 ** 2
 
 
@@ -147,8 +154,70 @@ def test_context_limit_keys(key):
     assert sizer.size({**cfg, key: 2048}, gib(14.96), LLM_ARGS, 1).max_model_len == 2048
 
 
+def test_mla_keeps_one_latent_per_token_on_every_worker():
+    # kv_lora_rank + qk_rope_head_dim values per token and layer, no separate K and V, not split by TP.
+    layers = sizer.layout(DEEPSEEK_V2_LITE)
+    assert {x.kind for x in layers} == {"mla"} and len(layers) == 27
+    for tp in (1, 2):
+        assert sizer.bytes_per_request(layers, tp, 8192, 2, 2, 128, 2048, True) == 27 * 8192 * 576 * 2
+
+
+@pytest.mark.parametrize("cfg, own", [(GEMMA4_E4B, 24), ({**LLAMA_8B, "num_kv_shared_layers": 8}, 24)])
+def test_shared_kv_layers_hold_no_cache(cfg, own):
+    assert len(sizer.layout(cfg)) == own
+
+
+def test_shared_kv_layers_shrink_the_kv():
+    full = sizer.layout({**GEMMA4_E4B, "text_config": {**GEMMA4_E4B["text_config"], "num_kv_shared_layers": 0}})
+    shared = sizer.layout(GEMMA4_E4B)
+    assert [x.kind for x in shared].count("full") == 4 and [x.kind for x in shared].count("sliding") == 20
+    assert sizer.bytes_per_request(shared, 1, 8192, 2, 2, 128, 2048, True) < \
+        sizer.bytes_per_request(full, 1, 8192, 2, 2, 128, 2048, True)
+
+
+AWQ = {**LLAMA_8B, "quantization_config": {"quant_method": "awq", "bits": 4}}
+VLM = {**LLAMA_8B, "vision_config": {}, "video_token_id": 151656}
+
+
+@pytest.mark.parametrize("cfg, args, load", [
+    (LLAMA_8B, [], 0),
+    (AWQ, [], 0.4 * 5),                                                                # repack copy
+    ({**LLAMA_8B, "vision_config": {}}, [], 10),                                       # image tower
+    ({**LLAMA_8B, "audio_config": {}}, [], 10),                                        # audio tower
+    (VLM, [], 34),                                                                     # + full-size video
+    (VLM, ["--limit-mm-per-prompt.video", "0"], 10),
+    (VLM, ["--limit-mm-per-prompt.image=0", "--limit-mm-per-prompt.video=0"], 0),      # text only
+    (VLM, ["--limit-mm-per-prompt", '{"image": 0, "video": 0}'], 0),                   # JSON form
+    (VLM, ["--limit-mm-per-prompt", '{"image": {"count": 0}, "video": 2}'], 34),
+    ({**GEMMA4_E4B, "text_config": {}}, ["--limit-mm-per-prompt.image", "0",          # audio still on
+                                         "--limit-mm-per-prompt.video", "0"], 10),
+])
+def test_load_allowances(cfg, args, load):
+    assert sizer.load_allowance_gib(cfg, gib(5), args) == pytest.approx(load)
+
+
+def test_load_allowances_are_sized():
+    s = sizer.size(AWQ, gib(5.3), LLM_ARGS, 1)
+    assert s.load_gib == pytest.approx(0.4 * 5.3)
+    assert s.memory_gi == math.ceil((5.3 + 0.4 * 5.3 + 16 + 3) * sizer.HEADROOM)
+    assert sizer.size(VLM, gib(14.96), LLM_ARGS, 1).memory_gi == math.ceil((14.96 + 34 + 16 + 3) * sizer.HEADROOM)
+
+
+def test_vlm_category_is_sized(hub):
+    m, s, main, env = _sized(*LLAMA[:2], "--category", "vlm", "--memory", "auto")
+    assert s and main["resources"]["limits"]["memory"] == f"{s.memory_gi}Gi"
+
+
+def test_fixed_memory_fit_counts_the_load_allowances(hub, capsys):
+    m = Model(name="m", namespace="ns", memory="30Gi")
+    assert cli._static_fit(m, gib(5.3), 0, 16, 1, 0.4 * 5.3).needed_gib == pytest.approx(5.3 + 2.12 + 19)
+    assert "below" not in capsys.readouterr().err
+    assert cli._static_fit(m, gib(5.3), 0, 16, 1, 10).needed_gib > 30
+    assert "load 10.0" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("cfg, weights, args, reason", [
-    ({**LLAMA_8B, "kv_lora_rank": 512}, 1, [], "MLA"),
+    ({**LLAMA_8B, "state_size": 16}, 1, [], "state-space"),
     ({**LLAMA_8B, "layer_types": ["mamba"] * 32}, 1, [], "layer type mamba"),
     ({"num_hidden_layers": 2}, 1, [], "lacks"),
     (LLAMA_8B, 0, [], "no safetensors"),
@@ -303,7 +372,7 @@ def test_only_vllm_on_cpu_is_sized(hub, monkeypatch, capsys, runtime_config):
     m = config.resolve(cat, "", o)
     with pytest.raises(SystemExit):
         cli._apply_sizing(m, cat, o, [], 1)
-    assert "vLLM llm models on CPU only" in capsys.readouterr().err
+    assert "vLLM llm and vlm models on CPU only" in capsys.readouterr().err
     o = cli.parse_args(["deploy", *LLAMA])
     assert cli._apply_sizing(config.resolve(cat, "", o), cat, o, [], 1) is None
 

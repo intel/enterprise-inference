@@ -3,7 +3,7 @@
 ## What it does
 
 `memory: auto` in a model's catalog entry, or `--memory auto` on the command line, makes
-`model-manager deploy` work out a vLLM chat model's (category `llm`) pod memory and KV
+`model-manager deploy` work out a vLLM chat or vision-language model's (category `llm` or `vlm`) pod memory and KV
 cache from the model itself, like `cpu: auto` does for CPUs. It reads:
 
 - the model's `config.json` on Hugging Face, for the layer layout;
@@ -67,12 +67,13 @@ The deploy prints the calculation:
   template appends after them.
 - **Which runtimes:** vLLM on CPU, i.e. a runtime with no `container:` (KServe's vLLM
   command) and `device: cpu` (the default): `vllm`, and runtimes built the same way. GPU
-  runtimes and OpenVINO are not sized; `memory: auto` on them is rejected.
+  runtimes and OpenVINO are not sized; `memory: auto` on them is rejected, as on `embed` and
+  `rerank` models.
 
 ## The formula
 
 ```
-memory_gi   = ceil( (W + TP × kv_gib + TP × 3 GiB) × 1.15 )
+memory_gi   = ceil( (W + load + TP × kv_gib + TP × 3 GiB) × 1.15 )
 
 kv_gib      = max( 2, ceil(per_request / GiB), ceil(per_request × streams / GiB) )
 streams     = min(16, --max-num-seqs)
@@ -82,10 +83,27 @@ per_request = KV-pool bytes one full-length request holds on one worker (below)
 | Term | Meaning |
 |---|---|
 | `W` | Weight bytes: the size of the repo-root `.safetensors` files (subfolders such as `original/` and `consolidated.*` hold other formats). For quantized checkpoints the file size is the resident size; an unquantized checkpoint served with a wider `--dtype` (bf16 as float32) is scaled up. A draft model's weights are added |
+| `load` | Load-time allowances, see [below](#load-allowances): 0.4 × `W` for a quantized checkpoint, 10 GiB for vision / audio towers, 24 GiB more for video |
 | `TP` | The last `--tensor-parallel-size` of the model's `args` (category, version, model), then `--arg` / `--tp`, as vLLM receives it: one vLLM worker per rank |
 | `kv_gib` | `VLLM_CPU_KVCACHE_SPACE`. vLLM allocates it **on every worker**, so the pod holds `TP ×` it |
 | `3 GiB` | Per-worker runtime: Python, PyTorch, oneDNN, prefill activations, sampling buffers |
 | `1.15` | Headroom for fragmentation, load-time page cache, and estimate error |
+
+### Load allowances
+
+Memory a deploy needs while it loads, beyond its weights, KV cache and runtime. The values
+were measured on Xeon in intel/enterprise-inference#86.
+
+| Allowance | When | Amount | Why |
+|---|---|---|---|
+| Quantized repack | `quantization_config` in `config.json` (AWQ, GPTQ, …) | 0.4 × the weight bytes | vLLM repacks the weights into the CPU kernel's layout at load, both copies briefly resident |
+| Multimodal towers | `vision_config` or `audio_config`, unless `--limit-mm-per-prompt` sets every modality the model has to 0 | 10 GiB | vLLM profiles the encoders with their largest input at start-up |
+| Video | `video_token_id`, unless `--limit-mm-per-prompt` sets video to 0 | 24 GiB more | A full-size video costs far more to profile than an image (Qwen2.5-VL-3B: ~21 GiB); a minimum, so set `memory` for larger video models |
+
+`--limit-mm-per-prompt` is read in both forms: `--limit-mm-per-prompt.image 0` and
+`--limit-mm-per-prompt '{"image": 0, "video": 0}'`. Serving a multimodal model as text only
+(image and video 0, plus audio 0 if it has audio) drops both multimodal allowances. The
+allowances count once per pod, and are split across the TP workers for the NUMA check.
 
 ### Tensor parallelism
 
@@ -119,6 +137,7 @@ page = widest layer's bytes per token × block size (128); narrower layers fit m
 | Full attention | `max_model_len` | `num_key_value_heads` (else `num_attention_heads`), `head_dim` (else `hidden_size / num_attention_heads`) |
 | Sliding window | `min(sliding_window − 1 + --max-num-batched-tokens, max_model_len)` + 1 page | `layer_types: sliding_attention`, `sliding_window` |
 | Linear attention (Gated DeltaNet) | a fixed state: 1 page, 2 with prefix caching | `layer_types: linear_attention`, `linear_num_key_heads`, `linear_num_value_heads`, `linear_key_head_dim`, `linear_value_head_dim`, `linear_conv_kernel_dim` |
+| MLA (DeepSeek V2/V3, Kimi) | `max_model_len`, one latent of `kv_lora_rank + qk_rope_head_dim` values per token (no separate K and V), on every worker: not split by TP | `kv_lora_rank`, `qk_rope_head_dim` |
 | Cross-attention (encoder-decoder) | `max(max_source_positions, --max-num-batched-tokens)`: vLLM reserves the encoder budget | `is_encoder_decoder`, `decoder_layers`, `decoder_attention_heads`, `d_model`, `max_source_positions` |
 
 Layers of one kind (full, each sliding window, cross, linear; a draft model's full-attention
@@ -131,9 +150,13 @@ How the layout is chosen:
 1. **Encoder-decoder** (`is_encoder_decoder: true`, e.g. Whisper): every decoder layer has
    self-attention, capped at `max_target_positions`, plus cross-attention over the audio
    frames.
-2. **`layer_types` present:** one layer per entry. Fields under `text_config` are used
+2. **MLA** (`kv_lora_rank` set): every layer holds one latent per token.
+3. **`layer_types` present:** one layer per entry. Fields under `text_config` are used
    when the config has one (multimodal models).
-3. **Otherwise:** every one of `num_hidden_layers` is full attention. A model-wide
+4. **Otherwise:** every one of `num_hidden_layers` is full attention.
+
+The last `num_kv_shared_layers` layers (Gemma 3n, Gemma 4 E2B / E4B) reuse earlier layers' KV
+and hold none of their own, so they are left out: Gemma 4 E4B caches 24 of its 42 layers. A model-wide
    `sliding_window` without `layer_types` is counted as full attention, which oversizes
    safely.
 
@@ -167,8 +190,11 @@ the global KV head count. vLLM still stores both K and V.
 | 5 full | 8192 | 160 MiB |
 | 25 sliding | 1023 + 2048 + 128 = 3200 | 625 MiB |
 
-KV = 785 MiB × 16 → 13 GiB. Memory = (48.07 + 13 + 3) × 1.15 → **74Gi**. Treating all
-30 layers as full would give 30 GiB of KV and 93Gi.
+KV = 785 MiB × 16 → 13 GiB. Treating all 30 layers as full would give 30 GiB of KV.
+Gemma 4 has vision, audio and video inputs, so the [load allowances](#load-allowances) add
+34 GiB: memory = (48.07 + 34 + 13 + 3) × 1.15 → **113Gi**. Served as text only
+(`--limit-mm-per-prompt.image 0 --limit-mm-per-prompt.video 0 --limit-mm-per-prompt.audio 0`)
+it is (48.07 + 13 + 3) × 1.15 → 74Gi.
 
 ### Hybrid linear attention: `Qwen/Qwen3.6-35B-A3B`
 
@@ -207,8 +233,8 @@ These run before the weights download, for every CPU policy:
 | Check | Fails when | Result |
 |---|---|---|
 | Topology | TP does not split the attention / KV heads | Abort (also with `--dry-run`), with or without `memory: auto` |
-| Fit | A set `memory` is below weights + TP × KV + TP × 3 GiB (no headroom) | Abort with the numbers |
-| NUMA | One TP worker's share, weights ÷ TP + KV + 3 GiB, exceeds one NUMA node's memory | Abort, suggesting the smallest `--tp` that fits (up to the node's `nri.intel.com/max-tp`), or a smaller KV / context when none does. TP is never changed for you |
+| Fit | A set `memory` is below weights + load + TP × KV + TP × 3 GiB (no headroom) | Abort with the numbers |
+| NUMA | One TP worker's share, (weights + load) ÷ TP + KV + 3 GiB, exceeds one NUMA node's memory | Abort, suggesting the smallest `--tp` that fits (up to the node's `nri.intel.com/max-tp`), or a smaller KV / context when none does. TP is never changed for you |
 | Placement | No node the model can use has the pod's CPU **and** memory free (allocatable minus running pods' requests) | Abort; the pod would stay Pending. This is the CPU-policy pre-flight, which gets the sized memory |
 
 The NUMA check exists because vLLM binds each TP worker's memory to the NUMA node of its CPUs (MEMBIND), so a worker cannot spill onto another node: past one NUMA node it fails at load even when the pod's limit is larger. A NUMA node's size is the node's memory capacity ÷ its `nri.intel.com/numa-nodes` label, read per node at deploy time, so it follows each host's hardware; if any node the model can use lacks the labels (no NRI), the check is skipped, since that node may fit the worker. NUMA nodes of one host are assumed equal in size, which holds for Xeon SNC layouts but not for uneven DIMMs or CPU-less (CXL) memory nodes.
@@ -229,7 +255,7 @@ model with `memory: 64Gi` and a 40 GiB KV cache would be OOM-killed at load.
 | Hugging Face unreachable, or a gated repo (Llama, Gemma) without `HF_TOKEN` | `config.json not readable (gated repo without HF_TOKEN?)` |
 | No safetensors files (`.bin` only), for the model or its draft | `no safetensors size on HuggingFace` / `… for the draft model` |
 | No context length in `config.json` | `context length unknown` |
-| MLA (`kv_lora_rank`) or state-space (`state_size`) attention, or an unknown `layer_types` entry | `MLA or state-space attention` / `layer type …` |
+| State-space (`state_size`) attention, or an unknown `layer_types` entry | `state-space attention` / `layer type …` |
 | `--pipeline-parallel-size` or `--data-parallel-size` > 1 | `--pipeline-parallel-size > 1` |
 
 Set `memory:` (and `VLLM_CPU_KVCACHE_SPACE`) for such a model instead.
@@ -247,7 +273,7 @@ Hugging Face is asked for two documents per model (the file list with sizes, and
 `config.json`); after a connection failure the deploy stops asking.
 
 Without `memory: auto`, the set or default values are checked against the weights, whose
-size is public even for gated repos: the deploy warns when they cannot hold weights +
+size is public even for gated repos: the deploy warns when they cannot hold weights + load +
 TP × (KV + 3 GiB) (`Memory 16Gi of llama-3-1-8b is below the 26.0 GiB its weights 15.0 +
 KV 1 x 8 + overhead 1 x 3 need.`), and the memory pre-flight then stops it. When the weight
 size is unknown, nothing is checked. These values do not change with `--tp`.
@@ -263,8 +289,9 @@ size is unknown, nothing is checked. These values do not change with `--tp`.
 
 ## Limits
 
-- The constants (3 GiB overhead per worker, 1.15 headroom, 16 streams, 8192 tokens) are
-  estimates. Calibrate them against the peak RSS of real deploys.
+- The constants (3 GiB overhead per worker, 1.15 headroom, 16 streams, 8192 tokens, and the
+  load allowances) are estimates. MLA follows vLLM's `MLAAttentionSpec`, but vLLM 0.28 has no
+  CPU MLA backend, so it is not validated live. Calibrate them against the peak RSS of real deploys.
 - The KV pool rules are those of vLLM 0.28's CPU backend. Recheck them when the
   catalog's `default_version` moves, especially the hybrid page alignment and the
   sliding-window token count.

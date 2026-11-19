@@ -185,8 +185,9 @@ class Sizing:
     kv_gib: int                               # VLLM_CPU_KVCACHE_SPACE, per TP worker
     tp: int
     max_model_len: int
-    needed_gib: float                         # weights + tp x (kv + overhead)
+    needed_gib: float                         # weights + load + tp x (kv + overhead)
     memory_gi: int                            # needed_gib with headroom: the request and limit
+    load_gib: float = 0.0                     # load-time allowances: quantized repack, multimodal encoders
 
 
 @dataclass

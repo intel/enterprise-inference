@@ -53,7 +53,7 @@ apply. Set `MM_FORCE_REDEPLOY=1` to force a full re-apply regardless.
 | `--server <name>` | Which engine serves the model: `vllm` (default) or `openvino` (alias: `--runtime`) |
 | `--server-version <v>` | Which version of that engine to use — see [below](#pick-an-engine-and-version) |
 | `--cpu N` | Number of CPU cores to give the model. `--cpu auto` sizes it to a NUMA node — see [CPU auto](../customize/catalog.md#cpu-auto) |
-| `--memory NGi` | Memory limit, e.g. `32Gi`. `--memory auto` sizes a vLLM chat model's memory and KV cache from its config — see [Memory & KV-Cache Sizing](../reference/memory_sizing.md) |
+| `--memory NGi` | Memory limit, e.g. `32Gi`. `--memory auto` sizes a vLLM chat or vision-language model's memory and KV cache from its config — see [Memory & KV-Cache Sizing](../reference/memory_sizing.md) |
 | `--replicas N` | How many copies to run (default: 1); a fixed count, which turns autoscaling off |
 | `--min-replicas N` / `--max-replicas N` | Autoscale between N copies (default min: 1); a max above the min turns it on. Needs `keda_enabled: true` and KServe 0.21 (`envoy_gateway_upgrade: true`); not on OpenShift yet |
 | `--scale-target N` | Load per copy that triggers a scale-up: waiting requests for vLLM (default: 2), in-flight requests for OpenVINO (default: 4) |
@@ -94,8 +94,8 @@ isn't listed fails with a clear message rather than deploying something untested
 
 You don't need a catalog entry to try a model. Point `--hfid` at any Hugging Face repo
 and model-manager infers the workload type (chat model, embedding, or reranker) from
-the model's metadata. `--memory auto` sizes a chat model's memory and KV cache from its
-config ([how](../reference/memory_sizing.md)):
+the model's metadata. `--memory auto` sizes a chat or vision-language model's memory and KV
+cache from its config ([how](../reference/memory_sizing.md)):
 
 ```bash
 ./model-manager deploy --hfid Qwen/Qwen3-0.6B --cpu 8 --memory auto --wait

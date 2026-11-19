@@ -348,13 +348,16 @@ def _vllm_on_cpu(m: Model) -> bool:
     return not m.container and text(pick(m.rt, "device", "cpu")) == "cpu"
 
 
+SIZED_CATEGORIES = ("llm", "vlm")
+
+
 def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], tp: int) -> Sizing | None:
     """memory: auto sizes memory and VLLM_CPU_KVCACHE_SPACE from the model's HuggingFace metadata and aborts when it
     cannot. Otherwise the set memory and KV stay, and only their fit is checked (memory_gate) when the weight size
     is known. None when nothing can be checked."""
-    if not (_vllm_on_cpu(m) and m.category == "llm"):
+    if not (_vllm_on_cpu(m) and m.category in SIZED_CATEGORIES):
         if m.memory_auto:
-            abort(f"memory: auto sizes vLLM llm models on CPU only; set memory for {m.name}.")
+            abort(f"memory: auto sizes vLLM llm and vlm models on CPU only; set memory for {m.name}.")
         return None
     kv = renderer.explicit_kv_cache(m, cli_args, o.env)
     if kv and not is_uint(kv):
@@ -373,9 +376,11 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
     draft_weights = hf_weight_bytes(m.draft_model_id, proxy) if m.draft_model_id else 0
     if not m.memory_auto:
         draft_cfg = hf_config(m.draft_model_id, proxy) if m.draft_model_id else None
+        load = (sizer.load_allowance_gib(cfg, weights, args)
+                + sizer.load_allowance_gib(draft_cfg, draft_weights, args))
         return _static_fit(m, sizer.resident_bytes(cfg, weights, args),
                            sizer.resident_bytes(draft_cfg, draft_weights, args), int(kv or renderer.category_kv_cache(m)),
-                           tp)
+                           tp, load)
     draft = (hf_config(m.draft_model_id, proxy), draft_weights) if m.draft_model_id else None
     try:
         s = sizer.size(cfg, weights, args, tp, draft)
@@ -387,8 +392,9 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
     if not sizer.arg_value(args, "--max-model-len"):
         m.max_model_len = str(s.max_model_len)
     m.sizing = {SIZING_INPUTS: inputs, **({SIZED_CONTEXT: m.max_model_len} if m.max_model_len else {})}
-    info(f"  Memory: {m.memory} (auto) | needs {s.needed_gib:.1f} GiB = weights {s.weights_gib:.1f} + KV {s.tp} x "
-         f"{s.kv_gib} + overhead {s.tp} x {sizer.OVERHEAD_GIB}, x {sizer.HEADROOM} headroom | KV for up to "
+    info(f"  Memory: {m.memory} (auto) | needs {s.needed_gib:.1f} GiB = weights {s.weights_gib:.1f}"
+         f"{_load_text(s.load_gib)} + KV {s.tp} x {s.kv_gib} + overhead {s.tp} x {sizer.OVERHEAD_GIB}, x "
+         f"{sizer.HEADROOM} headroom | KV for up to "
          f"{sizer.CONCURRENCY} x {s.max_model_len} tokens")
     return s
 
@@ -421,17 +427,22 @@ def _keep_live_sizing(m: Model, inputs: str) -> bool:
     return True
 
 
-def _static_fit(m: Model, weight_bytes: int, draft_bytes: int, kv_gib: int, tp: int) -> Sizing | None:
-    """The set memory and KV, for memory_gate to check against the weights (their size is public even for a gated
-    repo). None when the weight size, or a draft's, is unknown."""
+def _load_text(load_gib: float) -> str:
+    return f" + load {load_gib:.1f}" if load_gib else ""
+
+
+def _static_fit(m: Model, weight_bytes: int, draft_bytes: int, kv_gib: int, tp: int,
+                load_gib: float = 0.0) -> Sizing | None:
+    """The set memory and KV, for memory_gate to check against the weights and load allowances (the weight size is
+    public even for a gated repo). None when the weight size, or a draft's, is unknown."""
     if not weight_bytes or (m.draft_model_id and not draft_bytes):
         return None
     weights = (weight_bytes + draft_bytes) / sizer.GIB
     s = Sizing(weights_gib=weights, kv_gib=kv_gib, tp=tp, max_model_len=0,
-               needed_gib=weights + tp * (kv_gib + sizer.OVERHEAD_GIB), memory_gi=0)
+               needed_gib=weights + load_gib + tp * (kv_gib + sizer.OVERHEAD_GIB), memory_gi=0, load_gib=load_gib)
     if s.needed_gib > mem_bytes(m.memory) / sizer.GIB:
-        warn(f"Memory {m.memory} of {m.name} is below the {s.needed_gib:.1f} GiB its weights {weights:.1f} + KV "
-             f"{tp} x {kv_gib} + overhead {tp} x {sizer.OVERHEAD_GIB} need.")
+        warn(f"Memory {m.memory} of {m.name} is below the {s.needed_gib:.1f} GiB its weights {weights:.1f}"
+             f"{_load_text(load_gib)} + KV {tp} x {kv_gib} + overhead {tp} x {sizer.OVERHEAD_GIB} need.")
     return s
 
 
