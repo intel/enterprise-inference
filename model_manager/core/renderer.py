@@ -74,7 +74,7 @@ def _env(m: Model, catalog: Catalog, cli_args: list[str], cli_env: list[str]) ->
     for layer in (pick(m.rt, "env", {}), pick(m.cat, "env", {}), pick(m.ver, "env", {}), m.env,
                   dict((p.split("=", 1)[0], p.split("=", 1)[-1]) for p in cli_env)):
         merged.update(layer)
-    kv_gb = text(pick(pick(m.cat, "defaults", {}), "kv_cache_gb", 8))
+    kv_gb = m.kv_cache_gb or text(pick(pick(m.cat, "defaults", {}), "kv_cache_gb", 8))
     items = [f"        - name: {k}\n          value: {quote(text(v).replace('${KV_CACHE_GB}', kv_gb))}"
              for k, v in sorted(merged.items())]
     if m.runtime == "openvino":  # OVMS fetches inside the serving pod, so it needs proxy + token there

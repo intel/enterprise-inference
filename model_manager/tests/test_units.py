@@ -1640,3 +1640,192 @@ def test_a_node_must_fit_both_the_cpu_policy_and_the_requests(monkeypatch):
     m = Model(name="m", namespace="n", memory="16Gi", replicas="1")
     assert policy._request_errors(m, "8", False) == []                   # requests alone: a fits
     assert policy._request_errors(m, "8", False, Nri(), 1) != []         # combined: no node fits both
+
+
+# Auto sizing: Granite-like config, 81920 bytes of KV per token (2 x 40 layers x 8 heads x 64 x bf16).
+SIZING_CFG = {"num_hidden_layers": 40, "num_attention_heads": 32, "num_key_value_heads": 8, "hidden_size": 2048,
+              "max_position_embeddings": 131072}
+GIB = 1 << 30
+
+
+VLLM_SIZING = {"categories": ["llm", "vlm"], "context_arg": "--max-model-len",
+               "kv": {"env": "VLLM_CPU_KVCACHE_SPACE", "unit": "GiB"}}
+
+
+def _sizing(monkeypatch, cfg=SIZING_CFG, files=None, kv_cap=16, knobs=VLLM_SIZING):
+    from core import sizing
+    files = files if files is not None else {"org/m": [("model.safetensors", 5 * GIB)]}
+    monkeypatch.setattr(sizing, "hf_json", lambda path, proxy: cfg if path.endswith("config.json") else {})
+    monkeypatch.setattr(sizing, "hf_model_info", lambda mid, proxy: {
+        "siblings": [{"rfilename": f, "size": b} for f, b in files.get(mid, [])]})
+    m = Model(name="m", namespace="ns", model_id="org/m", memory="16Gi",
+              rt={"sizing": knobs, "categories": {"llm": {"defaults": {"kv_cache_gb": kv_cap}}}}, category="llm")
+    return sizing, m, Catalog.__new__(Catalog)
+
+
+def test_sizing_fits_the_full_context(monkeypatch):
+    sizing, m, cat = _sizing(monkeypatch)
+    cat.https_proxy = ""
+    assert sizing.size(m, cat, [], {}, 1) == []                    # 131072 x 81920 B = 10 GiB fits the 16 cap
+    assert (m.kv_cache_gb, m.memory) == ("10", "20Gi")             # ceil(5 x 1.2 + 10 + 4)
+
+
+def test_sizing_caps_kv_and_the_context_with_it(monkeypatch):
+    sizing, m, cat = _sizing(monkeypatch, kv_cap=8)
+    cat.https_proxy = ""
+    assert sizing.size(m, cat, [], {}, 1) == ["--max-model-len", "104448"]   # vLLM's own estimate: 104704
+    assert (m.kv_cache_gb, m.memory) == ("8", "18Gi")
+
+
+def test_sizing_honours_explicit_context_kv_and_tp(monkeypatch):
+    sizing, m, cat = _sizing(monkeypatch)
+    cat.https_proxy = ""
+    assert sizing.size(m, cat, ["--max-model-len", "8192"], {}, 1) == [] and m.kv_cache_gb == "1"
+    assert sizing.size(m, cat, ["--max-model-len=auto"], {"VLLM_CPU_KVCACHE_SPACE": "4"}, 2) == []
+    assert (m.kv_cache_gb, m.memory) == ("4", "18Gi")              # ceil(6 + 2 ranks x 4 + 4)
+
+
+def test_sizing_counts_only_the_weights_vllm_loads(monkeypatch):
+    sizing, m, cat = _sizing(monkeypatch, files={
+        "org/m": [("model-00001.safetensors", 4 * GIB), ("original/consolidated.00.pth", 4 * GIB),
+                  ("consolidated.safetensors", 4 * GIB), ("pytorch_model.bin", 4 * GIB)],
+        "org/bin-only": [("pytorch_model.bin", 2 * GIB)], "org/draft": [("model.safetensors", GIB)]})
+    assert sizing.weight_bytes("org/m", "") == 4 * GIB
+    assert sizing.weight_bytes("org/bin-only", "") == 2 * GIB
+    cat.https_proxy, m.draft_model_id = "", "org/draft"
+    sizing.size(m, cat, [], {}, 1)
+    assert m.memory == "20Gi"                                      # ceil(5 x 1.2 + 10 + 4): draft weights counted
+
+
+def test_sizing_keeps_category_defaults_when_the_hub_is_unreachable(monkeypatch):
+    sizing, m, cat = _sizing(monkeypatch, cfg={}, files={})
+    cat.https_proxy = ""
+    assert sizing.size(m, cat, [], {}, 1) == [] and (m.kv_cache_gb, m.memory) == ("", "16Gi")
+
+
+def test_kv_layout_follows_the_attention_layers():
+    from core.sizing import kv_layout
+    assert kv_layout({"text_config": SIZING_CFG, "vision_config": {}}) == (81920, 0)      # VLM: the text model
+    assert kv_layout({"head_dim": 128, **SIZING_CFG}) == (2 * 40 * 8 * 128 * 2, 0)
+    # Gemma 4 E4B (config.json): 18 layers reuse earlier KV; of the other 24, 20 slide over 512 tokens and
+    # 4 are full attention with 512-wide heads. vLLM fits 995126 tokens in 16 GiB (~17264 B/token).
+    gemma4 = {"text_config": {"num_hidden_layers": 42, "num_attention_heads": 8, "num_key_value_heads": 2,
+                              "head_dim": 256, "global_head_dim": 512, "num_kv_shared_layers": 18,
+                              "sliding_window": 512, "layer_types": (["sliding_attention"] * 5 + ["full_attention"]) * 7}}
+    assert kv_layout(gemma4) == (4 * 2 * 2 * 512 * 2, 512 * 20 * 2 * 2 * 256 * 2)
+    # Qwen3.5/3.6 style hybrid: linear-attention layers keep a fixed state, no per-token KV.
+    hybrid = {**SIZING_CFG, "layer_types": ["linear_attention", "linear_attention", "linear_attention",
+                                            "full_attention"] * 10}
+    assert kv_layout(hybrid) == (10 * 2 * 8 * 64 * 2, 0)
+    # DeepSeek MLA: one compressed latent (512) plus the rope part (64) per token and layer.
+    assert kv_layout({**SIZING_CFG, "kv_lora_rank": 512, "qk_rope_head_dim": 64}) == (40 * 576 * 2, 0)
+    # A sliding_window with no layer_types (Mistral v0.1) counts as full attention: never under-sized.
+    assert kv_layout({**SIZING_CFG, "sliding_window": 4096}) == (81920, 0)
+
+
+def test_mixed_layers_leave_room_and_towers_cost_extra(monkeypatch):
+    gemma = {"text_config": {"num_hidden_layers": 42, "num_attention_heads": 8, "num_key_value_heads": 2,
+                             "head_dim": 256, "global_head_dim": 512, "num_kv_shared_layers": 18,
+                             "sliding_window": 512, "max_position_embeddings": 2_000_000,
+                             "layer_types": (["sliding_attention"] * 5 + ["full_attention"]) * 7},
+             "vision_config": {}, "audio_config": {}}
+    sizing, m, cat = _sizing(monkeypatch, cfg=gemma, files={"org/m": [("model.safetensors", 15 * GIB)]},
+                             knobs={**VLLM_SIZING, "multimodal_gib": 8})
+    cat.https_proxy = ""
+    fits = int(sizing.size(m, cat, [], {}, 1)[1])
+    assert fits < 995126 and m.memory == "46Gi"                 # under vLLM's count; ceil(18 + 16 + 4 + 8)
+
+
+def test_only_generators_without_memory_are_auto_sized():
+    cat = Catalog(FIXTURE_CATALOG)
+    def auto(*argv):
+        o = cli.parse_args(["deploy", *argv])
+        return config.resolve(cat, o.positional[1], o).auto_size
+    assert auto("auto-cpu")                                        # llm with a ${KV_CACHE_GB} cache, no memory
+    assert not auto("auto-cpu", "--memory", "9Gi")                 # memory given
+    assert not auto("auto-cpu", "--category", "embed")             # no generation, no KV cache to size
+    assert not auto("multi", "--server", "openvino")               # OVMS sizes no vLLM KV cache
+    assert auto("auto-cpu") == "unset" and auto("auto-cpu", "--memory", "auto") == "auto"
+
+
+def test_explicit_auto_memory_falls_back_loudly(monkeypatch, capsys):
+    o = cli.parse_args(["deploy", "auto-cpu", "--memory", "auto"])
+    m = config.resolve(Catalog(FIXTURE_CATALOG), "auto-cpu", o)
+    assert m.memory == "8Gi"                                       # the category default until sized
+    sizing, _, cat = _sizing(monkeypatch, cfg={}, files={})
+    cat.https_proxy = ""
+    assert sizing.size(m, cat, [], {}, 1) == [] and "could not be sized" in capsys.readouterr().err
+    o = cli.parse_args(["deploy", "auto-cpu", "--memory", "auto", "--category", "embed"])
+    assert config.resolve(Catalog(FIXTURE_CATALOG), "auto-cpu", o).memory == "16Gi"
+    assert "does not size embed models" in capsys.readouterr().err
+
+
+def test_sizing_drives_an_engine_that_takes_kv_as_tokens(monkeypatch):
+    # An SGLang-style runtime: context and KV cache are both CLI args, the cache in tokens.
+    knobs = {"context_arg": "--context-length", "kv": {"arg": "--max-total-tokens", "unit": "tokens"}}
+    sizing, m, cat = _sizing(monkeypatch, kv_cap=8, knobs=knobs)
+    cat.https_proxy = ""
+    assert sizing.size(m, cat, [], {}, 1) == ["--max-total-tokens", "104857", "--context-length", "104448"]
+    assert (m.kv_cache_gb, m.memory) == ("", "18Gi")              # no env cache to fill
+    assert sizing.size(m, cat, ["--max-total-tokens", "65536"], {}, 1) == ["--context-length", "65536"]
+
+
+def test_hf_token_never_reaches_the_command_line(monkeypatch):
+    seen = {}
+
+    def run(cmd, **kw):
+        seen.update(cmd=cmd, input=kw.get("input"))
+        return subprocess.CompletedProcess(cmd, 0, "{}", "")
+    config.hf_json.cache_clear()
+    monkeypatch.setenv("HF_TOKEN", "hf_secret")
+    monkeypatch.setattr(config.subprocess, "run", run)
+    config.hf_json("org/m/resolve/main/config.json", "")
+    config.hf_json.cache_clear()
+    assert "hf_secret" not in " ".join(seen["cmd"]) and "hf_secret" in seen["input"] and "@-" in seen["cmd"]
+
+
+def test_tp_splits_kv_heads_but_not_an_mla_latent():
+    from core.sizing import kv_layout
+    assert kv_layout(SIZING_CFG, tp=2) == (81920 // 2, 0)                  # 8 KV heads: 4 per rank
+    assert kv_layout({**SIZING_CFG, "num_key_value_heads": 1}, tp=2) == (81920 // 8, 0)  # 1 head: whole on each rank
+    mla = {**SIZING_CFG, "kv_lora_rank": 512, "qk_rope_head_dim": 64}
+    assert kv_layout(mla, tp=2) == kv_layout(mla)
+
+
+def test_tp2_serves_the_full_context_with_half_the_kv_per_rank(monkeypatch):
+    # Granite at TP 2 on a live cluster: vLLM fit 209664 tokens in 2 x 8 GiB, twice what one rank's heads suggest.
+    sizing, m, cat = _sizing(monkeypatch, kv_cap=8)
+    cat.https_proxy = ""
+    assert sizing.size(m, cat, [], {}, 2) == []                           # 131072 x 40960 B = 5 GiB per rank
+    assert (m.kv_cache_gb, m.memory) == ("5", "20Gi")                      # ceil(6 + 2 x 5 + 4)
+
+
+def test_quantized_and_multimodal_overheads(monkeypatch):
+    knobs = {**VLLM_SIZING, "quantized_headroom": 1.6, "multimodal_gib": 10}
+    sizing, m, cat = _sizing(monkeypatch, cfg={**SIZING_CFG, "quantization_config": {"quant_method": "awq"}},
+                             knobs=knobs)
+    cat.https_proxy = ""
+    sizing.size(m, cat, [], {}, 1)
+    assert m.memory == "22Gi"                                              # ceil(5 x 1.6 + 10 + 4)
+    sizing, m, cat = _sizing(monkeypatch, cfg={**SIZING_CFG, "vision_config": {}}, knobs=knobs)
+    cat.https_proxy = ""
+    sizing.size(m, cat, [], {}, 1)
+    assert m.memory == "30Gi"                                              # + 10 for the vision encoder
+    sizing.size(m, cat, ["--limit-mm-per-prompt.image=0", "--limit-mm-per-prompt.video=0"], {}, 1)
+    assert m.memory == "20Gi"                                              # text only: no encoder profiled
+    sizing.size(m, cat, ["--limit-mm-per-prompt.image=0", "--limit-mm-per-prompt.video=1"], {}, 1)
+    assert m.memory == "30Gi"
+
+
+def test_video_capable_vlms_get_the_video_allowance(monkeypatch):
+    # Qwen2.5-VL-3B on a live cluster: profiling one max-size video peaked at 41 GiB, 21 GiB with video off.
+    knobs = {**VLLM_SIZING, "multimodal_gib": 10, "video_gib": 24}
+    sizing, m, cat = _sizing(monkeypatch, cfg={**SIZING_CFG, "vision_config": {}, "video_token_id": 151656},
+                             knobs=knobs)
+    cat.https_proxy = ""
+    sizing.size(m, cat, [], {}, 1)
+    assert m.memory == "54Gi"                                              # ceil(6 + 10 + 4 + 10 towers + 24 video)
+    sizing.size(m, cat, ["--limit-mm-per-prompt.video", "0"], {}, 1)
+    assert m.memory == "30Gi"                                              # video off: images only
+    sizing.size(m, cat, ["--limit-mm-per-prompt.image=0", "--limit-mm-per-prompt.video=0"], {}, 1)
+    assert m.memory == "20Gi"                                              # text only

@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import __version__, k8s, platform, renderer, routing
+from . import __version__, k8s, platform, renderer, routing, sizing
 from .config import MM_DIR, Catalog, Model, is_uint, mm_path, pick, resolve, resolve_autoscaling, text, truthy
 from .download import download_weights
 from .policy import ANN, mem_bytes, preflight_gate, resolve_auto_cpu, resolve_policy, whole_cpus
@@ -40,7 +40,7 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
   {GREEN}--server-version{RESET} V   Server version (must be declared for the model if it uses servers:)
   {GREEN}--as{RESET} <name>          Deploy under a distinct name (run multiple server/version variants at once)
   {GREEN}--cpu{RESET} N              CPU cores
-  {GREEN}--memory{RESET} NGi         Memory (e.g. 32Gi)
+  {GREEN}--memory{RESET} NGi|auto    Memory (e.g. 32Gi); auto sizes it from Hugging Face
   {GREEN}--replicas{RESET} N         Fixed replica count (default: 1); turns autoscaling off
   {GREEN}--min-replicas{RESET} N     Autoscaling (KEDA): fewest replicas (default: 1)
   {GREEN}--max-replicas{RESET} N     Autoscaling: most replicas; above --min-replicas turns it on
@@ -372,6 +372,13 @@ def deploy(o: Options, target: str) -> None:
     info(f"Deploying {m.name} ({m.kind})")
     info(f"  Runtime: {m.runtime}{f' @ {m.version}' if m.version else ''} | Category: {m.category} | "
          f"Routing: {m.routing or 'default'}")
+    cli_args, tp = _engine_cli_args(o)
+    if m.auto_size:
+        args = renderer.engine_args(m) + cli_args
+        env = {**pick(m.rt, "env", {}), **pick(m.cat, "env", {}), **pick(m.ver, "env", {}), **m.env,
+               **dict(p.split("=", 1) for p in o.env if "=" in p)}
+        tp_arg = sizing.flag(args, "--tensor-parallel-size")
+        cli_args += sizing.size(m, catalog, args, env, int(tp_arg) if is_uint(tp_arg) else tp)
     replicas = (f"{m.min_replicas}-{m.max_replicas} (autoscaled, target {m.scale_target} per replica)"
                 if m.autoscaled else m.replicas)
     info(f"  CPU: {m.cpu} | Memory: {m.memory} | Replicas: {replicas}")
@@ -379,7 +386,6 @@ def deploy(o: Options, target: str) -> None:
         info(f"  Node: {m.node}")
     policy = resolve_policy(o.cpu_policy, m.node)
     info(f"  CPU policy: {policy.name}")
-    cli_args, tp = _engine_cli_args(o)
     resolve_auto_cpu(policy, m, tp)
     policy.prepare(m)
     annotations, cpu = policy.annotations(m, tp)

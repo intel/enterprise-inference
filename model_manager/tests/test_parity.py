@@ -128,6 +128,10 @@ def ovms_agw_route(name: str) -> tuple[str, str]:
 
 OVMS_KIND = ovms_kind("qwen3-5-2b-ovms")
 OVMS_AIGATEWAY_ROUTE = (r"^\$ kubectl delete (aiservicebackend|backend) qwen3-5-2b-ovms .*\n", "")
+# Memory sizing: --memory auto sizes it from Hugging Face.
+HELP_MEMORY = (r"^  --memory NGi         Memory \(e.g. 32Gi\)$",
+               "  --memory NGi|auto    Memory (e.g. 32Gi); auto sizes it from Hugging Face")
+
 HELP_HFID = [
     (r"^  deploy <model>\|--id <hf/repo>   ", "  deploy <model>|--hfid <hf/repo> "),
     (r"^  --id <hf/repo>       Ad-hoc deploy any HuggingFace model$",
@@ -239,9 +243,9 @@ CASES = [
     case("fx-bad-env", "deploy", "badenv", "--dry-run", env=BE, catalog=FIXTURE),
     case("fx-bad-template", "deploy", "badtpl", "--dry-run", env=BE, catalog=FIXTURE),
     # CLI surface and validation errors.
-    case("no-args", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_SCALING]),
-    case("help", "--help", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_SCALING]),
-    case("help-command", "help", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_SCALING]),
+    case("no-args", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_SCALING, HELP_MEMORY]),
+    case("help", "--help", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_SCALING, HELP_MEMORY]),
+    case("help-command", "help", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_SCALING, HELP_MEMORY]),
     case("version", "version"),
     case("version-flag", "-v"),
     case("unknown-option", "deploy", "qwen3-0-6b", "--bogus"),

@@ -19,6 +19,7 @@
 #   runtime_name             ClusterServingRuntime name to reference  (InferenceService)
 #   serving_runtime_manifest path to a raw CR manifest to apply       (InferenceService)
 #   model_downloader_image   image for the weight-download job        (OVMS)
+#   sizing                   memory: auto / unset memory from Hugging Face (see core/sizing.py)
 # =============================================================================
 
 device: cpu
@@ -28,3 +29,14 @@ routing: epp
 autoscaling:
   query: 'sum(vllm:num_requests_waiting{namespace="$namespace",model="$model"})'
   scale_target: 2
+# How this engine takes a context length and a KV cache; the category's kv_cache_gb caps the cache.
+sizing:
+  categories: [llm, vlm]
+  context_arg: --max-model-len
+  kv: { env: VLLM_CPU_KVCACHE_SPACE, unit: GiB }     # filled through ${KV_CACHE_GB} in the category env
+  kv_dtype_bytes: 2                                   # bf16
+  weight_headroom: 1.2                                # activations and buffers grow with the model
+  quantized_headroom: 1.6                             # AWQ/GPTQ: repacked for the CPU kernel at load
+  process_gib: 4                                      # Python, torch and vLLM themselves (~4 GiB on Xeon)
+  multimodal_gib: 10                                  # vision/audio encoder profiling and cache
+  video_gib: 24                                       # video-capable VLMs (Qwen2.5-VL-3B: ~21 GiB); a minimum

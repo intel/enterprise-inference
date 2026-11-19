@@ -13,7 +13,7 @@ from typing import Any
 import yaml
 
 from . import platform
-from .ui import abort, info
+from .ui import abort, info, warn
 
 MM_DIR = Path(__file__).resolve().parents[1]
 DNS_LABEL = re.compile(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?")
@@ -81,16 +81,25 @@ def load_yaml(path: Path) -> Any:
         abort(f"Cannot read {path}: {e}")
 
 
-def hf_model_info(model_id: str, proxy: str) -> dict:
-    """HuggingFace model metadata, or {} when the Hub is unreachable."""
-    cmd = ["curl", "-sf", "--max-time", "10", *(["--proxy", proxy] if proxy else []),
-           f"https://huggingface.co/api/models/{model_id}"]
-    r = subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
+@cache
+def hf_json(path: str, proxy: str) -> dict:
+    """A HuggingFace JSON document (API or repo file), or {} when unreachable. Fetched once per run."""
+    token = os.environ.get("HF_TOKEN", "")
+    cmd = ["curl", "-sfL", "--max-time", "10", *(["--proxy", proxy] if proxy else []),
+           *(["-H", "@-"] if token else []), f"https://huggingface.co/{path}"]
+    # The token goes in on stdin, so it never shows in the process list.
+    r = subprocess.run(cmd, input=f"Authorization: Bearer {token}\n" if token else None,  # nosec B603
+                       capture_output=True, text=True, check=False)
     try:
         data = json.loads(r.stdout) if r.returncode == 0 else {}
     except ValueError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def hf_model_info(model_id: str, proxy: str) -> dict:
+    """HuggingFace model metadata with file sizes, or {} when the Hub is unreachable."""
+    return hf_json(f"api/models/{model_id}?blobs=true", proxy)
 
 
 class Catalog:
@@ -161,6 +170,8 @@ class Model:
     routing: str = ""
     cpu: str = ""
     memory: str = ""
+    kv_cache_gb: str = ""                     # sized per model; "" uses the category's kv_cache_gb
+    auto_size: str = ""                       # "unset" or "auto": size memory and KV cache from Hugging Face
     replicas: str = "1"
     min_replicas: str = ""
     max_replicas: str = ""
@@ -233,7 +244,16 @@ def resolve(catalog: Catalog, target: str, o: Any) -> Model:
 
     defaults = pick(m.cat, "defaults", {})
     m.cpu = o.cpu or m.cpu or text(pick(defaults, "cpu", 8))
-    m.memory = o.memory or m.memory or text(pick(defaults, "memory", "16Gi"))
+    # Sized when the runtime declares how (a sizing: block) for this category; otherwise the category default.
+    memory = o.memory or m.memory
+    if memory in ("", "auto"):
+        if m.category in pick(pick(m.rt, "sizing", {}), "categories", []):
+            m.auto_size = memory or "unset"
+        elif memory:
+            warn(f"memory: auto: runtime '{m.runtime}' does not size {m.category} models; {m.name} uses its "
+                 "category default.")
+        memory = text(pick(defaults, "memory", "16Gi"))
+    m.memory = memory
     m.replicas = o.replicas or m.replicas
     m.node = o.node or m.node
     if o.routing:
