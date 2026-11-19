@@ -74,8 +74,9 @@ def args_json(m: Model, args: list[str]) -> str:
     key = ""
     for a in args:
         if a.startswith("--"):
-            key, eq, value = a[2:].partition("=")
-            out[key] = value if eq else True   # a repeated flag keeps its last value, as vLLM's parser does
+            flag, eq, value = a[2:].partition("=")
+            out[flag] = value if eq else True   # a repeated flag keeps its last value, as vLLM's parser does
+            key = "" if eq else flag            # --k=v is complete: a bare token after it is positional
         elif not key:
             abort(f"Model '{m.name}': runtime '{m.runtime}' takes only --flag arguments, got '{a}'.")
         else:
@@ -85,13 +86,14 @@ def args_json(m: Model, args: list[str]) -> str:
 
 
 def _env(m: Model, catalog: Catalog, cli_args: list[str], cli_env: list[str], base: dict | None = None) -> str:
-    """Env, lowest to highest: base (offline, launcher args) < runtime < category < version < model < --env."""
-    merged = dict(base or {})
-    if trust_remote_code(m, cli_args):
-        merged["HF_HUB_OFFLINE"] = "1"
+    """Env, lowest to highest: trust-remote-code offline < runtime < category < version < model < --env < base."""
+    merged = {"HF_HUB_OFFLINE": "1"} if trust_remote_code(m, cli_args) else {}
     for layer in (pick(m.rt, "env", {}), pick(m.cat, "env", {}), pick(m.ver, "env", {}), m.env,
                   dict((p.split("=", 1)[0], p.split("=", 1)[-1]) for p in cli_env)):
         merged.update(layer)
+    for k in sorted(set(merged) & set(base or {})):  # the launcher's args: set them with args:/--arg instead
+        abort(f"Model '{m.name}': {k} carries runtime '{m.runtime}' engine args; set them with args: or --arg.")
+    merged.update(base or {})
     kv_gb = text(pick(pick(m.cat, "defaults", {}), "kv_cache_gb", 8))
     items = [f"        - name: {k}\n          value: "
              f"{quote(text(v).replace('${KV_CACHE_GB}', kv_gb).replace('${MODEL_ID}', m.model_id))}"

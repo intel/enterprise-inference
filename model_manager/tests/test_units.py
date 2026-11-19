@@ -928,6 +928,7 @@ def test_iim_on_openshift_runs_kserves_vllm_command(monkeypatch):
     m, doc = _render(monkeypatch, "iim-qwen3-4b")
     main = _main(doc)
     assert m.container == {} and m.serves_vllm and "command" not in main
+    assert m.run_as_user == "1001"                          # still the image's user: the download job writes as it
     assert main["image"] == "docker.io/intel/inference-xeon-qwen-qwen3-4b:0.1.0"
     assert {"--served-model-name", "--enable-auto-tool-choice", "--max-model-len"} <= set(main["args"])
 
@@ -959,6 +960,14 @@ runtimes:
     assert image("--server", "zz-other") == "img/other:1"
 
 
+def test_launcher_args_env_cannot_be_overridden(monkeypatch):
+    # INFERENCE_ENGINE_ARGS is built from args:/--arg; setting it through env would desync the two.
+    m, _ = _render(monkeypatch, "iim-qwen3-4b")
+    o = cli.parse_args(["deploy", "iim-qwen3-4b", "--env", "INFERENCE_ENGINE_ARGS={}"])
+    with pytest.raises(SystemExit):
+        renderer.manifest(m, Catalog(cli.MM_DIR / "models.yaml"), o, {}, m.cpu, [])
+
+
 def test_args_json_rejects_positional_args():
     m = Model(name="m", namespace="ns", runtime="iim-vllm")
     assert json.loads(renderer.args_json(m, ["--a", "1", "--b", "--c=x"])) == {"a": "1", "b": True, "c": "x"}
@@ -966,6 +975,8 @@ def test_args_json_rejects_positional_args():
     assert json.loads(renderer.args_json(m, ["--lora-modules", "a=x", "b=y", "--max-num-seqs", "8"])) == {
         "lora-modules": ["a=x", "b=y"], "max-num-seqs": "8"}
     assert json.loads(renderer.args_json(m, ["--k", "1", "--k", "2"])) == {"k": "2"}        # last wins
+    with pytest.raises(SystemExit):
+        renderer.args_json(m, ["--k=v", "stray"])                                            # --k=v is complete
     with pytest.raises(SystemExit):
         renderer.args_json(m, ["stray"])
 
