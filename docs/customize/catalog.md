@@ -95,7 +95,7 @@ models:
 | `namespace` | Target namespace (default: `llm-inference`) |
 | `node` | Pin to a specific node |
 | `routing` | `epp` or `direct` |
-| `image` | Override the runtime image entirely |
+| `image` | Override the runtime image entirely, for the model's own runtime. A `--server` that picks a different runtime uses that runtime's image and version instead; naming the model's own server keeps `image` |
 | `args` | Extra engine args, appended after the category and version args |
 | `env` | Extra env vars, merged over the runtime env |
 | `autodeploy` | `true` → bring the model up during install. See [below](#auto-deploy-on-install) |

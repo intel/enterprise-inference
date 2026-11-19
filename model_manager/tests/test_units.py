@@ -706,10 +706,11 @@ def test_autoscaling_renders_keda_scaling_instead_of_replicas(monkeypatch):
 
 
 def test_autoscaling_from_catalog_and_fixed_replicas_override(monkeypatch, tmp_path):
+    data = yaml.safe_load((cli.MM_DIR / "models.yaml").read_text())   # edited structurally, not by text
+    next(e for e in data["models"] if e["name"] == "qwen3-0-6b")["autoscaling"] = {
+        "min_replicas": 2, "max_replicas": 4, "scale_target": 5}
     catalog = tmp_path / "models.yaml"
-    catalog.write_text((cli.MM_DIR / "models.yaml").read_text().replace(
-        "  - name: qwen3-0-6b\n",
-        "  - name: qwen3-0-6b\n    autoscaling: {min_replicas: 2, max_replicas: 4, scale_target: 5}\n", 1))
+    catalog.write_text(yaml.safe_dump(data))
     m, doc = _render(monkeypatch, "qwen3-0-6b", catalog=catalog)
     assert (doc["spec"]["scaling"]["minReplicas"], doc["spec"]["scaling"]["maxReplicas"]) == (2, 4)
     assert doc["spec"]["scaling"]["keda"]["triggers"][0]["metadata"]["threshold"] == "5"
@@ -975,8 +976,9 @@ def test_args_json_rejects_positional_args():
     assert json.loads(renderer.args_json(m, ["--lora-modules", "a=x", "b=y", "--max-num-seqs", "8"])) == {
         "lora-modules": ["a=x", "b=y"], "max-num-seqs": "8"}
     assert json.loads(renderer.args_json(m, ["--k", "1", "--k", "2"])) == {"k": "2"}        # last wins
-    with pytest.raises(SystemExit):
-        renderer.args_json(m, ["--k=v", "stray"])                                            # --k=v is complete
+    for positional in (["stray"], ["--k=v", "stray"]):                                     # --k=v is complete
+        with pytest.raises(SystemExit):
+            renderer.args_json(m, positional)
 
 
 def test_repeated_multi_value_flag_reaches_the_launcher_last_wins(monkeypatch):
@@ -986,8 +988,6 @@ def test_repeated_multi_value_flag_reaches_the_launcher_last_wins(monkeypatch):
                                            {}, m.cpu, ["--lora-modules", "a=x", "b=y", "--lora-modules", "c=z"]))
     env = {e["name"]: e.get("value") for e in _main(doc)["env"]}
     assert json.loads(env["INFERENCE_ENGINE_ARGS"])["lora-modules"] == "c=z"
-    with pytest.raises(SystemExit):
-        renderer.args_json(m, ["stray"])
 
 
 def test_ovms_autoscaling_uses_its_signal(monkeypatch):

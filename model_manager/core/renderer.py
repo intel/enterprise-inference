@@ -187,16 +187,13 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
         if m.chat_template and not pick(m.container, "args_env"):  # args_env launchers run vLLM
             abort(f"Model '{m.name}': chat_template applies to vLLM only, not runtime '{m.runtime}'.")
         args = [_fill(a, m) for a in pick(m.container, "args", [])] + args
-        if m.chat_template:
-            path = f"{CHAT_TEMPLATE_DIR}/chat_template.jinja" if inline_chat_template(m) else m.chat_template
-            args += ["--chat-template", path]
     elif m.kind == "LLMInferenceService":
         args += ["--served-model-name", m.name]
-        if m.chat_template:
-            path = f"{CHAT_TEMPLATE_DIR}/chat_template.jinja" if inline_chat_template(m) else m.chat_template
-            args += ["--chat-template", path]
+    if m.chat_template and m.kind == "LLMInferenceService":  # vLLM only: other containers aborted above
+        path = f"{CHAT_TEMPLATE_DIR}/chat_template.jinja" if inline_chat_template(m) else m.chat_template
+        args += ["--chat-template", path]
     args, base_env = args + cli_args, {}
-    if (args_env := text(pick(m.container, "args_env"))) and m.kind == "LLMInferenceService":
+    if args_env := text(pick(m.container, "args_env")):  # only an LLMInferenceService runtime has a container
         args, base_env = [], {args_env: args_json(m, args)}  # no CLI args; args_json keeps each flag's last value
     else:
         args = dedupe_args(args)

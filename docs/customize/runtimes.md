@@ -112,6 +112,11 @@ cache appropriately.
 at startup: without the variable it needs most of the NUMA node's memory free, and crashes
 when an LLM already runs on that node. So they set it too, from `kv_cache_gb: 16`.
 
+Env values in the runtime, category, version and model layers can use two placeholders, which
+are filled in when the manifest is rendered: `${KV_CACHE_GB}` (the category's `kv_cache_gb`) and
+`${MODEL_ID}` (the model's Hugging Face `model_id`; the `iim-vllm` runtime uses it for
+`INFERENCE_MODEL_ID`).
+
 ### Plumbing
 
 Low-level, stable settings live in `model_manager/runtimes/vllm/values.yaml` and are
