@@ -289,8 +289,9 @@ def _from_catalog(catalog: Catalog, name: str, o: Any) -> Model:
     if not explicit:
         default_server = text(pick(e, "runtime")) or catalog.runtime
         servers = {default_server: {"default": text(pick(e, "server_version"))}}
-    m.runtime = o.server or default_server or min(servers, default="") or catalog.runtime
-    if o.server and o.server != default_server:
+    own = default_server or min(servers, default="") or catalog.runtime   # the runtime the model runs on unasked
+    m.runtime = o.server or own
+    if m.runtime != own:
         m.image = ""  # a model's image belongs to its own runtime, not to the one --server picks
     if explicit and m.runtime not in servers:
         abort(f"Model '{name}' does not declare server '{m.runtime}'. Declared: {', '.join(sorted(servers))}")

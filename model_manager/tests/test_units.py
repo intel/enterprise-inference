@@ -940,6 +940,25 @@ def test_server_override_uses_the_selected_runtimes_image(monkeypatch):
     assert m.image == "docker.io/intel/inference-xeon-qwen-qwen3-4b:0.1.0"
 
 
+def test_explicit_default_server_keeps_the_models_image(tmp_path):
+    # servers: without default_server runs on the first server by name; naming that server must not drop the image.
+    catalog = tmp_path / "models.yaml"
+    catalog.write_text("""
+models:
+  - name: m
+    model_id: org/m
+    image: img/custom:1
+    servers: { vllm: {}, zz-other: {} }
+runtimes:
+  vllm: { versions: { "0.28.0": { image: img/vllm:0.28.0 } }, default_version: "0.28.0" }
+  zz-other: { image: img/other:1 }
+""")
+    cat = Catalog(catalog)
+    image = lambda *argv: config.resolve(cat, "m", cli.parse_args(["deploy", "m", *argv])).image
+    assert image() == image("--server", "vllm") == "img/custom:1"
+    assert image("--server", "zz-other") == "img/other:1"
+
+
 def test_args_json_rejects_positional_args():
     m = Model(name="m", namespace="ns", runtime="iim-vllm")
     assert json.loads(renderer.args_json(m, ["--a", "1", "--b", "--c=x"])) == {"a": "1", "b": True, "c": "x"}
