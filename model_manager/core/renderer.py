@@ -92,7 +92,8 @@ def _env(m: Model, catalog: Catalog, cli_args: list[str], cli_env: list[str], ba
                   dict((p.split("=", 1)[0], p.split("=", 1)[-1]) for p in cli_env)):
         merged.update(layer)
     for k in sorted(set(merged) & set(base or {})):  # the launcher's args: set them with args:/--arg instead
-        abort(f"Model '{m.name}': {k} carries runtime '{m.runtime}' engine args; set them with args: or --arg.")
+        abort(f"Model '{m.name}': {k} is built from the engine args, so it cannot be set through env; "
+              "set the engine args with args: or --arg instead.")
     merged.update(base or {})
     kv_gb = text(pick(pick(m.cat, "defaults", {}), "kv_cache_gb", 8))
     items = [f"        - name: {k}\n          value: "
@@ -194,9 +195,11 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
         if m.chat_template:
             path = f"{CHAT_TEMPLATE_DIR}/chat_template.jinja" if inline_chat_template(m) else m.chat_template
             args += ["--chat-template", path]
-    args, base_env = dedupe_args(args + cli_args), {}
+    args, base_env = args + cli_args, {}
     if (args_env := text(pick(m.container, "args_env"))) and m.kind == "LLMInferenceService":
-        args, base_env = [], {args_env: args_json(m, args)}  # the launcher takes no CLI args
+        args, base_env = [], {args_env: args_json(m, args)}  # no CLI args; args_json keeps each flag's last value
+    else:
+        args = dedupe_args(args)
     common = {
         "MODEL_NAME": m.name, "NAMESPACE": m.namespace, "MODEL_URI": m.uri, "CPU": cpu, "MEMORY": m.memory,
         "REPLICAS": m.replicas, "ARGS": _list([f"        - {quote(a)}" for a in args]),

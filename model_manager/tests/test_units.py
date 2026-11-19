@@ -977,6 +977,15 @@ def test_args_json_rejects_positional_args():
     assert json.loads(renderer.args_json(m, ["--k", "1", "--k", "2"])) == {"k": "2"}        # last wins
     with pytest.raises(SystemExit):
         renderer.args_json(m, ["--k=v", "stray"])                                            # --k=v is complete
+
+
+def test_repeated_multi_value_flag_reaches_the_launcher_last_wins(monkeypatch):
+    # dedupe_args would drop the first --lora-modules but keep its trailing value; the launcher path skips it.
+    m, _ = _render(monkeypatch, "iim-qwen3-4b")
+    doc = yaml.safe_load(renderer.manifest(m, Catalog(cli.MM_DIR / "models.yaml"), cli.parse_args(["deploy", "x"]),
+                                           {}, m.cpu, ["--lora-modules", "a=x", "b=y", "--lora-modules", "c=z"]))
+    env = {e["name"]: e.get("value") for e in _main(doc)["env"]}
+    assert json.loads(env["INFERENCE_ENGINE_ARGS"])["lora-modules"] == "c=z"
     with pytest.raises(SystemExit):
         renderer.args_json(m, ["stray"])
 
