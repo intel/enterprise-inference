@@ -406,16 +406,18 @@ def preflight_gate(policy: BestEffort, m: Model, tp: int, cpu: str, running: int
 
 def _numa_node_gib(m: Model) -> tuple[float, int] | None:
     """The largest NUMA node's memory (GiB) across the nodes m can use, and that node's max TP, from the labels the
-    nri_cpu_balloons role publishes; None when no node has them."""
+    nri_cpu_balloons role publishes; None (not checked) when the nodes can't be read or any of them lacks the labels,
+    since an unlabeled node may still fit the worker."""
     best = None
     for n in _schedulable_nodes(m) or []:
         labels = pick(n.get("metadata"), "labels", {})
         count, max_tp = text(pick(labels, "nri.intel.com/numa-nodes")), text(pick(labels, "nri.intel.com/max-tp"))
         capacity = mem_bytes(text(pick(pick(n.get("status"), "capacity", {}), "memory")))
-        if is_uint(count) and int(count) and capacity:
-            size = capacity / int(count) / sizer.GIB
-            if best is None or size > best[0]:
-                best = (size, int(max_tp) if is_uint(max_tp) else int(count))
+        if not (is_uint(count) and int(count) and capacity):
+            return None
+        size = capacity / int(count) / sizer.GIB
+        if best is None or size > best[0]:
+            best = (size, int(max_tp) if is_uint(max_tp) else int(count))
     return best
 
 

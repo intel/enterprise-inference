@@ -59,8 +59,12 @@ The deploy prints the calculation:
 - **`max_model_len`** is `--max-model-len` from the model's `args:` or `--arg`. Otherwise
   it is 8192, capped at the model's own limit (`max_position_embeddings`, `n_positions`,
   `seq_length` or `max_sequence_length`; `max_target_positions` for Whisper). With
-  `--max-model-len auto` the KV cache is sized for 8192 tokens and vLLM fits the context
-  to it. A given value is never emitted twice.
+  `--max-model-len auto` (or `-1`) the KV cache is sized for 8192 tokens and vLLM fits the
+  context to it. Values take vLLM's suffixes: `32K` = 32,768, `25.6k` = 25,600. A given
+  value is never emitted twice.
+- **Engine args** are those vLLM receives, later ones winning: category, version and model
+  `args`, `--arg` / `--tp`, and on OpenShift the `VLLM_ADDITIONAL_ARGS` env, which its
+  template appends after them.
 - **Which runtimes:** vLLM on CPU, i.e. a runtime with no `container:` (KServe's vLLM
   command) and `device: cpu` (the default): `vllm`, and runtimes built the same way. GPU
   runtimes and OpenVINO are not sized; `memory: auto` on them is rejected.
@@ -202,12 +206,12 @@ These run before the weights download, for every CPU policy:
 
 | Check | Fails when | Result |
 |---|---|---|
-| Topology | TP does not split the attention / KV heads | Abort (also with `--dry-run`) |
+| Topology | TP does not split the attention / KV heads | Abort (also with `--dry-run`), with or without `memory: auto` |
 | Fit | A set `memory` is below weights + TP × KV + TP × 3 GiB (no headroom) | Abort with the numbers |
 | NUMA | One TP worker's share, weights ÷ TP + KV + 3 GiB, exceeds one NUMA node's memory | Abort, suggesting the smallest `--tp` that fits (up to the node's `nri.intel.com/max-tp`), or a smaller KV / context when none does. TP is never changed for you |
 | Placement | No node the model can use has the pod's CPU **and** memory free (allocatable minus running pods' requests) | Abort; the pod would stay Pending. This is the CPU-policy pre-flight, which gets the sized memory |
 
-The NUMA check exists because vLLM binds each TP worker's memory to the NUMA node of its CPUs (MEMBIND), so a worker cannot spill onto another node: past one NUMA node it fails at load even when the pod's limit is larger. A NUMA node's size is the node's memory capacity ÷ its `nri.intel.com/numa-nodes` label, read per node at deploy time, so it follows each host's hardware; nodes without the label (no NRI) are not checked. NUMA nodes of one host are assumed equal in size, which holds for Xeon SNC layouts but not for uneven DIMMs or CPU-less (CXL) memory nodes.
+The NUMA check exists because vLLM binds each TP worker's memory to the NUMA node of its CPUs (MEMBIND), so a worker cannot spill onto another node: past one NUMA node it fails at load even when the pod's limit is larger. A NUMA node's size is the node's memory capacity ÷ its `nri.intel.com/numa-nodes` label, read per node at deploy time, so it follows each host's hardware; if any node the model can use lacks the labels (no NRI), the check is skipped, since that node may fit the worker. NUMA nodes of one host are assumed equal in size, which holds for Xeon SNC layouts but not for uneven DIMMs or CPU-less (CXL) memory nodes.
 
 The fit check matters most for TP. A set memory does not grow with `--tp`, but each
 worker allocates the full `VLLM_CPU_KVCACHE_SPACE`. Without the check, `--tp 2` on a
@@ -230,10 +234,14 @@ model with `memory: 64Gi` and a 40 GiB KV cache would be OOM-killed at load.
 
 Set `memory:` (and `VLLM_CPU_KVCACHE_SPACE`) for such a model instead.
 
-A model already deployed with a catalog `memory: auto` keeps the memory, KV cache and
-`--max-model-len` it was sized with, read from its live spec, as `cpu: auto` keeps its CPU.
-A re-deploy, such as an Ansible re-run, then neither calls Hugging Face nor changes a
-running model. `--memory auto` on the command line sizes it again.
+A sized deploy records what it was sized from (a hash of the model, draft, image, TP and
+effective engine args) and the sized `--max-model-len` as annotations on the
+`LLMInferenceService` (`memory-sizing.model-manager.io/inputs`, `…/max-model-len`). A
+re-deploy of a catalog `memory: auto` model with the same inputs keeps the live memory, KV
+cache and context, as `cpu: auto` keeps its CPU: an Ansible re-run then neither calls
+Hugging Face nor changes a running model. Any changed input (e.g. `--tp 2`, another
+`--max-model-len`, a new image), a model deployed without the annotation, or
+`--memory auto` on the command line sizes it again.
 
 Hugging Face is asked for two documents per model (the file list with sizes, and
 `config.json`); after a connection failure the deploy stops asking.

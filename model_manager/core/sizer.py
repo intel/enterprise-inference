@@ -7,6 +7,7 @@ the attention page. See docs/reference/memory_sizing.md.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 
 from .config import Sizing
@@ -41,6 +42,18 @@ def arg_value(args: list[str], flag: str) -> str:
         if key.replace("_", "-") == want:
             value = inline if inline else (args[i + 1] if i + 1 < len(args) else "")
     return value
+
+
+def human_int(value: str) -> int:
+    """An integer as vLLM 0.28 parses --max-model-len and --max-num-batched-tokens: 32K = 32,768 (binary
+    suffixes K/M/G/T), 25.6k = 25,600 (decimal k/m/g/t) (vllm/utils/argparse_utils.py human_readable_int)."""
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)([kmgtKMGT])", value.strip())
+    if not m:
+        return int(value)
+    number, suffix = m.groups()
+    if suffix.islower():
+        return int(float(number) * 1000 ** ("kmgt".index(suffix) + 1))
+    return int(number) * 1024 ** ("KMGT".index(suffix) + 1)
 
 
 def _enabled(args: list[str], flag: str, default: bool) -> bool:
@@ -173,8 +186,8 @@ def size(cfg: dict | None, weight_bytes: int, args: list[str], tp: int,
             raise Unsupported(f"{flag} > 1")
     weights = resident_bytes(cfg, weight_bytes, args) + (resident_bytes(draft[0], draft[1], args) if draft else 0)
     layers = layout(cfg) + (layout(draft[0]) if draft else [])
-    given = arg_value(args, "--max-model-len")  # "auto": vLLM fits the context to the KV cache, sized for 8K here
-    max_len = int(given) if given.isdigit() else min(MAX_MODEL_LEN, context_limit(cfg))
+    given = arg_value(args, "--max-model-len")  # auto / -1: vLLM fits the context to the KV cache, sized for 8K here
+    max_len = human_int(given) if given not in ("", "auto", "-1") else min(MAX_MODEL_LEN, context_limit(cfg))
     dtype = arg_value(args, "--dtype")
     if dtype in ("", "auto"):
         dtype = text_config(cfg).get("torch_dtype") or text_config(cfg).get("dtype")
@@ -182,7 +195,7 @@ def size(cfg: dict | None, weight_bytes: int, args: list[str], tp: int,
     kv_bytes = 1 if arg_value(args, "--kv-cache-dtype").startswith("fp8") else model_bytes
     per_request = bytes_per_request(
         layers, tp, max_len, kv_bytes, model_bytes, int(arg_value(args, "--block-size") or 128),
-        int(arg_value(args, "--max-num-batched-tokens") or max_len),
+        human_int(arg_value(args, "--max-num-batched-tokens") or str(max_len)),
         _enabled(args, "--enable-prefix-caching", True))
     streams = min(CONCURRENCY, int(arg_value(args, "--max-num-seqs") or CONCURRENCY))
     kv_gib = max(KV_MIN_GIB, math.ceil(per_request / GIB), math.ceil(per_request * streams / GIB))

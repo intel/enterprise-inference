@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -214,9 +215,9 @@ def _engine_cli_args(o: Options) -> tuple[list[str], int]:
     return args, 1
 
 
-def _tensor_parallel(m: Model, cli_args: list[str]) -> int:
-    """TP as vLLM sees it: the last --tensor-parallel-size of the category, version and model args, then --arg/--tp."""
-    tp = sizer.arg_value([*renderer.engine_args(m), *cli_args], "--tensor-parallel-size") or "1"
+def _tensor_parallel(m: Model, cli_args: list[str], cli_env: list[str]) -> int:
+    """TP as vLLM sees it: the last --tensor-parallel-size of its effective args (renderer.effective_args)."""
+    tp = sizer.arg_value(renderer.effective_args(m, cli_args, cli_env), "--tensor-parallel-size") or "1"
     if not (is_uint(tp) and int(tp) > 0):
         abort(f"--tensor-parallel-size for {m.name} requires a positive integer, got: {tp}")
     return int(tp)
@@ -358,13 +359,16 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
     kv = renderer.explicit_kv_cache(m, cli_args, o.env)
     if kv and not is_uint(kv):
         abort(f"VLLM_CPU_KVCACHE_SPACE for {m.name} must be a whole number of GiB, got '{kv}'.")
-    proxy, args = catalog.https_proxy, [*renderer.engine_args(m), *cli_args]
+    proxy, args = catalog.https_proxy, renderer.effective_args(m, cli_args, o.env)
     if m.memory_auto and kv:
         abort(f"{m.name} has memory: auto and VLLM_CPU_KVCACHE_SPACE={kv}: memory: auto sizes both. Set memory "
               "instead, or remove the KV setting.")
-    if m.memory_auto and o.memory != "auto" and _keep_live_sizing(m, args):
+    inputs = _sizing_inputs(m, args, tp)
+    if m.memory_auto and o.memory != "auto" and _keep_live_sizing(m, inputs):
         return None
     cfg = hf_config(m.model_id, proxy)
+    if cfg and sizer.topology_error(cfg, tp):
+        abort(f"{m.name}: {sizer.topology_error(cfg, tp)}; vLLM would fail at start-up.")
     weights = hf_weight_bytes(m.model_id, proxy)
     draft_weights = hf_weight_bytes(m.draft_model_id, proxy) if m.draft_model_id else 0
     if not m.memory_auto:
@@ -372,8 +376,6 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
         return _static_fit(m, sizer.resident_bytes(cfg, weights, args),
                            sizer.resident_bytes(draft_cfg, draft_weights, args), int(kv or renderer.category_kv_cache(m)),
                            tp)
-    if cfg and sizer.topology_error(cfg, tp):
-        abort(f"{m.name}: {sizer.topology_error(cfg, tp)}; vLLM would fail at start-up.")
     draft = (hf_config(m.draft_model_id, proxy), draft_weights) if m.draft_model_id else None
     try:
         s = sizer.size(cfg, weights, args, tp, draft)
@@ -384,25 +386,37 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
     m.memory, m.kv_cache_gb = f"{s.memory_gi}Gi", str(s.kv_gib)
     if not sizer.arg_value(args, "--max-model-len"):
         m.max_model_len = str(s.max_model_len)
+    m.sizing = {SIZING_INPUTS: inputs, **({SIZED_CONTEXT: m.max_model_len} if m.max_model_len else {})}
     info(f"  Memory: {m.memory} (auto) | needs {s.needed_gib:.1f} GiB = weights {s.weights_gib:.1f} + KV {s.tp} x "
          f"{s.kv_gib} + overhead {s.tp} x {sizer.OVERHEAD_GIB}, x {sizer.HEADROOM} headroom | KV for up to "
          f"{sizer.CONCURRENCY} x {s.max_model_len} tokens")
     return s
 
 
-def _keep_live_sizing(m: Model, args: list[str]) -> bool:
-    """A deployed memory: auto model keeps the memory, KV and context it was sized with (as cpu: auto keeps its CPU), so
-    a re-deploy does not depend on HuggingFace or change a running model; --memory auto re-sizes it."""
+SIZING_INPUTS = "memory-sizing.model-manager.io/inputs"
+SIZED_CONTEXT = "memory-sizing.model-manager.io/max-model-len"
+
+
+def _sizing_inputs(m: Model, args: list[str], tp: int) -> str:
+    """What memory: auto sized from: the model, its draft, the image, TP and the effective engine args."""
+    key = json.dumps([m.model_id, m.draft_model_id, m.image, tp, args], separators=(",", ":"))
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
+def _keep_live_sizing(m: Model, inputs: str) -> bool:
+    """A deployed memory: auto model whose sizing inputs are unchanged keeps the memory, KV and context it was sized
+    with (as cpu: auto keeps its CPU), so a re-deploy does not depend on HuggingFace or change a running model. Any
+    change (TP, args, image, model) re-sizes it, as does --memory auto."""
     live = k8s.get_json(m.kind, m.name, "-n", m.namespace) if m.kind == "LLMInferenceService" else None
+    annotations = pick(pick(live, "metadata", {}), "annotations", {})
     main = (pick(pick(pick(live, "spec", {}), "template", {}), "containers", []) or [{}])[0]
     memory = text(pick(pick(pick(main, "resources", {}), "limits", {}), "memory"))
     kv = next((text(e.get("value")) for e in pick(main, "env", []) if e.get("name") == renderer.KV_CACHE_ENV), "")
-    if not (memory and is_uint(kv)):
+    if pick(annotations, SIZING_INPUTS) != inputs or not (memory and is_uint(kv)):
         return False
-    live_len = sizer.arg_value([text(a) for a in pick(main, "args", [])], "--max-model-len")
     m.memory, m.kv_cache_gb = memory, kv
-    if not sizer.arg_value(args, "--max-model-len") and live_len:
-        m.max_model_len = live_len
+    m.max_model_len = text(pick(annotations, SIZED_CONTEXT))
+    m.sizing = {k: text(v) for k, v in annotations.items() if k in (SIZING_INPUTS, SIZED_CONTEXT)}
     info(f"  Memory: {memory} (auto, as deployed) | KV {kv} GiB per worker; --memory auto re-sizes it")
     return True
 
@@ -458,7 +472,7 @@ def deploy(o: Options, target: str) -> None:
     resolve_autoscaling(m, o)
     m.check()
     cli_args, _ = _engine_cli_args(o)
-    tp = _tensor_parallel(m, cli_args)
+    tp = _tensor_parallel(m, cli_args, o.env)
     info(f"Deploying {m.name} ({m.kind})")
     info(f"  Runtime: {m.runtime}{f' @ {m.version}' if m.version else ''} | Category: {m.category} | "
          f"Routing: {m.routing or 'default'}")

@@ -209,6 +209,7 @@ class Model:
     memory_auto: bool = False                 # memory: auto: sized from the model (core/sizer.py)
     kv_cache_gb: str = ""                     # sized VLLM_CPU_KVCACHE_SPACE
     max_model_len: str = ""                   # sized --max-model-len
+    sizing: dict = field(default_factory=dict)  # memory: auto's inputs + sized context, kept as CR annotations
     replicas: str = "1"
     min_replicas: str = ""
     max_replicas: str = ""

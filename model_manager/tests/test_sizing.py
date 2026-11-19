@@ -124,6 +124,18 @@ def test_engine_args_change_the_kv_cache(extra, kv):
     assert sizer.size(LLAMA_8B, gib(14.96), LLM_ARGS + extra, 1).kv_gib == kv
 
 
+@pytest.mark.parametrize("value, want", [("32K", 32768), ("32k", 32000), ("25.6k", 25600), ("1M", 2 ** 20), ("4096", 4096)])
+def test_vllm_numeric_suffixes(value, want):
+    assert sizer.human_int(value) == want
+
+
+@pytest.mark.parametrize("given, length", [("32K", 32768), ("-1", 8192), ("auto", 8192)])
+def test_max_model_len_with_suffixes_and_auto(given, length):
+    cfg = {**LLAMA_8B, "max_position_embeddings": 131072}
+    s = sizer.size(cfg, gib(14.96), [*LLM_ARGS, "--max-model-len", given, "--max-num-batched-tokens", "8K"], 1)
+    assert s.max_model_len == length
+
+
 def test_auto_max_model_len_is_kept_and_kv_sized_for_8k():
     s = sizer.size(LLAMA_8B, gib(14.96), [*LLM_ARGS, "--max-model-len", "auto"], 1)
     assert (s.kv_gib, s.max_model_len) == (16, 8192)
@@ -184,7 +196,7 @@ def _sized(*argv, catalog=None):
     cat = Catalog(catalog or cli.MM_DIR / "models.yaml")
     m = config.resolve(cat, o.positional[1] if len(o.positional) > 1 else "", o)
     cli_args, _ = cli._engine_cli_args(o)
-    s = cli._apply_sizing(m, cat, o, cli_args, cli._tensor_parallel(m, cli_args))
+    s = cli._apply_sizing(m, cat, o, cli_args, cli._tensor_parallel(m, cli_args, o.env))
     doc = yaml.safe_load(renderer.manifest(m, cat, o, {}, m.cpu, cli_args))
     main = doc["spec"]["template"]["containers"][0]
     return m, s, main, {e["name"]: e.get("value") for e in main["env"]}
@@ -324,25 +336,88 @@ def test_draft_from_the_catalog_is_sized(hub, tmp_path):
     assert main["resources"]["limits"]["memory"] == "47Gi" and env["VLLM_CPU_KVCACHE_SPACE"] == "20"
 
 
-def _live(memory="40Gi", kv="16", args=("--max-model-len", "8192")):
-    return {"spec": {"template": {"containers": [{"resources": {"limits": {"memory": memory}},
-                                                  "env": [{"name": "VLLM_CPU_KVCACHE_SPACE", "value": kv}],
-                                                  "args": list(args)}]}}}
+def _live(inputs, memory="44Gi", kv="17", context="8192"):
+    annotations = {cli.SIZING_INPUTS: inputs, **({cli.SIZED_CONTEXT: context} if context else {})}
+    return {"metadata": {"annotations": annotations},
+            "spec": {"template": {"containers": [{"resources": {"limits": {"memory": memory}},
+                                                  "env": [{"name": "VLLM_CPU_KVCACHE_SPACE", "value": kv}]}]}}}
 
 
-def test_a_deployed_memory_auto_model_keeps_its_sizing(hub, monkeypatch, tmp_path):
+def _inputs(catalog, *argv):
+    """The sizing inputs a deploy of catalog model m with argv records."""
+    o = cli.parse_args(["deploy", "m", *argv])
+    cat = Catalog(catalog)
+    m = config.resolve(cat, "m", o)
+    cli_args, _ = cli._engine_cli_args(o)
+    return cli._sizing_inputs(m, renderer.effective_args(m, cli_args, o.env), cli._tensor_parallel(m, cli_args, o.env))
+
+
+def test_a_sized_deploy_records_its_inputs(hub, tmp_path):
+    catalog = _catalog(tmp_path, memory="auto")
+    m, s, main, env = _sized("m", catalog=catalog)
+    assert m.sizing == {cli.SIZING_INPUTS: _inputs(catalog), cli.SIZED_CONTEXT: "8192"}
+    doc = yaml.safe_load(renderer.manifest(m, Catalog(catalog), cli.parse_args(["deploy", "m"]), {}, m.cpu, []))
+    assert doc["metadata"]["annotations"] == m.sizing
+
+
+def test_unsized_manifests_carry_no_sizing_annotation(hub):
+    m, s, main, env = _sized(*LLAMA, "--memory", "64Gi")
+    assert m.sizing == {}
+
+
+def test_a_deployed_model_with_unchanged_inputs_keeps_its_sizing(hub, monkeypatch, tmp_path):
     # Re-deploys (e.g. an Ansible re-run with the Hub unreachable) render the live values, not a fallback.
-    monkeypatch.setattr(k8s, "get_json", lambda *a: _live("44Gi", "17"))
+    catalog = _catalog(tmp_path, memory="auto")
+    monkeypatch.setattr(k8s, "get_json", lambda *a: _live(_inputs(catalog)))
     monkeypatch.setattr(cli, "hf_config", lambda *a: pytest.fail("no HuggingFace call"))
-    m, s, main, env = _sized("m", catalog=_catalog(tmp_path, memory="auto"))
+    m, s, main, env = _sized("m", catalog=catalog)
     assert main["resources"]["limits"]["memory"] == "44Gi" and env["VLLM_CPU_KVCACHE_SPACE"] == "17"
-    assert main["args"][main["args"].index("--max-model-len") + 1] == "8192"
+    assert main["args"][main["args"].index("--max-model-len") + 1] == "8192" and s is None
 
 
-def test_memory_auto_on_the_cli_re_sizes_a_deployed_model(hub, monkeypatch):
-    monkeypatch.setattr(k8s, "get_json", lambda *a: _live("44Gi", "17"))
-    m, s, main, env = _sized(*LLAMA, "--memory", "auto")
+@pytest.mark.parametrize("live_argv, argv", [
+    ([], ["--tp", "2"]),                                  # TP changed: sized at tp=1, now two workers
+    ([], ["--arg", "--max-model-len=16384"]),             # context changed
+    ([], ["--server-version", "0.28.0"]),                 # a different image
+])
+def test_changed_inputs_re_size_a_deployed_model(hub, monkeypatch, tmp_path, live_argv, argv):
+    catalog = _catalog(tmp_path, memory="auto", servers={"vllm": {"versions": ["0.24.0", "0.28.0"],
+                                                                  "default": "0.24.0"}})
+    monkeypatch.setattr(k8s, "get_json", lambda *a: _live(_inputs(catalog, *live_argv), "40Gi", "16"))
+    m, s, main, env = _sized("m", *argv, catalog=catalog)
+    assert s is not None and m.sizing[cli.SIZING_INPUTS] == _inputs(catalog, *argv)  # sized again, for memory_gate
+
+
+def test_a_deployed_model_without_recorded_inputs_is_re_sized(hub, monkeypatch, tmp_path):
+    monkeypatch.setattr(k8s, "get_json", lambda *a: {"spec": _live("")["spec"]})
+    m, s, main, env = _sized("m", catalog=_catalog(tmp_path, memory="auto"))
+    assert main["resources"]["limits"]["memory"] == "40Gi"
+
+
+def test_memory_auto_on_the_cli_re_sizes_a_deployed_model(hub, monkeypatch, tmp_path):
+    catalog = _catalog(tmp_path, memory="auto")
+    monkeypatch.setattr(k8s, "get_json", lambda *a: _live(_inputs(catalog, "--memory", "auto")))
+    m, s, main, env = _sized("m", "--memory", "auto", catalog=catalog)
     assert main["resources"]["limits"]["memory"] == "40Gi" and env["VLLM_CPU_KVCACHE_SPACE"] == "16"
+
+
+def test_fixed_memory_deploys_get_the_topology_check(hub, capsys):
+    with pytest.raises(SystemExit):
+        _sized(*LLAMA, "--memory", "64Gi", "--tp", "3")
+    assert "does not divide" in capsys.readouterr().err
+
+
+def test_openshift_additional_args_are_sized(hub, monkeypatch):
+    # OpenShift's template appends VLLM_ADDITIONAL_ARGS after the rendered flags, so those win in vLLM.
+    monkeypatch.setenv("MM_PLATFORM", "openshift")
+    o = cli.parse_args(["deploy", *LLAMA, "--memory", "auto", "--env",
+                        "VLLM_ADDITIONAL_ARGS=--dtype float32 --tensor-parallel-size 2"])
+    cat = Catalog(cli.MM_DIR / "models.yaml")
+    m = config.resolve(cat, "", o)
+    cli_args, _ = cli._engine_cli_args(o)
+    tp = cli._tensor_parallel(m, cli_args, o.env)
+    s = cli._apply_sizing(m, cat, o, cli_args, tp)
+    assert tp == 2 and round(s.weights_gib, 2) == 29.92  # bf16 weights served as float32
 
 
 def test_version_0191_takes_the_category_kv(hub):
@@ -423,6 +498,14 @@ def test_numa_gate_ignores_nodes_a_pod_cannot_land_on(monkeypatch, spec):
     s = Sizing(weights_gib=280, kv_gib=16, tp=1, max_model_len=8192, needed_gib=299, memory_gi=0)
     with pytest.raises(SystemExit):
         policy.memory_gate(Model(name="m", namespace="n", memory="400Gi"), s)
+
+
+def test_numa_gate_is_inconclusive_with_an_unlabeled_node(monkeypatch):
+    # An eligible node without the NRI labels (e.g. a 512 GiB single-NUMA host) may still fit the worker.
+    unlabeled = _numa_node(numa_nodes="", max_tp="", capacity="512Gi")
+    monkeypatch.setattr(policy, "_schedulable_nodes", lambda m: [_numa_node(), unlabeled])
+    s = Sizing(weights_gib=280, kv_gib=16, tp=1, max_model_len=8192, needed_gib=299, memory_gi=0)
+    policy.memory_gate(Model(name="m", namespace="n", memory="400Gi"), s)
 
 
 def test_numa_gate_warn_mode_proceeds(monkeypatch, capsys):

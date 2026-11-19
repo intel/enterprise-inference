@@ -5,6 +5,7 @@ import dataclasses
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +78,15 @@ def merged_env(m: Model, cli_args: list[str], cli_env: list[str]) -> dict:
                   dict((p.split("=", 1)[0], p.split("=", 1)[-1]) for p in cli_env)):
         merged.update(layer)
     return merged
+
+
+def effective_args(m: Model, cli_args: list[str], cli_env: list[str]) -> list[str]:
+    """The engine args vLLM receives, later ones winning: category, version and model args, --arg/--tp, and on
+    OpenShift the VLLM_ADDITIONAL_ARGS env, which its template appends after them (platform.adapt_llmisvc)."""
+    args = [*engine_args(m), *cli_args]
+    if platform.is_openshift():
+        args += shlex.split(text(merged_env(m, cli_args, cli_env).get("VLLM_ADDITIONAL_ARGS", "")))
+    return args
 
 
 def explicit_kv_cache(m: Model, cli_args: list[str], cli_env: list[str]) -> str:
@@ -200,6 +210,8 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
         gateway, gateway_ns = gateway_ref()
         return platform.adapt_llmisvc(render(
             template("llm-inference-service.yaml"), **common, **_engine(m), IMAGE=m.image,
+            SIZING_ANNOTATIONS="".join(["\n  annotations:"] * bool(m.sizing)
+                                       + [f"\n    {k}: {quote(v)}" for k, v in m.sizing.items()]),
             SCALING=_llmisvc_replicas(m),
             GATEWAY_NAME=gateway, GATEWAY_NAMESPACE=gateway_ns,
             CHAT_TEMPLATE_MOUNT=(f"        volumeMounts:\n          - name: chat-template\n"
