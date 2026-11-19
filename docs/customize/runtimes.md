@@ -162,7 +162,8 @@ Things specific to this runtime:
 - **Remote code is per model.** The category args do not set `--trust-remote-code`; add it
   to a model's `args` only where the model needs it.
 - **Tensor parallelism** (`gpus` > 1) needs oneCCL's `pidfd_getfd`, which the default seccomp
-  profile (`RuntimeDefault`) may block on Arc Pro B70; single-GPU models are not affected.
+  profile (`RuntimeDefault`) may block on Arc Pro B70; single-GPU models such as
+  `sglang-xpu-qwen3-8b` are not affected.
 
 ## OpenVINO (OVMS)
 

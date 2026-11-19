@@ -590,6 +590,14 @@ models:
   # ── GPU examples (runtime: sglang-xpu): Intel Arc Pro B-Series (XPU), see runtimes.sglang-xpu below ──
   #    `gpus` is the per-pod GPU count and the default tensor-parallel size.
 
+  # LLM — Qwen3-8B on 1 Intel GPU: no tensor parallelism, so it starts under the default seccomp profile.
+  - name: sglang-xpu-qwen3-8b
+    model_id: Qwen/Qwen3-8B
+    category: llm
+    runtime: sglang-xpu
+    gpus: 1
+    autodeploy: false
+
   # LLM — Qwen3-30B-A3B on 4 Intel GPUs (TP=4).
   - name: sglang-xpu-qwen3-30b-a3b-2507
     model_id: Qwen/Qwen3-30B-A3B-Instruct-2507

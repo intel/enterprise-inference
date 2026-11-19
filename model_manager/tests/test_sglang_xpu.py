@@ -91,7 +91,7 @@ def test_no_amx_affinity_and_no_cpu_pinning(monkeypatch):
 
 
 def test_trust_remote_code_is_per_model_not_per_category(monkeypatch):
-    for name in (XPU, "sglang-xpu-qwen3-32b", "sglang-xpu-deepseek-r1-distill-qwen-14b"):
+    for name in (XPU, "sglang-xpu-qwen3-8b", "sglang-xpu-qwen3-32b", "sglang-xpu-deepseek-r1-distill-qwen-14b"):
         _, doc, _ = _manifest(monkeypatch, name)
         assert "--trust-remote-code" not in doc["spec"]["template"]["containers"][0]["args"]
 
@@ -99,7 +99,8 @@ def test_trust_remote_code_is_per_model_not_per_category(monkeypatch):
 def test_catalog_entries_use_gpus_and_the_xpu_runtime(monkeypatch):
     cat = yaml.safe_load((cli.MM_DIR / "models.yaml").read_text())
     entries = [m for m in cat["models"] if m["name"].startswith("sglang-xpu-")]
-    assert {m["name"] for m in entries} == {XPU, "sglang-xpu-qwen3-32b", "sglang-xpu-deepseek-r1-distill-qwen-14b"}
+    assert {m["name"] for m in entries} == {XPU, "sglang-xpu-qwen3-8b", "sglang-xpu-qwen3-32b",
+                                            "sglang-xpu-deepseek-r1-distill-qwen-14b"}
     for m in entries:
         assert m["runtime"] == "sglang-xpu" and int(m["gpus"]) >= 1 and "gpu" not in m
         assert not any(a.startswith("--tp") for a in m.get("args", []))

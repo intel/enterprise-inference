@@ -206,10 +206,15 @@
           {#- A GPU runtime (device: gpu in its values.yaml) exports what Headlamp needs to offer the model only
               where the cluster advertises the resource: device, gpus (model, else the runtime's category default)
               and accelerator_resource. -#}
-          {%- set rt = m.runtime | default('') -%}
-          {%- set vals = (lookup('ansible.builtin.file', inference_extension_dir ~ '/model_manager/runtimes/' ~ rt ~ '/values.yaml', errors='ignore') | default('', true) | from_yaml | default({}, true)) if rt else {} -%}
+          {%- if m.servers | default({}) | length > 0 -%}
+          {%- set rt = m.default_server | default(m.servers | list | sort | first, true) -%}
+          {%- else -%}
+          {%- set rt = m.runtime | default((cat.defaults | default({})).runtime | default('vllm', true), true) -%}
+          {%- endif -%}
+          {%- set overlay = (cat.runtimes | default({}))[rt] | default({}, true) -%}
+          {%- set vals = (lookup('ansible.builtin.file', inference_extension_dir ~ '/model_manager/runtimes/' ~ rt ~ '/values.yaml', errors='ignore') | default('', true) | from_yaml | default({}, true)) | combine(overlay, recursive=True) -%}
           {%- if (vals.device | default('')) == 'gpu' -%}
-          {%- set defaults = ((((cat.runtimes | default({}))[rt] | default({})).categories | default({}))[m.category | default('llm')] | default({})).defaults | default({}) -%}
+          {%- set defaults = ((vals.categories | default({}))[m.category | default('llm')] | default({})).defaults | default({}) -%}
           {%- set _ = entry.update({'device': 'gpu', 'accelerator_resource': vals.accelerator_resource | default(''),
                                     'gpus': (m.gpus | default(defaults.gpus | default(1))) | string}) -%}
           {%- endif -%}
