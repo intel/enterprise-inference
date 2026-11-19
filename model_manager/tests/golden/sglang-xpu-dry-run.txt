@@ -48,6 +48,7 @@ spec:
         - "9472"
         - "--mem-fraction-static"
         - "0.9"
+        - "--enable-metrics"
         - "--tensor-parallel-size"
         - "4"
         env: 

@@ -755,7 +755,8 @@ runtimes:
     categories:
       llm:
         args: [ --dtype, bfloat16, --device, xpu, --attention-backend, intel_xpu,
-                --context-length, "9472", --mem-fraction-static, "0.9" ]
+                --context-length, "9472", --mem-fraction-static, "0.9",
+                --enable-metrics ]   # SGLang serves /metrics (Prometheus, the gateway's endpoint picker) only with this
         defaults: { cpu: 8, memory: "64Gi", gpus: 1 }
 
   # ── OpenVINO Model Server ─────────────────────────────────────────────────────

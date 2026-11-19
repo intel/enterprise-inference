@@ -74,6 +74,12 @@ def test_device_groups_come_from_the_runtime(monkeypatch, tmp_path):
     assert doc["spec"]["template"]["securityContext"]["supplementalGroups"] == [109, 110]
 
 
+def test_exposes_prometheus_metrics(monkeypatch):
+    # SGLang answers /metrics with 404 unless --enable-metrics is set; the gateway scheduler polls it.
+    _, doc, _ = _manifest(monkeypatch)
+    assert "--enable-metrics" in doc["spec"]["template"]["containers"][0]["args"]
+
+
 def test_startup_probe_allows_the_slow_health_check(monkeypatch):
     _, doc, _ = _manifest(monkeypatch)
     probe = doc["spec"]["template"]["containers"][0]["startupProbe"]
