@@ -294,9 +294,9 @@ def test_catalog_memory_auto_is_sized(hub, tmp_path):
     assert main["resources"]["limits"]["memory"] == "40Gi"
 
 
-def test_without_memory_auto_nothing_is_sized(hub):
-    # Opt-in: an omitted memory keeps the category default and KV, as before sizing; only their fit is checked.
-    m, s, main, env = _sized(*LLAMA)
+def test_without_memory_auto_nothing_is_sized(hub, tmp_path):
+    # Opt-in for a catalog model: an omitted memory keeps the category default and KV; only their fit is checked.
+    m, s, main, env = _sized("m", catalog=_catalog(tmp_path))
     assert main["resources"]["limits"]["memory"] == "16Gi" and env["VLLM_CPU_KVCACHE_SPACE"] == "8"
     assert "--max-model-len" not in main["args"] and round(s.needed_gib, 2) == 25.96  # 14.96 + 8 + 3
 
@@ -355,8 +355,41 @@ def test_static_values_fit_check(hub, capsys, argv, fits):
 
 def test_unknown_weights_skip_the_check(hub, monkeypatch, capsys):
     monkeypatch.setattr(cli, "hf_weight_bytes", lambda repo, _: 0)
-    m, s, main, env = _sized("--hfid", "org/unknown", "--category", "llm")
+    m, s, main, env = _sized("--hfid", "org/unknown", "--category", "llm", "--memory", "16Gi")
     assert s is None and main["resources"]["limits"]["memory"] == "16Gi" and not capsys.readouterr().err
+
+
+def test_hfid_memory_defaults_to_auto(hub):
+    # --hfid has no catalog memory, so it is sized as with --memory auto.
+    m, s, main, env = _sized(*LLAMA)
+    assert m.memory_auto_default and main["resources"]["limits"]["memory"] == "40Gi"
+    assert env["VLLM_CPU_KVCACHE_SPACE"] == "16" and main["args"][main["args"].index("--max-model-len") + 1] == "8192"
+
+
+def test_hfid_set_memory_wins(hub):
+    m, s, main, env = _sized(*LLAMA, "--memory", "16Gi")
+    assert not m.memory_auto and main["resources"]["limits"]["memory"] == "16Gi" and env["VLLM_CPU_KVCACHE_SPACE"] == "8"
+
+
+@pytest.mark.parametrize("repo, weights, reason", [("org/gated", gib(14.96), "no config.json"),
+                                                   ("org/unknown", 0, "no safetensors size")])
+def test_hfid_default_falls_back_when_it_cannot_size(hub, monkeypatch, capsys, repo, weights, reason):
+    # Unlike an explicit --memory auto (test_sizing_rejects), the default deploys with the category memory, as before.
+    monkeypatch.setattr(cli, "hf_weight_bytes", lambda r, _: weights)
+    m, s, main, env = _sized("--hfid", repo, "--category", "llm")
+    assert not m.memory_auto and main["resources"]["limits"]["memory"] == "16Gi" and env["VLLM_CPU_KVCACHE_SPACE"] == "8"
+    assert "--max-model-len" not in main["args"]
+    err = capsys.readouterr().err
+    assert f"cannot size {m.name}" in err and "using the llm default 16Gi" in err
+
+
+@pytest.mark.parametrize("argv, memory", [(["--category", "embed"], "16Gi"),
+                                          (["--server", "openvino", "--category", "llm"], "16Gi")])
+def test_hfid_default_is_only_for_vllm_llm(hub, capsys, argv, memory):
+    # memory: auto sizes vLLM llm models on CPU only; elsewhere --hfid keeps the category memory without an error.
+    m, s, main, env = _sized("--hfid", "org/other", *argv)
+    assert not m.memory_auto_default and not m.memory_auto and main["resources"]["limits"]["memory"] == memory
+    assert "CPU only" not in capsys.readouterr().err
 
 
 def test_unknown_draft_weights_skip_the_check(hub, monkeypatch, tmp_path):

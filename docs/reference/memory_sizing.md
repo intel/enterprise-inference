@@ -10,14 +10,18 @@ cache from the model itself, like `cpu: auto` does for CPUs. It reads:
 - the safetensors index or file sizes, for the weight size;
 - the engine args the model is served with.
 
-Sizing is opt-in: a model without `memory: auto` deploys with its set `memory` (or the
-category default) and KV cache, as before; only their [fit](#pre-flight-checks) is checked.
+Sizing is opt-in for catalog models: one without `memory: auto` deploys with its set
+`memory` (or the category default) and KV cache, as before; only their
+[fit](#pre-flight-checks) is checked. `--hfid` without `--memory` is sized by default, as it
+has no catalog memory to keep. When that default cannot size the model, it warns and
+deploys with the category memory instead of stopping.
 
 > [!WARNING]
 > For a **gated** repo (Llama, Gemma, Mistral) `config.json` is gated too. Without
 > `HF_TOKEN`, `memory: auto` cannot size the model and the deploy stops with
 > `memory: auto cannot size …: config.json not readable (gated repo without HF_TOKEN?)`.
-> Set `HF_TOKEN`, or set `memory:` for that model.
+> Set `HF_TOKEN`, or set `memory:` for that model. (`--hfid` without `--memory` falls back
+> to the category memory instead.)
 
 Nothing is downloaded for this: only those small JSON documents are fetched, before
 the weight download starts.
@@ -44,14 +48,15 @@ The deploy prints the calculation:
 |---|---|---|
 | 1 | `--memory` | `--memory 96Gi`, or `--memory auto` to size it |
 | 2 | `memory:` in the model's catalog entry | `memory: 128Gi`, or `memory: auto` to size it |
-| 3 | The category default | `16Gi` |
+| 3 | `--hfid` on vLLM on CPU, category `llm` | `auto`, falling back to 4 when the model cannot be sized |
+| 4 | The category default | `16Gi` |
 
 **KV cache and context**, depending on what is set:
 
 | Memory | `VLLM_CPU_KVCACHE_SPACE` | Result |
 |---|---|---|
 | `auto` | not set | KV for 16 streams of `max_model_len` tokens; memory sized around it; `--max-model-len` emitted |
-| `auto` | set | Rejected: `memory: auto` sizes both. Set `memory` instead, or remove the KV setting |
+| `auto` | set | Rejected: `memory: auto` sizes both. Set `memory` instead, or remove the KV setting. `--hfid`'s default `auto` instead gives way to the category memory |
 | set, or the category default | set, or the category `kv_cache_gb` | Used as is; the [pre-flight](#pre-flight-checks) checks that they fit |
 
 - **Where the KV setting counts as set:** in the model's `env:`, a version's `env:`, or
@@ -68,7 +73,7 @@ The deploy prints the calculation:
 - **Which runtimes:** vLLM on CPU, i.e. a runtime with no `container:` (KServe's vLLM
   command) and `device: cpu` (the default): `vllm`, and runtimes built the same way. GPU
   runtimes and OpenVINO are not sized; `memory: auto` on them is rejected, as on `embed` and
-  `rerank` models.
+  `rerank` models, and `--hfid` on them keeps the category memory.
 
 ## The formula
 
@@ -248,7 +253,9 @@ model with `memory: 64Gi` and a 40 GiB KV cache would be OOM-killed at load.
 
 ## When a model cannot be sized
 
-`memory: auto` stops the deploy, before anything is applied, with the reason:
+`memory: auto` stops the deploy, before anything is applied, with the reason. The `--hfid`
+default instead warns with the same reason and deploys with the category memory (`Memory:
+cannot size qwen3-0-6b: …; using the llm default 16Gi. Set --memory to choose it.`):
 
 | Situation | Reason |
 |---|---|
@@ -263,8 +270,9 @@ Set `memory:` (and `VLLM_CPU_KVCACHE_SPACE`) for such a model instead.
 A sized deploy records what it was sized from (a hash of the model, draft, image, TP and
 effective engine args) and the sized `--max-model-len` as annotations on the
 `LLMInferenceService` (`memory-sizing.model-manager.io/inputs`, `…/max-model-len`). A
-re-deploy of a catalog `memory: auto` model with the same inputs keeps the live memory, KV
-cache and context, as `cpu: auto` keeps its CPU: an Ansible re-run then neither calls
+re-deploy of a `memory: auto` model (catalog, or `--hfid` without `--memory`) with the same
+inputs keeps the live memory, KV cache and context, as `cpu: auto` keeps its CPU: an
+Ansible re-run then neither calls
 Hugging Face nor changes a running model. Any changed input (e.g. `--tp 2`, another
 `--max-model-len`, a new image), a model deployed without the annotation, or
 `--memory auto` on the command line sizes it again.

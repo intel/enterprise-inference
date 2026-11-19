@@ -208,6 +208,7 @@ class Model:
     cpu: str = ""
     memory: str = ""
     memory_auto: bool = False                 # memory: auto: sized from the model (core/sizer.py)
+    memory_auto_default: bool = False         # memory_auto as --hfid's default: falls back to `memory` if unsizable
     kv_cache_gb: str = ""                     # sized VLLM_CPU_KVCACHE_SPACE
     max_model_len: str = ""                   # sized --max-model-len
     sizing: dict = field(default_factory=dict)  # memory: auto's inputs + sized context, kept as CR annotations
@@ -231,6 +232,11 @@ class Model:
     def container(self) -> dict:
         """The runtime's own serving container (command, args, probes, user); {} means KServe's vLLM command."""
         return pick(self.rt, "container", {})
+
+    @property
+    def vllm_on_cpu(self) -> bool:
+        """KServe's vLLM command (no runtime container) on a CPU device: what VLLM_CPU_KVCACHE_SPACE sizing models."""
+        return not self.container and text(pick(self.rt, "device", "cpu")) == "cpu"
 
     @property
     def run_as_user(self) -> str:
@@ -285,6 +291,10 @@ def resolve(catalog: Catalog, target: str, o: Any) -> Model:
     m.cpu = o.cpu or m.cpu or text(pick(defaults, "cpu", 8))
     m.memory_auto = (o.memory or m.memory) == "auto"
     m.memory = "" if m.memory_auto else o.memory or m.memory
+    # --hfid has no catalog memory to keep, so it is sized when it can be; the category default stays the fallback.
+    m.memory_auto_default = bool(o.id and not m.memory and not m.memory_auto and m.vllm_on_cpu
+                                 and m.category == "llm")
+    m.memory_auto = m.memory_auto or m.memory_auto_default
     m.memory = m.memory or text(pick(defaults, "memory", "16Gi"))
     m.replicas = o.replicas or m.replicas
     m.node = o.node or m.node

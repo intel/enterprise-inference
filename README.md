@@ -90,7 +90,7 @@ Settings for this toolkit live in `config.yaml` at this repo's root. Toolkit Man
 Or skip the catalog and deploy any Hugging Face model directly:
 
 ```bash
-./model-manager deploy --hfid Qwen/Qwen3-0.6B --cpu 8 --memory 16Gi --wait
+./model-manager deploy --hfid Qwen/Qwen3-0.6B --cpu 8 --wait   # memory sized from the model
 ```
 
 > [!IMPORTANT]

@@ -42,7 +42,8 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
   {GREEN}--server-version{RESET} V   Server version (must be declared for the model if it uses servers:)
   {GREEN}--as{RESET} <name>          Deploy under a distinct name (run multiple server/version variants at once)
   {GREEN}--cpu{RESET} N              CPU cores
-  {GREEN}--memory{RESET} NGi         Memory (e.g. 32Gi)
+  {GREEN}--memory{RESET} NGi         Memory (e.g. 32Gi), or auto: sized from the model (vLLM llm/vlm on CPU
+                            only; the default with --hfid for llm, falling back to the category memory)
   {GREEN}--replicas{RESET} N         Fixed replica count (default: 1); turns autoscaling off
   {GREEN}--min-replicas{RESET} N     Autoscaling (KEDA): fewest replicas (default: 1)
   {GREEN}--max-replicas{RESET} N     Autoscaling: most replicas; above --min-replicas turns it on
@@ -66,7 +67,7 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
 {BOLD}{CYAN}Examples:{RESET}
   ./model-manager deploy llama3-8b-awq --wait
   ./model-manager deploy llama3-8b-awq --server-version 0.19.1 --wait
-  ./model-manager deploy --hfid meta-llama/Llama-3.2-1B-Instruct --cpu 8 --memory 16Gi
+  ./model-manager deploy --hfid meta-llama/Llama-3.2-1B-Instruct --cpu 8   # memory sized from the model
   ./model-manager undeploy llama3-8b-awq
   ./model-manager undeploy llama3-8b-awq --wait        # block until pods terminate + CPUs are freed
   ./model-manager list                                 # catalog + deployed models and their status
@@ -343,19 +344,15 @@ def _spawn_reconciler(m: Model, timeout: int) -> tuple[Path, bool]:
     return log, True
 
 
-def _vllm_on_cpu(m: Model) -> bool:
-    """KServe's vLLM command (no runtime container) on a CPU device: what VLLM_CPU_KVCACHE_SPACE sizing models."""
-    return not m.container and text(pick(m.rt, "device", "cpu")) == "cpu"
-
-
 SIZED_CATEGORIES = ("llm", "vlm")
 
 
 def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], tp: int) -> Sizing | None:
     """memory: auto sizes memory and VLLM_CPU_KVCACHE_SPACE from the model's HuggingFace metadata and aborts when it
     cannot. Otherwise the set memory and KV stay, and only their fit is checked (memory_gate) when the weight size
-    is known. None when nothing can be checked."""
-    if not (_vllm_on_cpu(m) and m.category in SIZED_CATEGORIES):
+    is known. --hfid's implicit memory: auto (m.memory_auto_default) falls back to that instead of aborting, with a
+    warning. None when nothing can be checked."""
+    if not (m.vllm_on_cpu and m.category in SIZED_CATEGORIES):
         if m.memory_auto:
             abort(f"memory: auto sizes vLLM llm and vlm models on CPU only; set memory for {m.name}.")
         return None
@@ -363,6 +360,8 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
     if kv and not is_uint(kv):
         abort(f"VLLM_CPU_KVCACHE_SPACE for {m.name} must be a whole number of GiB, got '{kv}'.")
     proxy, args = catalog.https_proxy, renderer.effective_args(m, cli_args, o.env)
+    if m.memory_auto and kv and m.memory_auto_default:
+        m.memory_auto = False  # a KV setting without --memory keeps the category memory, as for a catalog model
     if m.memory_auto and kv:
         abort(f"{m.name} has memory: auto and VLLM_CPU_KVCACHE_SPACE={kv}: memory: auto sizes both. Set memory "
               "instead, or remove the KV setting.")
@@ -374,20 +373,26 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
         abort(f"{m.name}: {sizer.topology_error(cfg, tp)}; vLLM would fail at start-up.")
     weights = hf_weight_bytes(m.model_id, proxy)
     draft_weights = hf_weight_bytes(m.draft_model_id, proxy) if m.draft_model_id else 0
-    if not m.memory_auto:
+    s = None
+    if m.memory_auto:
+        draft = (hf_config(m.draft_model_id, proxy), draft_weights) if m.draft_model_id else None
+        try:
+            s = sizer.size(cfg, weights, args, tp, draft)
+        except (sizer.Unsupported, ValueError) as e:  # ValueError: a non-integer engine arg such as --max-num-seqs
+            reason = f"Hugging Face is unreachable (proxy: {proxy or 'none'})" if hub_unreachable(proxy) else e
+            if not m.memory_auto_default:
+                abort(f"memory: auto cannot size {m.name}: {reason}. Set HF_TOKEN for a gated repo, or set memory "
+                      "(and VLLM_CPU_KVCACHE_SPACE) for it.")
+            warn(f"Memory: cannot size {m.name}: {reason}; using the {m.category} default {m.memory}. Set --memory "
+                 "to choose it.")
+            m.memory_auto = False
+    if not s:
         draft_cfg = hf_config(m.draft_model_id, proxy) if m.draft_model_id else None
         load = (sizer.load_allowance_gib(cfg, weights, args)
                 + sizer.load_allowance_gib(draft_cfg, draft_weights, args))
         return _static_fit(m, sizer.resident_bytes(cfg, weights, args),
                            sizer.resident_bytes(draft_cfg, draft_weights, args), int(kv or renderer.category_kv_cache(m)),
                            tp, load)
-    draft = (hf_config(m.draft_model_id, proxy), draft_weights) if m.draft_model_id else None
-    try:
-        s = sizer.size(cfg, weights, args, tp, draft)
-    except (sizer.Unsupported, ValueError) as e:  # ValueError: a non-integer engine arg such as --max-num-seqs
-        reason = f"Hugging Face is unreachable (proxy: {proxy or 'none'})" if hub_unreachable(proxy) else e
-        abort(f"memory: auto cannot size {m.name}: {reason}. Set HF_TOKEN for a gated repo, or set memory (and "
-              "VLLM_CPU_KVCACHE_SPACE) for it.")
     m.memory, m.kv_cache_gb = f"{s.memory_gi}Gi", str(s.kv_gib)
     if not sizer.arg_value(args, "--max-model-len"):
         m.max_model_len = str(s.max_model_len)
