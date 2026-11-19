@@ -69,20 +69,18 @@ def dedupe_args(args: list[str]) -> list[str]:
 
 
 def args_json(m: Model, args: list[str]) -> str:
-    """vLLM flags as the JSON object a launcher reads from env (a bare flag is true)."""
-    out, i = {}, 0
-    while i < len(args):
-        a = args[i]
-        if not a.startswith("--"):
+    """vLLM flags as the JSON object a launcher reads from env: a bare flag is true, several values a list."""
+    out: dict = {}
+    key = ""
+    for a in args:
+        if a.startswith("--"):
+            key, eq, value = a[2:].partition("=")
+            out[key] = value if eq else True   # a repeated flag keeps its last value, as vLLM's parser does
+        elif not key:
             abort(f"Model '{m.name}': runtime '{m.runtime}' takes only --flag arguments, got '{a}'.")
-        key, eq, value = a[2:].partition("=")
-        if eq:
-            out[key] = value
-        elif i + 1 < len(args) and not args[i + 1].startswith("--"):
-            out[key], i = args[i + 1], i + 1
         else:
-            out[key] = True
-        i += 1
+            prev = out[key]
+            out[key] = a if prev is True else (prev if isinstance(prev, list) else [prev]) + [a]
     return json.dumps(out, separators=(",", ":"))
 
 

@@ -962,6 +962,10 @@ runtimes:
 def test_args_json_rejects_positional_args():
     m = Model(name="m", namespace="ns", runtime="iim-vllm")
     assert json.loads(renderer.args_json(m, ["--a", "1", "--b", "--c=x"])) == {"a": "1", "b": True, "c": "x"}
+    # Multi-value options (nargs="+") become a list, which the IIM launcher expands to `--flag v1 v2`.
+    assert json.loads(renderer.args_json(m, ["--lora-modules", "a=x", "b=y", "--max-num-seqs", "8"])) == {
+        "lora-modules": ["a=x", "b=y"], "max-num-seqs": "8"}
+    assert json.loads(renderer.args_json(m, ["--k", "1", "--k", "2"])) == {"k": "2"}        # last wins
     with pytest.raises(SystemExit):
         renderer.args_json(m, ["stray"])
 
