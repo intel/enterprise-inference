@@ -703,8 +703,8 @@ def test_autoscaling_renders_keda_scaling_instead_of_replicas(monkeypatch):
 def test_autoscaling_from_catalog_and_fixed_replicas_override(monkeypatch, tmp_path):
     catalog = tmp_path / "models.yaml"
     catalog.write_text((cli.MM_DIR / "models.yaml").read_text().replace(
-        "  - name: qwen3-0-6b ",
-        "  - name: qwen3-0-6b\n    autoscaling: {min_replicas: 2, max_replicas: 4, scale_target: 5}\n    x: ", 1))
+        "  - name: qwen3-0-6b\n",
+        "  - name: qwen3-0-6b\n    autoscaling: {min_replicas: 2, max_replicas: 4, scale_target: 5}\n", 1))
     m, doc = _render(monkeypatch, "qwen3-0-6b", catalog=catalog)
     assert (doc["spec"]["scaling"]["minReplicas"], doc["spec"]["scaling"]["maxReplicas"]) == (2, 4)
     assert doc["spec"]["scaling"]["keda"]["triggers"][0]["metadata"]["threshold"] == "5"
@@ -892,11 +892,34 @@ def test_ovms_renders_an_llmisvc_with_its_own_container(monkeypatch):
 
 
 def test_vllm_keeps_kserves_container(monkeypatch):
-    _, doc = _render(monkeypatch, "qwen3-0-6b")
+    _, doc = _render(monkeypatch, "qwen3-0-6b", "--server", "vllm")
     main = _main(doc)
     assert "command" not in main and "--served-model-name" in main["args"]
     assert {main[p]["httpGet"]["path"] for p in ("startupProbe", "readinessProbe", "livenessProbe")} == {"/health"}
     assert main["securityContext"]["runAsUser"] == 1000
+
+
+def test_iim_launcher_takes_vllm_args_as_json(monkeypatch):
+    # The IIM launcher's `serve` takes no CLI args: they reach vLLM through INFERENCE_ENGINE_ARGS.
+    m, _ = _render(monkeypatch, "iim-qwen3-4b")
+    cat = Catalog(cli.MM_DIR / "models.yaml")
+    doc = yaml.safe_load(renderer.manifest(m, cat, cli.parse_args(["deploy", "iim-qwen3-4b"]), {}, m.cpu,
+                                           ["--max-num-seqs", "64"]))   # deploy() passes the --arg list here
+    main = _main(doc)
+    env = {e["name"]: e.get("value") for e in main["env"]}
+    assert main["command"] == ["python3", "-m", "inference_runtime.cli", "serve"] and main["args"] == []
+    assert json.loads(env["INFERENCE_ENGINE_ARGS"]) == {
+        "model": "/mnt/models", "served-model-name": "iim-qwen3-4b", "max-model-len": "auto",
+        "enable-auto-tool-choice": True, "tool-call-parser": "hermes", "max-num-seqs": "64"}
+    assert env["INFERENCE_MODEL_ID"] == "Qwen/Qwen3-4B" and env["VLLM_CPU_KVCACHE_SPACE"] == "16"
+    assert main["securityContext"]["runAsUser"] == 1001
+
+
+def test_args_json_rejects_positional_args():
+    m = Model(name="m", namespace="ns", runtime="iim-vllm")
+    assert json.loads(renderer.args_json(m, ["--a", "1", "--b", "--c=x"])) == {"a": "1", "b": True, "c": "x"}
+    with pytest.raises(SystemExit):
+        renderer.args_json(m, ["stray"])
 
 
 def test_ovms_autoscaling_uses_its_signal(monkeypatch):
@@ -917,7 +940,9 @@ def test_servers_sorted_default_is_an_llmisvc():
 def test_files_belong_to_the_serving_user():
     cat = Catalog(cli.MM_DIR / "models.yaml")
     assert config.resolve(cat, "qwen3-5-2b-ovms", cli.Options()).run_as_user == "5000"
-    assert config.resolve(cat, "qwen3-0-6b", cli.Options()).run_as_user == "1000"
+    assert config.resolve(cat, "qwen3-0-6b", cli.Options()).run_as_user == "1001"  # iim-vllm: the image's user
+    assert config.resolve(cat, "qwen3-0-6b", cli.parse_args(["deploy", "qwen3-0-6b", "--server", "vllm"])
+                          ).run_as_user == "1000"
 
 
 def test_vllm_only_features_rejected_for_ovms(monkeypatch, tmp_path):

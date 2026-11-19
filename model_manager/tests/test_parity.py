@@ -23,6 +23,8 @@ MM = Path(__file__).resolve().parents[1]
 GOLDEN = MM / "tests" / "golden"
 FIXTURE = str(MM / "tests" / "fixtures" / "models.yaml")
 UNDEPLOY_ALL = str(MM / "tests" / "fixtures" / "undeploy-all.yaml")
+# Default catalog: the goldens were recorded against these vllm-runtime models, not the shipped catalog.
+LEGACY = str(MM / "tests" / "fixtures" / "legacy-catalog.yaml")
 
 
 def _ready(cond: str) -> str:
@@ -251,7 +253,7 @@ CASES = [
     case("bad-tp", "deploy", "qwen3-0-6b", "--tp", "x"),
     case("bad-label-key", "deploy", "qwen3-0-6b", "--label", "Bad Key=v"),
     case("label-without-value", "deploy", "qwen3-0-6b", "--label", "foo"),
-    case("not-in-catalog", "deploy", "nope", env=BE),
+    case("not-in-catalog", "deploy", "nope", env=BE, catalog=str(MM / "models.yaml")),  # the message names it
     case("server-not-declared", "deploy", "qwen3-0-6b", "--server", "openvino", env=BE),
     case("version-not-declared", "deploy", "qwen3-0-6b", "--server-version", "9.9", env=BE),
     case("runtime-version-missing", "deploy", "llama3-8b-awq", "--server-version", "9.9", env=BE),
@@ -295,7 +297,7 @@ def run(launcher: Path, c: dict, tmp: Path) -> str:
     env = {
         "PATH": f"{MM / 'tests' / 'fakebin'}:{os.environ['PATH']}", "HOME": str(tmp), "TMPDIR": str(tmp),
         "LANG": "C.UTF-8", "VIRTUAL_ENV": os.environ.get("VIRTUAL_ENV", ""),
-        "MM_CONFIG": c["catalog"] or str(MM / "models.yaml"),
+        "MM_CONFIG": c["catalog"] or LEGACY,
         "MM_INFERENCE_HOSTNAME": "inference.example.com", "MM_LITELLM_ENABLED": "false",
         "MM_AI_GATEWAY_PROVIDER": "envoy", "MM_RECONCILE_LOG_DIR": str(tmp),
         "FAKE_K8S": json.dumps(c["k8s"]), "FAKE_K8S_LOG": str(log), **c["env"],

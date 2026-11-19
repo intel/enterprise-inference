@@ -2,12 +2,13 @@
 
 ## What is it?
 
-A **runtime** is the engine that actually serves a model. Two are supported:
+A **runtime** is the engine that actually serves a model. Three are supported:
 
 | Runtime | Use case | Key optimizations |
 |---------|----------|-------------------|
-| **vLLM** | LLMs, VLMs | NUMA auto-bind, AMX kernels, prefix caching, chunked prefill |
-| **OpenVINO (OVMS)** | Embedding, reranking, INT4/INT8 LLMs | OpenVINO IR, MediaPipe graph |
+| **IIM vLLM** (`iim-vllm`, the default) | LLMs, VLMs, embedding, reranking | Intel® Inference Microservices images: Intel-validated vLLM profiles per model |
+| **vLLM** (`vllm`) | LLMs, VLMs, embedding, reranking | Upstream vLLM CPU images; NUMA auto-bind, AMX kernels, prefix caching, chunked prefill |
+| **OpenVINO (OVMS)** (`openvino`) | Embedding, reranking, INT4/INT8 LLMs | OpenVINO IR, MediaPipe graph |
 
 Each engine is configured **once**, in the `runtimes:` section at the bottom of
 `models.yaml`. That is where you define the available versions and their container
@@ -34,20 +35,55 @@ Version selection, highest precedence first:
 --server-version   >   the model's server_version:   >   the runtime's default_version
 ```
 
+## IIM vLLM
+
+The default runtime. It runs the [Intel® Inference Microservices](https://hub.docker.com/u/intel)
+launcher (`python3 -m inference_runtime.cli serve`), which picks a tuned vLLM profile for
+the model and then starts vLLM. Catalog models with their own IIM image set it with
+`image:` (e.g. `intel/inference-xeon-qwen-qwen3-4b:0.1.0`) and get that model's Intel profile.
+Every other model runs on the base image `intel/inference-xeon-base:0.1.0` with its
+generic bf16 profile.
+
+```yaml
+runtimes:
+  iim-vllm:
+    image: "docker.io/intel/inference-xeon-base:0.1.0"
+    categories:
+      llm:    { args: [--max-model-len, auto], defaults: { cpu: 8,  memory: "32Gi", kv_cache_gb: 16 } }
+      vlm:    { args: [--max-model-len, auto], defaults: { cpu: 16, memory: "48Gi", kv_cache_gb: 16 } }
+      embed:  { defaults: { cpu: 6, memory: "8Gi", kv_cache_gb: 2 } }
+      rerank: { defaults: { cpu: 6, memory: "8Gi", kv_cache_gb: 2 } }
+```
+
+The launcher takes no command-line arguments. The plumbing in
+`model_manager/runtimes/iim-vllm/values.yaml` sets `container.args_env: INFERENCE_ENGINE_ARGS`, so
+the vLLM args (category, model and `--arg`) reach it as one JSON object and are applied
+after the profile. `INFERENCE_MODEL_ID` is set from `model_id`, the weights are read from
+`/mnt/models`, and `HF_HUB_OFFLINE=1` keeps the launcher off the Hub. Memory is
+`weights + kv_cache_gb + headroom`. The launcher does not change CPU placement: vLLM binds
+its threads inside the cores the NRI balloon gives the pod.
+
+> [!NOTE]
+> Known limits of the 0.1.0 images (vLLM 0.26): `whisper-small` fails its first
+> transcription (`pin_memory=True requires a CUDA or other accelerator backend`), so serve it
+> with `--server vllm --server-version 0.28.0`. Gated repos (Llama) need `HF_TOKEN`.
+
 ## vLLM
 
-A **versioned** runtime. Adding a new engine version is a new entry under `versions:` —
+A **versioned** runtime, selected with `--server vllm`. Adding a new engine version is a new entry under `versions:` —
 no code changes.
 
 ```yaml
 runtimes:
   vllm:
-    default_version: "0.24.0"
+    default_version: "0.28.0"
     env: { ... }                 # applied to every vLLM pod
     versions:
+      "0.33.0":                  # its KV check counts page cache as used: large models can fail
+        image: "docker.io/vllm/vllm-openai-cpu:v0.33.0"
       "0.24.0":
         image: "docker.io/vllm/vllm-openai-cpu:v0.24.0"
-      "0.28.0":                  # only models that pin it use it (qwen3-6-35b-a3b)
+      "0.28.0":
         image: "docker.io/vllm/vllm-openai-cpu:v0.28.0"
       "0.19.1":
         image: "docker.io/vllm/vllm-openai-cpu:v0.19.1"
@@ -147,7 +183,7 @@ The runtime's `kind` decides what `model-manager` creates:
 | Runtime | Object | Template |
 |---|---|---|
 | vLLM | `LLMInferenceService` | `model_manager/templates/llm-inference-service.yaml` |
-| OpenVINO | `LLMInferenceService` | the same template, with the runtime's `container` |
+| IIM vLLM, OpenVINO | `LLMInferenceService` | the same template, with the runtime's `container` |
 | A runtime with `kind: InferenceService` | `InferenceService` | `model_manager/templates/inference-service.yaml`, with the `ClusterServingRuntime` under `model_manager/runtimes/<name>/` |
 
 A model whose runtime changes kind replaces its old object on the next deploy (or undeploy).
