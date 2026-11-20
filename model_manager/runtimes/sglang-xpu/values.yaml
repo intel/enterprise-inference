@@ -25,6 +25,7 @@ routing: epp
 accelerator_resource: gpu.intel.com/xe
 shm_size: 16Gi                          # tensor-parallel workers exchange data through /dev/shm
 device_groups: [44, 990]
+wait_timeout: 3600     # default --wait-timeout: matches the startup probe's one-hour budget (first start compiles XPU kernels)
 container:
   command: ["sglang", "serve"]
   args: ["--model-path", "/mnt/models", "--served-model-name", "$model", "--host", "0.0.0.0", "--port", "8000"]

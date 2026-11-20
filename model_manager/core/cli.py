@@ -477,7 +477,7 @@ def deploy(o: Options, target: str) -> None:
         ok(f"Manifest applied: {m.kind}/{m.name} in {m.namespace}")
     routing.register(m)
 
-    timeout = int(o.wait_timeout or 900)  # model load + warmup is slow
+    timeout = int(o.wait_timeout or text(pick(m.rt, "wait_timeout")) or 900)  # model load + warmup is slow
     if o.wait:
         info(f"Waiting for {m.name} to become Ready (timeout: {timeout}s)...")
         problem = _wait_ready(m, timeout)

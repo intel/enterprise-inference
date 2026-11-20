@@ -65,7 +65,7 @@ apply. Set `MM_FORCE_REDEPLOY=1` to force a full re-apply regardless.
 | `--routing <mode>` | How requests reach the model: `epp` or `direct` (advanced) |
 | `--env KEY=VAL` | Set an environment variable on the pod (repeatable) |
 | `--arg "--flag=val"` | Pass an extra engine flag, e.g. a vLLM option (repeatable) |
-| `--wait` / `--wait-timeout N` | Wait until the model is ready before returning (default: 900s) |
+| `--wait` / `--wait-timeout N` | Wait until the model is ready before returning (default: 900s; a runtime can set its own, e.g. 3600s for `sglang-xpu`) |
 | `--dry-run` | Render and show what would be deployed, without changing anything |
 
 Run `./model-manager --help` for the authoritative list.

@@ -548,3 +548,15 @@ if __name__ == "__main__":
         for p in GPU_CASES:
             (GOLDEN / f"{p.id}.txt").write_text(run(legacy, p.values[0], Path(d)))
             print(f"wrote {p.id}")
+
+
+def test_gpu_cpu_and_memory_are_checked_on_the_same_node(monkeypatch):
+    # n0 has the GPUs but 1 CPU; n1 has the CPUs but 1 GPU: neither can run an 8-GPU, 8-CPU pod, though each
+    # cluster-wide total (8 GPUs, 64 CPUs) would suffice.
+    nodes = _nodes(8, 1)
+    nodes["items"][0]["status"]["allocatable"]["cpu"] = "1"
+    rt = policy.GpuRuntime("model-store")
+    assert preflight(monkeypatch, nodes, runtime=rt, cpu="8", memory="8Gi") == []  # the GPU check alone passes
+    m = Model(**{**GPU_MODEL, "gpus": "8", "cpu": "8", "memory": "8Gi"})
+    errors = policy._request_errors(m, "8", False, rt, 1)
+    assert errors and "room for 0 where its GPUs are free too" in errors[0]

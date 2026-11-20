@@ -121,3 +121,10 @@ def test_a_cpu_model_gets_no_gpu_default(monkeypatch):
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as d:
         (GOLDEN / "sglang-xpu-dry-run.txt").write_text(run(MM / "model-manager", CASE.values[0], Path(d)))
+
+
+def test_sglang_xpu_waits_as_long_as_its_startup_probe():
+    # 180 x 20s startup probe = one hour; a 900s default --wait-timeout would roll back a slow first start.
+    rt = yaml.safe_load((Path(__file__).resolve().parents[1] / "runtimes/sglang-xpu/values.yaml").read_text())
+    assert rt["wait_timeout"] == 3600
+    assert rt["container"]["startup_failures"] * rt["container"]["startup_period"] >= rt["wait_timeout"]
