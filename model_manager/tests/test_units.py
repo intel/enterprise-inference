@@ -352,6 +352,9 @@ def test_litellm_called_directly_in_a_pod(monkeypatch):
     ("rerank", "vllm", "hosted_vllm/m", "rerank"),
     ("embed", "vllm-cuda", "hosted_vllm/m", "embedding"),
     ("rerank", "vllm-cuda", "hosted_vllm/m", "rerank"),
+    ("embed", "vllm-xpu", "hosted_vllm/m", "embedding"),
+    ("rerank", "vllm-xpu", "hosted_vllm/m", "rerank"),
+    ("llm", "vllm-xpu", "openai/m", None),
     ("embed", "ovms", "openai/m", "embedding"),
 ])
 def test_litellm_register_payload(monkeypatch, category, runtime, provider_model, mode):

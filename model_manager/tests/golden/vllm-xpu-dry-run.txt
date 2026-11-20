@@ -1,0 +1,137 @@
+# rc: 0
+--- stdout
+[INFO ]  Deploying vllm-xpu-gpt-oss-20b (LLMInferenceService)
+[INFO ]    Runtime: vllm-xpu | Category: llm | Routing: epp
+[INFO ]    CPU: 8 | Memory: 32Gi | Replicas: 1
+[INFO ]    GPUs: 1 x gpu.intel.com/xe
+[INFO ]    CPU policy: n/a (GPU runtime — no CPU pinning)
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceService
+metadata:
+  name: vllm-xpu-gpt-oss-20b
+  namespace: llm-inference
+  labels:
+    app.kubernetes.io/name: vllm-xpu-gpt-oss-20b
+    app.kubernetes.io/managed-by: model-manager
+spec:
+  model:
+    uri: pvc://model-store/vllm-xpu-gpt-oss-20b
+  replicas: 1
+  router:
+    gateway:
+      refs:
+        - name: ai-gateway
+          namespace: llm-inference
+    route: {}
+    scheduler: {}
+  template:
+    containers:
+      - name: main
+        image: vllm/vllm-openai-xpu:v0.33.0
+        command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+        args: 
+        - "--model"
+        - "/mnt/models"
+        - "--served-model-name"
+        - "vllm-xpu-gpt-oss-20b"
+        - "--host"
+        - "0.0.0.0"
+        - "--port"
+        - "8000"
+        - "--block-size"
+        - "64"
+        - "--gpu-memory-utilization"
+        - "0.9"
+        - "--enforce-eager"
+        - "--no-enable-prefix-caching"
+        - "--dtype"
+        - "auto"
+        - "--disable-sliding-window"
+        - "--max-model-len"
+        - "9216"
+        - "--max-num-batched-tokens"
+        - "9216"
+        env: 
+        - name: CCL_ALLREDUCE
+          value: "ring"
+        - name: CCL_PROCESS_LAUNCHER
+          value: "none"
+        - name: CCL_WORKER_OFFLOAD
+          value: "0"
+        - name: CCL_ZE_IPC_EXCHANGE
+          value: "pidfd"
+        - name: DO_NOT_TRACK
+          value: "1"
+        - name: HOME
+          value: "/tmp"
+        - name: SYCL_CACHE_PERSISTENT
+          value: "1"
+        - name: TORCH_LLM_ALLREDUCE
+          value: "1"
+        - name: TRITON_CACHE_DIR
+          value: "/tmp/.triton"
+        - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+          value: "1"
+        - name: VLLM_NO_USAGE_STATS
+          value: "1"
+        - name: VLLM_WORKER_MULTIPROC_METHOD
+          value: "spawn"
+        - name: XDG_CACHE_HOME
+          value: "/tmp/.cache"
+        - name: ZES_ENABLE_SYSMAN
+          value: "1"
+        - name: ZE_ENABLE_PCI_ID_DEVICE_ORDER
+          value: "1"
+        volumeMounts:
+          - name: shm
+            mountPath: /dev/shm
+        resources:
+          requests:
+            cpu: "8"
+            memory: 32Gi
+            gpu.intel.com/xe: "1"
+          limits:
+            memory: 32Gi
+            gpu.intel.com/xe: "1"
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 180
+          periodSeconds: 20
+          timeoutSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 12
+          periodSeconds: 10
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
+    securityContext:
+      seccompProfile:
+        type: RuntimeDefault
+      supplementalGroups: [44, 990]
+    volumes:
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi
+--- stderr
+--- kubectl

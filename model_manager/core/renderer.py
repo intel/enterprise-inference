@@ -142,6 +142,12 @@ def _gpu(m: Model, affinity: str) -> tuple[str, str]:
     return f'\n            {m.accel_resource}: "{m.gpus}"', ("\n" if affinity and toleration else "") + toleration
 
 
+def device_groups(m: Model) -> str:
+    """The pod's supplementalGroups (the host's render/video GIDs, runtime `device_groups`); empty on CPU."""
+    gids = [text(g) for g in pick(m.rt, "device_groups", [])] if m.gpu else []
+    return "\n      supplementalGroups: [" + ", ".join(gids) + "]" if gids else ""
+
+
 # Standalone default; the install always sets MM_PROMETHEUS_URL from observability_namespace.
 PROMETHEUS_URL = "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
 
@@ -184,7 +190,9 @@ def _engine(m: Model) -> dict:
     command = [_fill(a, m) for a in pick(c, "command", [])]
     return {"COMMAND": f"        command: {json.dumps(command)}\n" if command else "",
             "READY_PATH": _fill(pick(c, "ready_path", "/health"), m),
-            "LIVE_PATH": _fill(pick(c, "live_path", "/health"), m), "RUN_AS": m.run_as_user}
+            "LIVE_PATH": _fill(pick(c, "live_path", "/health"), m), "RUN_AS": m.run_as_user,
+            "STARTUP_FAILURES": text(pick(c, "startup_failures", 120)), "STARTUP_PERIOD": text(pick(c, "startup_period", 10)),
+            "STARTUP_TIMEOUT": f"\n          timeoutSeconds: {text(pick(c, 'startup_timeout'))}" if pick(c, "startup_timeout") else ""}
 
 
 def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_args: list[str]) -> str:
@@ -194,9 +202,12 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
         if platform.is_openshift():  # OpenShift AI's template starts vLLM itself (see platform.adapt_llmisvc)
             abort(f"Runtime '{m.runtime}' is not supported on OpenShift: its LLMInferenceService template "
                   "starts vLLM.")
-        if m.chat_template:
+        if m.chat_template and not pick(m.container, "chat_template", False):
             abort(f"Model '{m.name}': chat_template applies to vLLM only, not runtime '{m.runtime}'.")
         args = [_fill(a, m) for a in pick(m.container, "args", [])] + args
+        if m.chat_template:
+            args += ["--chat-template",
+                     f"{CHAT_TEMPLATE_DIR}/chat_template.jinja" if inline_chat_template(m) else m.chat_template]
     elif m.kind == "LLMInferenceService":
         args += ["--served-model-name", m.name]
         if m.chat_template:
@@ -221,7 +232,7 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
             template("llm-inference-service.yaml"), **common, **_engine(m), IMAGE=m.image,
             SCALING=_llmisvc_replicas(m),
             GATEWAY_NAME=gateway, GATEWAY_NAMESPACE=gateway_ns, CHAT_TEMPLATE_MOUNT=mounts,
-            CHAT_TEMPLATE_VOLUME=volumes, GPU_RESOURCE=gpu_limit, TOLERATIONS=tolerations, CPU_LIMIT=cpu_limit))
+            CHAT_TEMPLATE_VOLUME=volumes, SUPPLEMENTAL_GROUPS=device_groups(m), GPU_RESOURCE=gpu_limit, TOLERATIONS=tolerations, CPU_LIMIT=cpu_limit))
     if m.kind == "InferenceService":
         return render(template("inference-service.yaml"), **common, MODEL_ID=m.model_id, PVC_NAME=catalog.pvc,
                       MODEL_FORMAT=text(pick(m.rt, "format")) or "openvino",
