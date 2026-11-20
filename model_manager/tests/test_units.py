@@ -26,6 +26,12 @@ def fresh_nri_reads():
     nri_policy.clear_cache()
 
 
+@pytest.fixture(autouse=True)
+def offline_hub(monkeypatch):
+    """Tests stay offline: deploy reads HuggingFace metadata for its memory checks."""
+    monkeypatch.setattr(config, "_hf_json", lambda url, proxy: {})
+
+
 @pytest.fixture
 def kubectl(monkeypatch):
     """Record kubectl calls as (argv, stdin); every call succeeds with empty output (a Job reads as complete)."""

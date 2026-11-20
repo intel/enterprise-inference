@@ -9,8 +9,8 @@ import math
 import os
 import re
 
-from . import k8s, nri_policy
-from .config import Model, is_uint, pick, text, truthy
+from . import k8s, nri_policy, sizer
+from .config import Model, Sizing, is_uint, pick, text, truthy
 from .ui import abort, info, warn
 
 ANN = "cpu-policy.model-manager.io"
@@ -115,15 +115,23 @@ class NriBalloons(BestEffort):
                 "(proceed anyway) or MM_NRI_SKIP_PREFLIGHT=1 (skip check).")
 
 
-def _allocatable(m: Model) -> list[int] | None:
-    """Whole allocatable CPUs of each schedulable node (m.node only, when pinned); None when nodes can't be read.
-    Allocatable already excludes kube/system-reserved; exclusive CPUs cannot span nodes."""
+def _schedulable_nodes(m: Model) -> list[dict] | None:
+    """Nodes a new pod can land on (m.node only, when pinned): not cordoned, no NoSchedule/NoExecute taint; None when
+    nodes can't be read."""
     nodes = k8s.get_json("node", m.node) if m.node else k8s.get_json("nodes")
     if not nodes:
         return None
-    return [whole_cpus(text(pick(pick(n.get("status"), "allocatable", {}), "cpu", "0")), floor=True)
-            for n in ([nodes] if m.node else nodes.get("items", []))
-            if not any(t.get("effect") == "NoSchedule" for t in pick(n.get("spec"), "taints", []))]
+    return [n for n in ([nodes] if m.node else nodes.get("items", []))
+            if not pick(n.get("spec"), "unschedulable")
+            and not any(t.get("effect") in ("NoSchedule", "NoExecute") for t in pick(n.get("spec"), "taints", []))]
+
+
+def _allocatable(m: Model) -> list[int] | None:
+    """Whole allocatable CPUs of each schedulable node; None when nodes can't be read.
+    Allocatable already excludes kube/system-reserved; exclusive CPUs cannot span nodes."""
+    nodes = _schedulable_nodes(m)
+    return None if nodes is None else [
+        whole_cpus(text(pick(pick(n.get("status"), "allocatable", {}), "cpu", "0")), floor=True) for n in nodes]
 
 
 def _replica_shortfall(alloc: list[int] | None, per_pod: int, replicas: int) -> str:
@@ -283,6 +291,11 @@ def _preflight_skipped() -> bool:
     return truthy(os.environ.get("MM_SKIP_PREFLIGHT", ""))
 
 
+def _preflight_warns() -> bool:
+    """MM_PREFLIGHT=warn, or the legacy MM_NRI_PREFLIGHT=warn: report pre-flight failures, don't block."""
+    return "warn" in (os.environ.get("MM_PREFLIGHT"), os.environ.get("MM_NRI_PREFLIGHT"))
+
+
 _MEM_UNITS = {"Ki": 2**10, "Mi": 2**20, "Gi": 2**30, "Ti": 2**40, "Pi": 2**50,
               "k": 10**3, "K": 10**3, "M": 10**6, "G": 10**9, "T": 10**12, "P": 10**15}
 
@@ -386,6 +399,64 @@ def preflight_gate(policy: BestEffort, m: Model, tp: int, cpu: str, running: int
     warn(f"{policy.label} pre-flight: {m.name} cannot place {what}:")
     for e in errors:
         warn(f"  - {e}")
-    if "warn" in (os.environ.get("MM_PREFLIGHT"), os.environ.get("MM_NRI_PREFLIGHT")):
+    if _preflight_warns():
         return warn(f"{policy.name} pre-flight failed but MM_PREFLIGHT=warn — proceeding anyway.")
     abort(policy.failure(placed, tp) if placement else placement_failure(probe))
+
+
+def _numa_node_gib(m: Model) -> tuple[float, int] | None:
+    """The largest NUMA node's memory (GiB) across the nodes m can use, and that node's max TP, from the labels the
+    nri_cpu_balloons role publishes; None (not checked) when the nodes can't be read or any of them lacks the labels,
+    since an unlabeled node may still fit the worker."""
+    best = None
+    for n in _schedulable_nodes(m) or []:
+        labels = pick(n.get("metadata"), "labels", {})
+        count, max_tp = text(pick(labels, "nri.intel.com/numa-nodes")), text(pick(labels, "nri.intel.com/max-tp"))
+        capacity = mem_bytes(text(pick(pick(n.get("status"), "capacity", {}), "memory")))
+        if not (is_uint(count) and int(count) and capacity):
+            return None
+        size = capacity / int(count) / sizer.GIB
+        if best is None or size > best[0]:
+            best = (size, int(max_tp) if is_uint(max_tp) else int(count))
+    return best
+
+
+def _numa_error(m: Model, s: Sizing) -> str:
+    """vLLM binds each TP worker's memory to its NUMA node, so a worker's share must fit in one."""
+    # Weights and load allowances (repack, encoder profiling) split across the workers, each on its NUMA node.
+    per_worker = (s.weights_gib + s.load_gib) / s.tp + s.kv_gib + sizer.OVERHEAD_GIB
+    numa = _numa_node_gib(m)
+    if numa is None or per_worker <= numa[0]:
+        return ""
+    size, max_tp = numa
+    fits = next((t for t in (2, 4, 8) if s.tp < t <= max_tp
+                 and (s.weights_gib + s.load_gib) / t + s.kv_gib + sizer.OVERHEAD_GIB <= size), 0)
+    hint = (f"Deploy with --tp {fits} (or --tensor-parallel-size {fits} in its args): each worker then holds 1/{fits} "
+            "of the weights on its own NUMA node." if fits else
+            "No TP the node supports fits the weights; lower VLLM_CPU_KVCACHE_SPACE or --max-model-len, or use a "
+            "smaller (e.g. quantized) model.")
+    return (f"{m.name} needs {per_worker:.0f} GiB per TP worker at tp={s.tp} (weights {s.weights_gib / s.tp:.1f}"
+            f"{f' + load {s.load_gib / s.tp:.1f}' if s.load_gib else ''} + KV {s.kv_gib} + overhead "
+            f"{sizer.OVERHEAD_GIB} GiB), but a NUMA node has {size:.0f} GiB and vLLM binds "
+            f"each worker's memory to its NUMA node. {hint}")
+
+
+def memory_gate(m: Model, s: Sizing | None) -> None:
+    """Abort before the download when the pod's memory cannot hold the model, or a TP worker's share cannot fit in
+    one NUMA node: either way vLLM would fail at load. Whether a node has the memory free is preflight_gate's check."""
+    if _preflight_skipped() or not s:
+        return
+    have = mem_bytes(m.memory) / sizer.GIB
+    errors = [f"memory {m.memory} is below the {math.ceil(s.needed_gib)}Gi {m.name} needs at tp={s.tp}: weights "
+              f"{s.weights_gib:.1f}{f' + load {s.load_gib:.1f}' if s.load_gib else ''} + KV {s.tp} x {s.kv_gib} + "
+              f"overhead {s.tp} x {sizer.OVERHEAD_GIB} GiB. Raise "
+              "--memory or lower VLLM_CPU_KVCACHE_SPACE."] if have and s.needed_gib > have else []
+    errors += [e for e in (_numa_error(m, s),) if e]
+    if not errors:
+        return
+    for e in errors:
+        warn(f"Memory pre-flight: {e}")
+    if _preflight_warns():
+        return warn("Memory pre-flight failed but MM_PREFLIGHT=warn — proceeding anyway.")
+    abort(f"Memory pre-flight failed for {m.name}. Override with MM_PREFLIGHT=warn (proceed anyway) or "
+          "MM_SKIP_PREFLIGHT=1 (skip check).")

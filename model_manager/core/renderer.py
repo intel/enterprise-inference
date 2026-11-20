@@ -5,6 +5,7 @@ import dataclasses
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,8 @@ from .config import Catalog, Model, gateway_ref, mm_path, pick, text
 from .ui import abort
 
 CHAT_TEMPLATE_DIR = "/etc/chat-template"
+KV_CACHE_ENV = "VLLM_CPU_KVCACHE_SPACE"
+KV_CACHE_GB = "${KV_CACHE_GB}"
 
 
 def render(path: Path, **values: str) -> str:
@@ -68,14 +71,39 @@ def dedupe_args(args: list[str]) -> list[str]:
     return [t for n, (key, tokens) in enumerate(entries) if last[key] == n for t in tokens]
 
 
-def _env(m: Model, catalog: Catalog, cli_args: list[str], cli_env: list[str]) -> str:
+def merged_env(m: Model, cli_args: list[str], cli_env: list[str]) -> dict:
     """Env, lowest to highest: trust-remote-code offline < runtime < category < version < model < --env."""
     merged = {"HF_HUB_OFFLINE": "1"} if trust_remote_code(m, cli_args) else {}
     for layer in (pick(m.rt, "env", {}), pick(m.cat, "env", {}), pick(m.ver, "env", {}), m.env,
                   dict((p.split("=", 1)[0], p.split("=", 1)[-1]) for p in cli_env)):
         merged.update(layer)
-    kv_gb = text(pick(pick(m.cat, "defaults", {}), "kv_cache_gb", 8))
-    items = [f"        - name: {k}\n          value: {quote(text(v).replace('${KV_CACHE_GB}', kv_gb))}"
+    return merged
+
+
+def effective_args(m: Model, cli_args: list[str], cli_env: list[str]) -> list[str]:
+    """The engine args vLLM receives, later ones winning: category, version and model args, --arg/--tp, and on
+    OpenShift the VLLM_ADDITIONAL_ARGS env, which its template appends after them (platform.adapt_llmisvc)."""
+    args = [*engine_args(m), *cli_args]
+    if platform.is_openshift():
+        args += shlex.split(text(merged_env(m, cli_args, cli_env).get("VLLM_ADDITIONAL_ARGS", "")))
+    return args
+
+
+def explicit_kv_cache(m: Model, cli_args: list[str], cli_env: list[str]) -> str:
+    """VLLM_CPU_KVCACHE_SPACE as set by a version, the model or --env; '' when it is the category's ${KV_CACHE_GB}."""
+    value = text(merged_env(m, cli_args, cli_env).get(KV_CACHE_ENV, ""))
+    return "" if KV_CACHE_GB in value else value
+
+
+def category_kv_cache(m: Model) -> str:
+    """The category's kv_cache_gb, which fills its ${KV_CACHE_GB}."""
+    return text(pick(pick(m.cat, "defaults", {}), "kv_cache_gb", 8))
+
+
+def _env(m: Model, catalog: Catalog, cli_args: list[str], cli_env: list[str]) -> str:
+    merged = merged_env(m, cli_args, cli_env)
+    kv_gb = m.kv_cache_gb or category_kv_cache(m)
+    items = [f"        - name: {k}\n          value: {quote(text(v).replace(KV_CACHE_GB, kv_gb))}"
              for k, v in sorted(merged.items())]
     if m.runtime == "openvino":  # OVMS fetches inside the serving pod, so it needs proxy + token there
         items += [f"        - name: {k}\n          value: {quote(v)}" for k, v in proxy_env(catalog)]
@@ -157,7 +185,7 @@ def _engine(m: Model) -> dict:
 
 def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_args: list[str]) -> str:
     """The LLMInferenceService / InferenceService for m. cli_args already carries any --tp injection."""
-    args = engine_args(m)
+    args = engine_args(m) + (["--max-model-len", m.max_model_len] if m.max_model_len else [])
     if m.kind == "LLMInferenceService" and m.container:
         if platform.is_openshift():  # OpenShift AI's template starts vLLM itself (see platform.adapt_llmisvc)
             abort(f"Runtime '{m.runtime}' is not supported on OpenShift: its LLMInferenceService template "
@@ -182,6 +210,8 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
         gateway, gateway_ns = gateway_ref()
         return platform.adapt_llmisvc(render(
             template("llm-inference-service.yaml"), **common, **_engine(m), IMAGE=m.image,
+            SIZING_ANNOTATIONS="".join(["\n  annotations:"] * bool(m.sizing)
+                                       + [f"\n    {k}: {quote(v)}" for k, v in m.sizing.items()]),
             SCALING=_llmisvc_replicas(m),
             GATEWAY_NAME=gateway, GATEWAY_NAMESPACE=gateway_ns,
             CHAT_TEMPLATE_MOUNT=(f"        volumeMounts:\n          - name: chat-template\n"

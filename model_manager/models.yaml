@@ -45,6 +45,10 @@ network:
 # Common fields:
 #   category:        llm | embed | rerank | vlm   (drives default args + cpu/memory)
 #   cpu / memory:    resource requests            (default from category)
+#                    memory: auto — a vLLM llm or vlm model is sized from its
+#                    HuggingFace config.json (weights + load + KV + overhead); see
+#                    docs/reference/memory_sizing.md. A value (memory: 128Gi),
+#                    or the category default, is used as is and checked to fit.
 #                    cpu: auto — NUMA-aware: under nri-balloons, the free
 #                    physical cores of one NUMA node per TP rank on the smallest
 #                    schedulable node (the category cpu under other policies).
@@ -574,11 +578,14 @@ runtimes:
       # default_version and every other model are unchanged.
       "0.28.0":
         image: "docker.io/vllm/vllm-openai-cpu:v0.28.0"
+      # Opt-in only (--server-version 0.33.0); not yet validated with the default category args.
+      "0.33.0":
+        image: "docker.io/vllm/vllm-openai-cpu:v0.33.0"
       # Reference entry — copy, change key + image, tweak deltas. Deltas must suit
       # the model: MoE-only flags (e.g. --enable-expert-parallel) crash dense models.
       "0.19.1":
         image: "docker.io/vllm/vllm-openai-cpu:v0.19.1"
-        env: { VLLM_USE_V1: "1", VLLM_CPU_KVCACHE_SPACE: "12" }
+        env: { VLLM_USE_V1: "1" }
         args: [ --max-num-seqs, "256" ]
 
     # Per-category engine args + env + resource defaults (a model's own values

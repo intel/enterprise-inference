@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -14,10 +15,11 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import __version__, k8s, platform, renderer, routing
-from .config import MM_DIR, Catalog, Model, is_uint, mm_path, pick, resolve, resolve_autoscaling, text, truthy
+from . import __version__, k8s, platform, renderer, routing, sizer
+from .config import (MM_DIR, Catalog, Model, Sizing, hf_config, hf_weight_bytes, hub_unreachable, is_uint, mm_path,
+                     pick, resolve, resolve_autoscaling, text, truthy)
 from .download import download_weights
-from .policy import ANN, mem_bytes, preflight_gate, resolve_auto_cpu, resolve_policy, whole_cpus
+from .policy import ANN, mem_bytes, memory_gate, preflight_gate, resolve_auto_cpu, resolve_policy, whole_cpus
 from .stuck import Watch
 from .ui import BOLD, CYAN, DIM, GREEN, RESET, YELLOW, abort, fmt_duration, info, ok, warn
 
@@ -40,7 +42,8 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
   {GREEN}--server-version{RESET} V   Server version (must be declared for the model if it uses servers:)
   {GREEN}--as{RESET} <name>          Deploy under a distinct name (run multiple server/version variants at once)
   {GREEN}--cpu{RESET} N              CPU cores
-  {GREEN}--memory{RESET} NGi         Memory (e.g. 32Gi)
+  {GREEN}--memory{RESET} NGi         Memory (e.g. 32Gi), or auto: sized from the model (vLLM llm/vlm on CPU
+                            only; the default with --hfid for llm, falling back to the category memory)
   {GREEN}--replicas{RESET} N         Fixed replica count (default: 1); turns autoscaling off
   {GREEN}--min-replicas{RESET} N     Autoscaling (KEDA): fewest replicas (default: 1)
   {GREEN}--max-replicas{RESET} N     Autoscaling: most replicas; above --min-replicas turns it on
@@ -64,7 +67,7 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
 {BOLD}{CYAN}Examples:{RESET}
   ./model-manager deploy llama3-8b-awq --wait
   ./model-manager deploy llama3-8b-awq --server-version 0.19.1 --wait
-  ./model-manager deploy --hfid meta-llama/Llama-3.2-1B-Instruct --cpu 8 --memory 16Gi
+  ./model-manager deploy --hfid meta-llama/Llama-3.2-1B-Instruct --cpu 8   # memory sized from the model
   ./model-manager undeploy llama3-8b-awq
   ./model-manager undeploy llama3-8b-awq --wait        # block until pods terminate + CPUs are freed
   ./model-manager list                                 # catalog + deployed models and their status
@@ -213,6 +216,14 @@ def _engine_cli_args(o: Options) -> tuple[list[str], int]:
     return args, 1
 
 
+def _tensor_parallel(m: Model, cli_args: list[str], cli_env: list[str]) -> int:
+    """TP as vLLM sees it: the last --tensor-parallel-size of its effective args (renderer.effective_args)."""
+    tp = sizer.arg_value(renderer.effective_args(m, cli_args, cli_env), "--tensor-parallel-size") or "1"
+    if not (is_uint(tp) and int(tp) > 0):
+        abort(f"--tensor-parallel-size for {m.name} requires a positive integer, got: {tp}")
+    return int(tp)
+
+
 def _ready_condition(obj: dict) -> dict | None:
     """The condition that says the model serves. MainWorkloadReady, not Ready: for an LLMInferenceService
     Ready also needs the InferencePool Accepted, which model-manager itself patches once this is True.
@@ -333,6 +344,113 @@ def _spawn_reconciler(m: Model, timeout: int) -> tuple[Path, bool]:
     return log, True
 
 
+SIZED_CATEGORIES = ("llm", "vlm")
+
+
+def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], tp: int) -> Sizing | None:
+    """memory: auto sizes memory and VLLM_CPU_KVCACHE_SPACE from the model's HuggingFace metadata and aborts when it
+    cannot. Otherwise the set memory and KV stay, and only their fit is checked (memory_gate) when the weight size
+    is known. --hfid's implicit memory: auto (m.memory_auto_default) falls back to that instead of aborting, with a
+    warning. None when nothing can be checked."""
+    if not (m.vllm_on_cpu and m.category in SIZED_CATEGORIES):
+        if m.memory_auto:
+            abort(f"memory: auto sizes vLLM llm and vlm models on CPU only; set memory for {m.name}.")
+        return None
+    kv = renderer.explicit_kv_cache(m, cli_args, o.env)
+    if kv and not is_uint(kv):
+        abort(f"VLLM_CPU_KVCACHE_SPACE for {m.name} must be a whole number of GiB, got '{kv}'.")
+    proxy, args = catalog.https_proxy, renderer.effective_args(m, cli_args, o.env)
+    if m.memory_auto and kv and m.memory_auto_default:
+        m.memory_auto = False  # a KV setting without --memory keeps the category memory, as for a catalog model
+    if m.memory_auto and kv:
+        abort(f"{m.name} has memory: auto and VLLM_CPU_KVCACHE_SPACE={kv}: memory: auto sizes both. Set memory "
+              "instead, or remove the KV setting.")
+    inputs = _sizing_inputs(m, args, tp)
+    if m.memory_auto and o.memory != "auto" and _keep_live_sizing(m, inputs):
+        return None
+    cfg = hf_config(m.model_id, proxy)
+    if cfg and sizer.topology_error(cfg, tp):
+        abort(f"{m.name}: {sizer.topology_error(cfg, tp)}; vLLM would fail at start-up.")
+    weights = hf_weight_bytes(m.model_id, proxy)
+    draft_weights = hf_weight_bytes(m.draft_model_id, proxy) if m.draft_model_id else 0
+    s = None
+    if m.memory_auto:
+        draft = (hf_config(m.draft_model_id, proxy), draft_weights) if m.draft_model_id else None
+        try:
+            s = sizer.size(cfg, weights, args, tp, draft)
+        except (sizer.Unsupported, ValueError) as e:  # ValueError: a non-integer engine arg such as --max-num-seqs
+            reason = f"Hugging Face is unreachable (proxy: {proxy or 'none'})" if hub_unreachable(proxy) else e
+            if not m.memory_auto_default:
+                abort(f"memory: auto cannot size {m.name}: {reason}. Set HF_TOKEN for a gated repo, or set memory "
+                      "(and VLLM_CPU_KVCACHE_SPACE) for it.")
+            warn(f"Memory: cannot size {m.name}: {reason}; using the {m.category} default {m.memory}. Set --memory "
+                 "to choose it.")
+            m.memory_auto = False
+    if not s:
+        draft_cfg = hf_config(m.draft_model_id, proxy) if m.draft_model_id else None
+        load = (sizer.load_allowance_gib(cfg, weights, args)
+                + sizer.load_allowance_gib(draft_cfg, draft_weights, args))
+        return _static_fit(m, sizer.resident_bytes(cfg, weights, args),
+                           sizer.resident_bytes(draft_cfg, draft_weights, args), int(kv or renderer.category_kv_cache(m)),
+                           tp, load)
+    m.memory, m.kv_cache_gb = f"{s.memory_gi}Gi", str(s.kv_gib)
+    if not sizer.arg_value(args, "--max-model-len"):
+        m.max_model_len = str(s.max_model_len)
+    m.sizing = {SIZING_INPUTS: inputs, **({SIZED_CONTEXT: m.max_model_len} if m.max_model_len else {})}
+    info(f"  Memory: {m.memory} (auto) | needs {s.needed_gib:.1f} GiB = weights {s.weights_gib:.1f}"
+         f"{_load_text(s.load_gib)} + KV {s.tp} x {s.kv_gib} + overhead {s.tp} x {sizer.OVERHEAD_GIB}, x "
+         f"{sizer.HEADROOM} headroom | KV for up to "
+         f"{sizer.CONCURRENCY} x {s.max_model_len} tokens")
+    return s
+
+
+SIZING_INPUTS = "memory-sizing.model-manager.io/inputs"
+SIZED_CONTEXT = "memory-sizing.model-manager.io/max-model-len"
+
+
+def _sizing_inputs(m: Model, args: list[str], tp: int) -> str:
+    """What memory: auto sized from: the model, its draft, the image, TP and the effective engine args."""
+    key = json.dumps([m.model_id, m.draft_model_id, m.image, tp, args], separators=(",", ":"))
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
+def _keep_live_sizing(m: Model, inputs: str) -> bool:
+    """A deployed memory: auto model whose sizing inputs are unchanged keeps the memory, KV and context it was sized
+    with (as cpu: auto keeps its CPU), so a re-deploy does not depend on HuggingFace or change a running model. Any
+    change (TP, args, image, model) re-sizes it, as does --memory auto."""
+    live = k8s.get_json(m.kind, m.name, "-n", m.namespace) if m.kind == "LLMInferenceService" else None
+    annotations = pick(pick(live, "metadata", {}), "annotations", {})
+    main = (pick(pick(pick(live, "spec", {}), "template", {}), "containers", []) or [{}])[0]
+    memory = text(pick(pick(pick(main, "resources", {}), "limits", {}), "memory"))
+    kv = next((text(e.get("value")) for e in pick(main, "env", []) if e.get("name") == renderer.KV_CACHE_ENV), "")
+    if pick(annotations, SIZING_INPUTS) != inputs or not (memory and is_uint(kv)):
+        return False
+    m.memory, m.kv_cache_gb = memory, kv
+    m.max_model_len = text(pick(annotations, SIZED_CONTEXT))
+    m.sizing = {k: text(v) for k, v in annotations.items() if k in (SIZING_INPUTS, SIZED_CONTEXT)}
+    info(f"  Memory: {memory} (auto, as deployed) | KV {kv} GiB per worker; --memory auto re-sizes it")
+    return True
+
+
+def _load_text(load_gib: float) -> str:
+    return f" + load {load_gib:.1f}" if load_gib else ""
+
+
+def _static_fit(m: Model, weight_bytes: int, draft_bytes: int, kv_gib: int, tp: int,
+                load_gib: float = 0.0) -> Sizing | None:
+    """The set memory and KV, for memory_gate to check against the weights and load allowances (the weight size is
+    public even for a gated repo). None when the weight size, or a draft's, is unknown."""
+    if not weight_bytes or (m.draft_model_id and not draft_bytes):
+        return None
+    weights = (weight_bytes + draft_bytes) / sizer.GIB
+    s = Sizing(weights_gib=weights, kv_gib=kv_gib, tp=tp, max_model_len=0,
+               needed_gib=weights + load_gib + tp * (kv_gib + sizer.OVERHEAD_GIB), memory_gi=0, load_gib=load_gib)
+    if s.needed_gib > mem_bytes(m.memory) / sizer.GIB:
+        warn(f"Memory {m.memory} of {m.name} is below the {s.needed_gib:.1f} GiB its weights {weights:.1f}"
+             f"{_load_text(load_gib)} + KV {tp} x {kv_gib} + overhead {tp} x {sizer.OVERHEAD_GIB} need.")
+    return s
+
+
 def _require_autoscaling(m: Model) -> None:
     """KEDA installed, and a KServe whose LLMInferenceService has KEDA scaling (checked before the download)."""
     if not k8s.succeeds("get", "crd", "scaledobjects.keda.sh"):
@@ -369,9 +487,12 @@ def deploy(o: Options, target: str) -> None:
     m = resolve(catalog, target, o)
     resolve_autoscaling(m, o)
     m.check()
+    cli_args, _ = _engine_cli_args(o)
+    tp = _tensor_parallel(m, cli_args, o.env)
     info(f"Deploying {m.name} ({m.kind})")
     info(f"  Runtime: {m.runtime}{f' @ {m.version}' if m.version else ''} | Category: {m.category} | "
          f"Routing: {m.routing or 'default'}")
+    sizing = _apply_sizing(m, catalog, o, cli_args, tp)
     replicas = (f"{m.min_replicas}-{m.max_replicas} (autoscaled, target {m.scale_target} per replica)"
                 if m.autoscaled else m.replicas)
     info(f"  CPU: {m.cpu} | Memory: {m.memory} | Replicas: {replicas}")
@@ -379,7 +500,6 @@ def deploy(o: Options, target: str) -> None:
         info(f"  Node: {m.node}")
     policy = resolve_policy(o.cpu_policy, m.node)
     info(f"  CPU policy: {policy.name}")
-    cli_args, tp = _engine_cli_args(o)
     resolve_auto_cpu(policy, m, tp)
     policy.prepare(m)
     annotations, cpu = policy.annotations(m, tp)
@@ -428,6 +548,7 @@ def deploy(o: Options, target: str) -> None:
                 info(f"  The previous InferenceService/{m.name} is removed before the new pods start: its {running} "
                      "running pods' CPUs and memory are counted as free.")
         preflight_gate(policy, m, tp, cpu, running=running, amx=catalog.require_amx)
+        memory_gate(m, sizing)
         k8s.ensure_storage(m.namespace, catalog.pvc)
         download_weights(m, catalog, cli_args)
         if m.kind == "InferenceService":

@@ -99,24 +99,23 @@
         - auth_type | default('jwt') == 'litellm_vkey'
         - (ai_gateway_provider | default('envoy')) == 'envoy'
 
-    # Enumerate the catalog model names (jq over the YAML->JSON, the same shape
-    # the CLI itself uses). Select only models opted in with `autodeploy: true`
-    # so a full install does not accidentally serve the entire catalog (which
-    # can include large models like an 8B). Models without the flag are left for
-    # the operator to deploy manually with `./model-manager deploy <name>`.
-    # With _mm_only_models, exactly the requested catalog models.
+    # Select only models opted in with `autodeploy: true` so a full install does not
+    # accidentally serve the entire catalog (which can include large models like an
+    # 8B). Models without the flag are left for the operator to deploy manually with
+    # `./model-manager deploy <name>`. With _mm_only_models, exactly the requested
+    # catalog models, in catalog order.
+    - name: Read the catalog
+      ansible.builtin.slurp:
+        src: "{{ _mm_catalog }}"
+      register: _mm_catalog_file
+
     - name: Enumerate autodeploy models from the catalog
-      shell: |
-        set -o pipefail
-        {% if _mm_only_models is defined %}
-        yq -o=json '.' "{{ _mm_catalog }}" | jq -r --argjson only '{{ _mm_only_models | to_json }}' '.models[] | select(.name as $n | $only | index($n)) | .name'
-        {% else %}
-        yq -o=json '.' "{{ _mm_catalog }}" | jq -r '.models[] | select(.autodeploy == true) | .name'
-        {% endif %}
-      args:
-        executable: /bin/bash
-      register: _mm_model_names
-      changed_when: false
+      ansible.builtin.set_fact:
+        _mm_model_names: >-
+          {%- set models = (_mm_catalog_file.content | b64decode | from_yaml).models | default([]) -%}
+          {{ (models | selectattr('name', 'in', _mm_only_models) if _mm_only_models is defined
+              else models | selectattr('autodeploy', 'defined') | selectattr('autodeploy', 'equalto', true))
+             | map(attribute='name') | list }}
 
     # An environment's models.yaml is seeded once, at init, so it lacks models
     # added to the shipped catalog later. A requested one is taken from there into
@@ -130,7 +129,7 @@
       args:
         executable: /bin/bash
       vars:
-        _mm_env_missing: "{{ _mm_only_models | default([]) | difference(_mm_model_names.stdout_lines) }}"
+        _mm_env_missing: "{{ _mm_only_models | default([]) | difference(_mm_model_names) }}"
       register: _mm_shipped_names
       changed_when: false
       when:
@@ -172,7 +171,7 @@
 
     - name: Resolve the models to deploy and their catalog
       set_fact:
-        _mm_deploy: "{{ _mm_model_names.stdout_lines + (_mm_shipped_names.stdout_lines | default([])) }}"
+        _mm_deploy: "{{ _mm_model_names + (_mm_shipped_names.stdout_lines | default([])) }}"
         _mm_deploy_catalog: >-
           {{ _mm_merged_catalog.path
              if _mm_shipped_names.stdout_lines | default([]) | length > 0 else _mm_catalog }}

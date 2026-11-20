@@ -55,6 +55,10 @@ HELP_SVC_NS = (r"^(  MM_INFERENCE_HOSTNAME .*\n)",
                r"                        Gateway and run with the namespace's SCC UIDs.\n"
                r"  MM_INFERENCE_GATEWAY_SVC_NS\n                        Namespace of the AI Gateway Service LiteLLM calls\n"
                r"                        (default: MM_INFERENCE_GATEWAY_NS, else envoy-gateway-system)\n")
+# The 0.19.1 version no longer pins VLLM_CPU_KVCACHE_SPACE over the category value.
+V0191_KV = (r'(- name: VLLM_CPU_KVCACHE_SPACE\n +value: )"12"', r'\1"8"')
+# vLLM 0.33.0 is a new runtime version.
+V0330 = (r"(Available: .*0\.28\.0)$", r"\1, 0.33.0")
 # --help documents the list command, which is new.
 HELP_LIST = [
     (r"^(  undeploy <model>\|<name>\|all .*\n)",
@@ -135,6 +139,15 @@ HELP_HFID = [
     (r"\(with --id\)$", "(with --hfid)"),
     (r"deploy --id meta-llama", "deploy --hfid meta-llama"),
 ]
+# --hfid sizes memory from the model by default (memory: auto), falling back to the category memory.
+HELP_MEMORY = [
+    (r"^(  --memory NGi         Memory \(e\.g\. 32Gi\))$",
+     r"\1, or auto: sized from the model (vLLM llm/vlm on CPU\n"
+     "                            only; the default with --hfid for llm, falling back to the category memory)"),
+    (r"(deploy --hfid meta-llama/Llama-3\.2-1B-Instruct --cpu 8) --memory 16Gi$", r"\1   # memory sized from the model"),
+]
+HFID_UNSIZED = (r"^--- stderr\n", "--- stderr\n[WARN ]  Memory: cannot size some-model-v2: no safetensors size on "
+                "HuggingFace; using the llm default 16Gi. Set --memory to choose it.\n")
 
 
 def nri_node(in_use: int) -> list:
@@ -203,9 +216,9 @@ CASES = [
          env={**BE, "FAKE_HF_JSON": '{"pipeline_tag": "feature-extraction"}'}),
     case("id-named", "deploy", "--hfid", "meta-llama/Llama-3.2-1B-Instruct", "--name", "l1", "--cpu", "4",
          "--memory", "8Gi", "--server-version", "0.19.1", "--dry-run",
-         env={**BE, "FAKE_HF_JSON": '{"pipeline_tag": "text-generation"}'}),
-    case("id-hf-unreachable", "deploy", "--hfid", "Org/Some_Model.v2", "--dry-run", env=BE),
-    case("alias", "deploy", "qwen3-0-6b", "--as", "qwen-alt", "--server-version", "0.19.1", "--dry-run", env=BE),
+         env={**BE, "FAKE_HF_JSON": '{"pipeline_tag": "text-generation"}'}, deviations=[V0191_KV]),
+    case("id-hf-unreachable", "deploy", "--hfid", "Org/Some_Model.v2", "--dry-run", env=BE, deviations=[HFID_UNSIZED]),
+    case("alias", "deploy", "qwen3-0-6b", "--as", "qwen-alt", "--server-version", "0.19.1", "--dry-run", env=BE, deviations=[V0191_KV]),
     case("options-before-command", "--dry-run", "--cpu", "4", "deploy", "qwen3-0-6b", env=BE),
     # Legacy reached the fallback by crashing nri_policy.py on int("4.5"); the box and manifest are kept.
     case("nri-non-integer-cpu", "deploy", "qwen3-0-6b", "--cpu", "4.5", "--dry-run", env=NRI, deviations=[
@@ -239,9 +252,9 @@ CASES = [
     case("fx-bad-env", "deploy", "badenv", "--dry-run", env=BE, catalog=FIXTURE),
     case("fx-bad-template", "deploy", "badtpl", "--dry-run", env=BE, catalog=FIXTURE),
     # CLI surface and validation errors.
-    case("no-args", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_SCALING]),
-    case("help", "--help", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_SCALING]),
-    case("help-command", "help", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_SCALING]),
+    case("no-args", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_MEMORY, *HELP_SCALING]),
+    case("help", "--help", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_MEMORY, *HELP_SCALING]),
+    case("help-command", "help", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_MEMORY, *HELP_SCALING]),
     case("version", "version"),
     case("version-flag", "-v"),
     case("unknown-option", "deploy", "qwen3-0-6b", "--bogus"),
@@ -254,7 +267,8 @@ CASES = [
     case("not-in-catalog", "deploy", "nope", env=BE),
     case("server-not-declared", "deploy", "qwen3-0-6b", "--server", "openvino", env=BE),
     case("version-not-declared", "deploy", "qwen3-0-6b", "--server-version", "9.9", env=BE),
-    case("runtime-version-missing", "deploy", "llama3-8b-awq", "--server-version", "9.9", env=BE),
+    case("runtime-version-missing", "deploy", "llama3-8b-awq", "--server-version", "9.9", env=BE,
+         deviations=[V0330]),
     case("flat-runtime-version", "deploy", "qwen3-5-2b-ovms", "--server-version", "1", env=BE),
     case("invalid-cli-policy", "deploy", "qwen3-0-6b", "--cpu-policy", "bogus", "--dry-run"),
     # Side effects (fake cluster).

@@ -81,16 +81,50 @@ def load_yaml(path: Path) -> Any:
         abort(f"Cannot read {path}: {e}")
 
 
-def hf_model_info(model_id: str, proxy: str) -> dict:
-    """HuggingFace model metadata, or {} when the Hub is unreachable."""
-    cmd = ["curl", "-sf", "--max-time", "10", *(["--proxy", proxy] if proxy else []),
-           f"https://huggingface.co/api/models/{model_id}"]
-    r = subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
+_HUB_UNREACHABLE = set()  # proxies whose Hub connection failed: later calls through them fail at once
+_CONNECT_ERRORS = (5, 6, 7, 28, 35)  # curl: proxy or host unresolved, connect refused, timeout, TLS
+
+
+@cache
+def _hf_json(url: str, proxy: str) -> dict:
+    """A HuggingFace JSON document, or {} when unreachable. HF_TOKEN goes in on stdin, never in argv."""
+    if proxy in _HUB_UNREACHABLE:
+        return {}
+    token = os.environ.get("HF_TOKEN", "")
+    cmd = ["curl", "-sfL", "--max-time", "10", *(["--proxy", proxy] if proxy else []),
+           *(["--config", "-"] if token else []), url]
+    r = subprocess.run(cmd, input=f'header = "Authorization: Bearer {token}"\n' if token else None,  # nosec B603: argv list, no shell
+                       capture_output=True, text=True, check=False)
+    if r.returncode in _CONNECT_ERRORS:
+        _HUB_UNREACHABLE.add(proxy)
     try:
-        data = json.loads(r.stdout) if r.returncode == 0 else {}
+        data = json.loads(r.stdout) if r.returncode == 0 and r.stdout else {}
     except ValueError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def hub_unreachable(proxy: str) -> bool:
+    return proxy in _HUB_UNREACHABLE
+
+
+def hf_model_info(model_id: str, proxy: str) -> dict:
+    """HuggingFace model metadata with every file's size, or {} when the Hub is unreachable."""
+    return _hf_json(f"https://huggingface.co/api/models/{model_id}?blobs=true", proxy)
+
+
+def hf_config(model_id: str, proxy: str) -> dict | None:
+    """The repo's config.json; None when unreadable (unreachable, or gated without HF_TOKEN)."""
+    return _hf_json(f"https://huggingface.co/{model_id}/resolve/main/config.json", proxy) or None
+
+
+def hf_weight_bytes(model_id: str, proxy: str) -> int:
+    """Bytes of the repo-root safetensors the server loads (subfolders such as original/ or onnx/ hold other formats;
+    consolidated.* is Mistral's duplicate); 0 if unknown. Public even for a gated repo."""
+    names = ((text(pick(f, "rfilename")), f) for f in pick(hf_model_info(model_id, proxy), "siblings", [])
+             if isinstance(f, dict))
+    return sum(int(pick(f, "size", 0)) for name, f in names
+               if name.endswith(".safetensors") and "/" not in name and not name.startswith("consolidated"))
 
 
 class Catalog:
@@ -145,6 +179,18 @@ def _merge(base: dict, overlay: dict) -> dict:
 
 
 @dataclass
+class Sizing:
+    """Memory of one pod for a vLLM model (core/sizer.py)."""
+    weights_gib: float
+    kv_gib: int                               # VLLM_CPU_KVCACHE_SPACE, per TP worker
+    tp: int
+    max_model_len: int
+    needed_gib: float                         # weights + load + tp x (kv + overhead)
+    memory_gi: int                            # needed_gib with headroom: the request and limit
+    load_gib: float = 0.0                     # load-time allowances: quantized repack, multimodal encoders
+
+
+@dataclass
 class Model:
     name: str
     namespace: str
@@ -161,6 +207,11 @@ class Model:
     routing: str = ""
     cpu: str = ""
     memory: str = ""
+    memory_auto: bool = False                 # memory: auto: sized from the model (core/sizer.py)
+    memory_auto_default: bool = False         # memory_auto as --hfid's default: falls back to `memory` if unsizable
+    kv_cache_gb: str = ""                     # sized VLLM_CPU_KVCACHE_SPACE
+    max_model_len: str = ""                   # sized --max-model-len
+    sizing: dict = field(default_factory=dict)  # memory: auto's inputs + sized context, kept as CR annotations
     replicas: str = "1"
     min_replicas: str = ""
     max_replicas: str = ""
@@ -181,6 +232,11 @@ class Model:
     def container(self) -> dict:
         """The runtime's own serving container (command, args, probes, user); {} means KServe's vLLM command."""
         return pick(self.rt, "container", {})
+
+    @property
+    def vllm_on_cpu(self) -> bool:
+        """KServe's vLLM command (no runtime container) on a CPU device: what VLLM_CPU_KVCACHE_SPACE sizing models."""
+        return not self.container and text(pick(self.rt, "device", "cpu")) == "cpu"
 
     @property
     def run_as_user(self) -> str:
@@ -233,7 +289,13 @@ def resolve(catalog: Catalog, target: str, o: Any) -> Model:
 
     defaults = pick(m.cat, "defaults", {})
     m.cpu = o.cpu or m.cpu or text(pick(defaults, "cpu", 8))
-    m.memory = o.memory or m.memory or text(pick(defaults, "memory", "16Gi"))
+    m.memory_auto = (o.memory or m.memory) == "auto"
+    m.memory = "" if m.memory_auto else o.memory or m.memory
+    # --hfid has no catalog memory to keep, so it is sized when it can be; the category default stays the fallback.
+    m.memory_auto_default = bool(o.id and not m.memory and not m.memory_auto and m.vllm_on_cpu
+                                 and m.category == "llm")
+    m.memory_auto = m.memory_auto or m.memory_auto_default
+    m.memory = m.memory or text(pick(defaults, "memory", "16Gi"))
     m.replicas = o.replicas or m.replicas
     m.node = o.node or m.node
     if o.routing:
