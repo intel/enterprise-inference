@@ -200,8 +200,25 @@
       data:
         models.json: >-
           {%- set out = [] -%}
-          {%- for m in (lookup('ansible.builtin.file', _llm_catalog_file) | from_yaml).models | default([]) -%}
-          {%- set _ = out.append(m | dict2items | selectattr('key', 'in', _llm_catalog_fields) | items2dict) -%}
+          {%- set cat = lookup('ansible.builtin.file', _llm_catalog_file) | from_yaml -%}
+          {%- for m in cat.models | default([]) -%}
+          {%- set entry = m | dict2items | selectattr('key', 'in', _llm_catalog_fields) | items2dict -%}
+          {#- A GPU runtime (device: gpu in its values.yaml) exports what Headlamp needs to offer the model only
+              where the cluster advertises the resource: device, gpus (model, else the runtime's category default)
+              and accelerator_resource. -#}
+          {%- if m.servers | default({}) | length > 0 -%}
+          {%- set rt = m.default_server | default(m.servers | list | sort | first, true) -%}
+          {%- else -%}
+          {%- set rt = m.runtime | default((cat.defaults | default({})).runtime | default('vllm', true), true) -%}
+          {%- endif -%}
+          {%- set overlay = (cat.runtimes | default({}))[rt] | default({}, true) -%}
+          {%- set vals = (lookup('ansible.builtin.file', inference_extension_dir ~ '/model_manager/runtimes/' ~ rt ~ '/values.yaml', errors='ignore') | default('', true) | from_yaml | default({}, true)) | combine(overlay, recursive=True) -%}
+          {%- if (vals.device | default('')) == 'gpu' -%}
+          {%- set defaults = ((vals.categories | default({}))[m.category | default('llm')] | default({})).defaults | default({}) -%}
+          {%- set _ = entry.update({'device': 'gpu', 'accelerator_resource': vals.accelerator_resource | default(''),
+                                    'gpus': (m.gpus | default(defaults.gpus | default(1))) | string}) -%}
+          {%- endif -%}
+          {%- set _ = out.append(entry) -%}
           {%- endfor -%}
           {{ out | to_json }}
         access.json: >-

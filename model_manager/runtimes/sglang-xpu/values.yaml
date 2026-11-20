@@ -1,0 +1,39 @@
+# =============================================================================
+# SGLang runtime — low-level plumbing (Intel Arc Pro B-Series XPU)
+# =============================================================================
+# GPU counterpart of runtimes/vllm-cuda for Intel GPUs. Deploy config users tune
+# (env, per-category args and resource defaults) lives in models.yaml →
+# runtimes.sglang (models.yaml wins on any key clash). SGLang is a flat runtime —
+# no version axis — so `image:` is the single image every model runs.
+#
+# Plumbing keys beyond vllm-cuda's (see runtimes/vllm-cuda/values.yaml):
+#   container       SGLang's own entrypoint, args, probe paths and startup budget (KServe's default
+#                   command starts vLLM). The weights are the model PVC mounted at
+#                   /mnt/models, as for every LLMInferenceService.
+#   device_groups   Supplemental GIDs of the host's render and video groups, so the
+#                   non-root container can open /dev/dri/renderD*. These GIDs are
+#                   distro-specific (render has no fixed GID): set the ones of your GPU
+#                   nodes in models.yaml → runtimes.sglang.device_groups.
+# The Intel GPU device plugin must be installed so nodes advertise
+# gpu.intel.com/xe (Intel Enterprise AI Solutions sets MM_ACCEL_RESOURCE to it).
+# =============================================================================
+
+image: "lmsysorg/sglang:v0.5.22-xpu"   # Intel Arc Pro B-Series (BMG) build of SGLang
+device: gpu
+kind: LLMInferenceService
+routing: epp
+accelerator_resource: gpu.intel.com/xe
+shm_size: 16Gi                          # tensor-parallel workers exchange data through /dev/shm
+device_groups: [44, 990]
+wait_timeout: 3600     # default --wait-timeout: matches the startup probe's one-hour budget (first start compiles XPU kernels)
+container:
+  command: ["sglang", "serve"]
+  args: ["--model-path", "/mnt/models", "--served-model-name", "$model", "--host", "0.0.0.0", "--port", "8000"]
+  ready_path: /health
+  live_path: /health
+  run_as_user: 1000
+  # SGLang's /health round-trips through the scheduler (~1s on XPU), so the startup probe needs a
+  # timeout above the 1s default; 180 x 20s allows an hour for the first weight load.
+  startup_failures: 180
+  startup_period: 20
+  startup_timeout: 10

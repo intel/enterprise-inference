@@ -49,7 +49,7 @@ Detail → [CPU Pinning & NUMA](reference/cpu_pinning.md).
 | Install stops at "does not allowlist the guard host" | The install upgrades a LiteLLM release whose config lacks the guard host, so the upgrade did not reach the release the guardrail is registered with: check the Helm upgrade in the install log, and that `guardrail_litellm_namespace` is `litellm_namespace` — see [Guardrails](customize/guardrails.md#outbound-url-allowlist). |
 | Install stops, or warns, that a model is "not found in the model catalog" | The name (the guard model `guardrail_model`, or one in `llm_services_autodeploy_models`) is neither in `env/<env>/models.yaml` nor in `model_manager/models.yaml`. Add an entry for it, or fix the name. A requested model only the shipped catalog has is deployed from it, with a "NOTICE: … not in …" line. |
 | An auto-deployed model failed but the install reported success | By design — the serving infrastructure is up and the failure is in the summary. Set `model_deploy_strict: true` to make it fatal. |
-| `--server-version` rejected for an OpenVINO model | OpenVINO is a flat runtime with no version axis. Only vLLM is versioned. |
+| `--server-version` rejected for an OpenVINO or SGLang model | Both are flat runtimes with no version axis. Only vLLM is versioned. |
 | `--server-version` rejected for a vLLM model | The catalog's `servers:` block is an allow-list. Add the version there first — see [Model Catalog](customize/catalog.md#choose-which-server-and-version-a-model-may-use). |
 
 ## Getting more detail

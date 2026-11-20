@@ -2,12 +2,14 @@
 
 ## What is it?
 
-A **runtime** is the engine that actually serves a model. Two are supported:
+A **runtime** is the engine that actually serves a model. The CPU engines are vLLM and OpenVINO; GPU engines
+(`vllm-cuda`, `sglang-xpu`) are described below:
 
 | Runtime | Use case | Key optimizations |
 |---------|----------|-------------------|
 | **vLLM** | LLMs, VLMs | NUMA auto-bind, AMX kernels, prefix caching, chunked prefill |
 | **OpenVINO (OVMS)** | Embedding, reranking, INT4/INT8 LLMs | OpenVINO IR, MediaPipe graph |
+| **SGLang (`sglang-xpu`)** | LLMs on Intel Arc Pro B-Series GPUs | Tensor parallelism across GPUs, XPU attention backend |
 
 Each engine is configured **once**, in the `runtimes:` section at the bottom of
 `models.yaml`. That is where you define the available versions and their container
@@ -103,9 +105,65 @@ shm_size: 10Gi                              # /dev/shm for NCCL tensor paralleli
 ```
 
 A runtime for another accelerator uses the same keys with that accelerator's image and
-resource, for example `gpu.intel.com/xe` from the Intel GPU device plugin. See
+resource, for example `sglang-xpu` below with `gpu.intel.com/xe` from the Intel GPU device plugin. See
 [Deploy on GPU nodes](../deploy/deploy_models.md#deploy-on-gpu-nodes) for the GPU
 pre-flight and what changes in the rendered manifest.
+
+### SGLang on Intel Arc Pro B-Series (`sglang-xpu`)
+
+A GPU runtime like `vllm-cuda`, for Intel Arc Pro B-Series (Battlemage) cards. It is flat
+(no version axis: `image:` is the one image every model runs) and is an
+`LLMInferenceService`, so it gets the gateway route, the `Ready` condition that `--wait`
+and Headlamp read, and the same GPU pre-flight as `vllm-cuda`. Config lives under
+`runtimes.sglang-xpu`; the plumbing in `model_manager/runtimes/sglang-xpu/values.yaml`:
+
+```yaml
+image: "lmsysorg/sglang:v0.5.22-xpu"
+device: gpu
+kind: LLMInferenceService
+routing: epp
+accelerator_resource: gpu.intel.com/xe   # extended resource the Intel GPU device plugin advertises
+shm_size: 16Gi                           # /dev/shm for tensor-parallel workers
+device_groups: [44, 990]                 # GIDs of the GPU nodes' render and video groups
+container:                               # SGLang's own entrypoint, args and probes
+  command: ["sglang", "serve"]
+  args: ["--model-path", "/mnt/models", "--served-model-name", "$model", "--host", "0.0.0.0", "--port", "8000"]
+  run_as_user: 1000
+  startup_failures: 180                  # 180 x 20s: room for the first weight load
+  startup_period: 20
+  startup_timeout: 10                    # SGLang's /health takes ~1s on XPU
+```
+
+A model sets `gpus` (per pod; also the default `--tensor-parallel-size`), like any GPU
+runtime, and needs no `--tp-size` arg:
+
+```yaml
+- name: sglang-xpu-qwen3-32b
+  model_id: Qwen/Qwen3-32B
+  runtime: sglang-xpu
+  gpus: 4
+```
+
+Things specific to this runtime:
+
+- **Non-root.** The pod runs as `runAsNonRoot` (uid 1000) with `supplementalGroups` from
+  `device_groups`, so it can open `/dev/dri/renderD*` under the restricted Pod Security
+  level. The `render` group has no fixed GID: set the GIDs of your GPU nodes in
+  `runtimes.sglang-xpu.device_groups` in `models.yaml` (`getent group render video` on the node).
+- **No driver install.** The `xe` kernel driver ships with the Linux kernel, and the
+  userspace stack (compute runtime, oneCCL) is in the image. A node needs a kernel and
+  firmware recent enough for the card, and the
+  [Intel GPU device plugin](https://github.com/intel/intel-device-plugins-for-kubernetes) so it
+  advertises `gpu.intel.com/xe` (installed and detected through NFD by
+  [enterprise-ai-solutions#134](https://github.com/intel/enterprise-ai-solutions/pull/134)).
+- **Where it deploys.** There is no cluster-wide setting: the pod requests `gpu.intel.com/xe`,
+  and the GPU pre-flight refuses the deploy when no Ready node advertises it. This works on
+  mixed NVIDIA and Intel clusters.
+- **Remote code is per model.** The category args do not set `--trust-remote-code`; add it
+  to a model's `args` only where the model needs it.
+- **Tensor parallelism** (`gpus` > 1) needs oneCCL's `pidfd_getfd`, which the default seccomp
+  profile (`RuntimeDefault`) may block on Arc Pro B70; single-GPU models such as
+  `sglang-xpu-qwen3-8b` are not affected.
 
 ## OpenVINO (OVMS)
 
