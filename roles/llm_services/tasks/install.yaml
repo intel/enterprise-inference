@@ -40,6 +40,57 @@
 
 # -- Model storage PVC --
 
+# An existing PVC keeps its size unless its StorageClass can expand it: requests never shrink,
+# and growing one that cannot expand is rejected by the API server.
+- name: "llm_services | Read the model-store PVC"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: PersistentVolumeClaim
+    name: "{{ llm_services_model_store_pvc }}"
+    namespace: "{{ llm_services_namespace }}"
+  register: _llm_store_pvc
+
+- name: "llm_services | Read the model-store StorageClass"
+  kubernetes.core.k8s_info:
+    api_version: storage.k8s.io/v1
+    kind: StorageClass
+    name: "{{ _llm_store_pvc.resources[0].spec.storageClassName }}"
+  register: _llm_store_sc
+  when:
+    - _llm_store_pvc.resources | length > 0
+    - _llm_store_pvc.resources[0].spec.storageClassName | default('', true) | length > 0
+
+- name: "llm_services | Model-store size is a Kubernetes quantity"
+  ansible.builtin.assert:
+    that: llm_services_model_store_size | string | trim is match(_llm_qty_re)
+    fail_msg: >-
+      llm_services_model_store_size '{{ llm_services_model_store_size }}' is not a storage size;
+      use e.g. 200Gi or 500G.
+    quiet: true
+
+- name: "llm_services | Model-store size"
+  vars:
+    _units: {"": 1, "k": 1000, "M": 1000000, "G": 1000000000, "T": 1000000000000, "P": 1000000000000000,
+             "E": 1000000000000000000, "Ki": 1024, "Mi": 1048576, "Gi": 1073741824, "Ti": 1099511627776,
+             "Pi": 1125899906842624, "Ei": 1152921504606846976}
+    _want: "{{ llm_services_model_store_size | string | trim }}"
+    _cur: "{{ ((_llm_store_pvc.resources | first | default({})).spec | default({})).resources.requests.storage | default('') }}"
+    _want_b: "{{ (_want | regex_replace(_llm_qty_re, '\\1') | float) * _units[_want | regex_replace(_llm_qty_re, '\\2')] }}"
+    _cur_b: >-
+      {{ (_cur | regex_replace(_llm_qty_re, '\1') | float) * _units[_cur | regex_replace(_llm_qty_re, '\2')]
+         if _cur is match(_llm_qty_re) else 0 }}
+    _expandable: "{{ (_llm_store_sc.resources | default([]) | first | default({})).allowVolumeExpansion | default(false) | bool }}"
+  ansible.builtin.set_fact:
+    _llm_store_size: "{{ _want if not _cur or (_want_b | float > _cur_b | float and _expandable | bool) else _cur }}"
+    _llm_store_kept: "{{ _cur | length > 0 and _want_b | float > _cur_b | float and not _expandable | bool }}"
+
+- name: "llm_services | Model-store size kept"
+  ansible.builtin.debug:
+    msg: >-
+      model-store stays at {{ _llm_store_size }}: its StorageClass cannot expand volumes, so
+      llm_services_model_store_size {{ llm_services_model_store_size }} applies to a new PVC only.
+  when: _llm_store_kept | bool
+
 - name: "llm_services | Create model-store PVC"
   kubernetes.core.k8s:
     state: present
@@ -59,7 +110,7 @@
         - "{{ llm_services_model_store_access_mode }}"
       resources:
         requests:
-          storage: "{{ llm_services_model_store_size }}"
+          storage: "{{ _llm_store_size }}"
     # An empty storage class must render as *no* storageClassName key, so the PVC
     # binds to the cluster default StorageClass. storageClassName: "" means the
     # opposite - dynamic provisioning disabled - and the PVC stays Pending.

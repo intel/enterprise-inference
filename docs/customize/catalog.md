@@ -58,6 +58,30 @@ Applied to every model that doesn't override them.
 |---|---|---|
 | `pvc_name` | `model-store` | The shared PVC holding downloaded weights. Must be **ReadWriteMany** on a multi-node cluster |
 
+#### Model-store size
+
+Every deployed model's weights share this PVC, so size it for the models you run together.
+It is `200Gi` by default; set `llm_services_model_store_size` in `config.inference.yaml`
+and re-run `install inference`.
+
+| Model | Weights on the PVC |
+|---|---|
+| Llama-3.1-8B-Instruct | 16 GB |
+| Qwen2.5-Coder-14B-Instruct | 30 GB |
+| gemma-4-26B-A4B-it | 52 GB |
+| Qwen3-30B-A3B / Qwen3-Coder-30B-A3B | 61 GB |
+| DeepSeek-R1-Distill-Qwen-32B | 66 GB |
+| Qwen3.6-35B-A3B | 72 GB |
+| Llama-3.1-70B-Instruct | 141 GB |
+
+- Downloads skip a repository's `original/` folder (the publisher's own copy of the weights,
+  which vLLM does not load). For Meta's Llama models that halves the download.
+- Before a download, the Job checks the free space on the model store and fails at once,
+  naming the model, the space it needs and what is free, when it does not fit.
+- An existing PVC keeps its size unless its StorageClass allows volume expansion
+  (`allowVolumeExpansion: true`); a size is never reduced. Otherwise the install prints that
+  the new size applies to a new PVC only.
+
 ### `network`
 
 Used by the download Job when pulling from Hugging Face. Empty values inherit from the

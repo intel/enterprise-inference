@@ -8,19 +8,35 @@ import time
 
 from . import k8s
 from .stuck import Watch
-from .config import Catalog, Model, hf_model_info, pick, text
+from .config import HF_EXCLUDE, Catalog, Model, hf_download_bytes, hf_model_info, pick, text
 from .renderer import proxy_env, quote, render, template, trust_remote_code
 from .ui import YELLOW, RESET, abort, info, ok
 
 TIMEOUT = 7200
 
-# Sentinel-guarded so re-deploys skip work already on the PVC.
+# Sentinel-guarded so re-deploys skip work already on the PVC; the space check runs before the draft fetch.
 VLLM_PREP = """set -e
-export HOME=/tmp HF_HOME=/tmp/.hf XDG_CACHE_HOME=/tmp/.cache PIP_CACHE_DIR=/tmp/.pip@DRAFT@
+export HOME=/tmp HF_HOME=/tmp/.hf XDG_CACHE_HOME=/tmp/.cache PIP_CACHE_DIR=/tmp/.pip@SPACE@@DRAFT@
 if [ -f @DIR@/.download_complete ]; then echo 'Weights already present, skipping download'; exit 0; fi
 command -v hf >/dev/null 2>&1 || pip install -q huggingface_hub[hf_xet]
-hf download '@ID@' --local-dir @DIR@@TRC@
+hf download '@ID@' --local-dir @DIR@ --exclude '@EXCLUDE@'@TRC@
 touch @DIR@/.download_complete"""
+
+# Only when something will download; the excluded copy (from an older full download) is not counted as reusable.
+SPACE_CHECK = """
+if [ ! -f @DIR@/.download_complete ]@DRAFT_PENDING@; then
+  need_kb=@NEED_KB@
+  have_kb=$(du -sk --exclude=original @DIR@ 2>/dev/null | cut -f1); have_kb=${have_kb:-0}
+  free_kb=$(df -Pk /models | tail -1 | { read -r _ _ _ f _; echo "$f"; })
+  if [ $((need_kb - have_kb)) -gt "$free_kb" ]; then
+    echo "ERROR: @NAME@ needs $((need_kb / 1048576)) GiB, the model store has $((free_kb / 1048576)) GiB free. Largest on it:"
+    du -sk /models/* 2>/dev/null | sort -rn | head -5 | while read -r kb d; do echo "  $((kb / 1048576)) GiB  $d"; done
+    echo "Delete an unused model's weights there (undeploy keeps them), or raise llm_services_model_store_size:"
+    echo "an existing PVC grows only where its StorageClass allows volume expansion."
+    exit 1
+  fi
+fi"""
+DRAFT_PENDING = " || [ ! -f @DIR@/draft/.download_complete ]"
 
 # The serving pod mounts only the model's directory and runs offline, so a speculative-decoding draft
 # (draft_model_id) is fetched into <name>/draft, served as /mnt/models/draft. It has its own sentinel,
@@ -28,7 +44,7 @@ touch @DIR@/.download_complete"""
 DRAFT_FETCH = """
 if [ ! -f @DIR@/draft/.download_complete ]; then
   command -v hf >/dev/null 2>&1 || pip install -q huggingface_hub[hf_xet]
-  hf download '@DRAFT_ID@' --local-dir @DIR@/draft
+  hf download '@DRAFT_ID@' --local-dir @DIR@/draft --exclude '@EXCLUDE@'
   touch @DIR@/draft/.download_complete
 fi"""
 
@@ -67,15 +83,18 @@ def _curl_ok(url: str, proxy: str) -> bool:
     return subprocess.run(cmd, capture_output=True, check=False).returncode == 0  # nosec B603
 
 
-def _script(m: Model, cli_args: list[str]) -> str:
+def _script(m: Model, cli_args: list[str], need_bytes: int = 0) -> str:
     if m.runtime == "openvino":
         # --weight-format converts raw HF weights; pre-converted OpenVINO/* repos reject it, so it is opt-in.
         wf = text(pick(m.cat, "weight_format"))
         script = OVMS_PREP.replace("@WF@", f" --weight-format {wf}" if wf else "").replace(
             "@STAGE@", f"/models/.pull-{m.name}").replace("@DEVICE@", os.environ.get("MM_OVMS_TARGET_DEVICE") or "CPU")
     else:
+        space = SPACE_CHECK.replace("@NEED_KB@", str(-(-need_bytes // 1024))).replace(
+            "@DRAFT_PENDING@", DRAFT_PENDING if m.draft_model_id else "") if need_bytes > 0 else ""
         script = VLLM_PREP.replace("@TRC@", TRC_PREFETCH if trust_remote_code(m, cli_args) else "").replace(
-            "@DRAFT@", DRAFT_FETCH if m.draft_model_id else "")
+            "@DRAFT@", DRAFT_FETCH if m.draft_model_id else "").replace("@SPACE@", space).replace(
+            "@EXCLUDE@", HF_EXCLUDE)
     return script.replace("@DRAFT_ID@", m.draft_model_id).replace("@ID@", m.model_id).replace(
         "@NAME@", m.name).replace("@DIR@", f"/models/{m.name}")
 
@@ -106,8 +125,10 @@ def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
         abort(f"Network check failed: cannot reach {catalog.connectivity_url} (proxy: {catalog.https_proxy or 'none'}). "
               "Check network/proxy settings in models.yaml or environment.")
     token = os.environ.get("HF_TOKEN", "")
-    for repo in filter(None, (m.model_id, m.draft_model_id)):  # the draft downloads with the same token
-        if not token and pick(hf_model_info(repo, catalog.https_proxy), "gated"):
+    repos = {r: hf_model_info(r, catalog.https_proxy, blobs=True, token=token)
+             for r in filter(None, (m.model_id, m.draft_model_id))}
+    for repo, meta in repos.items():  # the draft downloads with the same token
+        if not token and pick(meta, "gated"):
             abort(f"Model '{repo}' is gated. Set HF_TOKEN with an authorized token.")
     info(f"Downloading model weights: {m.model_id} → PVC:/{m.name}")
     if token:  # via stdin, so the token never appears in a process listing
@@ -123,13 +144,16 @@ def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
         env_items.append("            - name: HF_TOKEN\n              valueFrom:\n                secretKeyRef:\n"
                          "                  name: hf-token\n                  key: token")
     env_items += [f"            - name: {k}\n              value: {quote(v)}" for k, v in proxy_env(catalog)]
+    # Unknown (Hub unreachable) means no check, not a refusal.
+    # Per destination: a draft that is the model itself still downloads twice (<name>/ and <name>/draft).
+    need = 0 if m.runtime == "openvino" else sum(hf_download_bytes(repos[r]) for r in (m.model_id, m.draft_model_id) if r)
     uid = m.run_as_user
     job = f"download-{m.name}"
     manifest = render(
         template("download-job.yaml"), MODEL_NAME=m.name, NAMESPACE=m.namespace, MODEL_ID=m.model_id,
         PVC_NAME=catalog.pvc, DOWNLOADER_IMAGE=text(pick(m.rt, "model_downloader_image")) or m.runtime_image,
         ENV_BLOCK="          env:\n" + "\n".join(env_items), JOB_UID=uid, JOB_GID=uid,
-        DOWNLOAD_CMD="\n".join("              " + line for line in _script(m, cli_args).split("\n")),
+        DOWNLOAD_CMD="\n".join("              " + line for line in _script(m, cli_args, need).split("\n")),
         # Small requests so the job schedules; limits track the serving envelope (OVMS converts in memory).
         DL_CPU_REQUEST="500m", DL_MEM_REQUEST="2Gi", DL_CPU_LIMIT=m.cpu or "2", DL_MEM_LIMIT=m.memory or "8Gi",
         TTL_SECONDS=os.environ.get("DOWNLOAD_JOB_TTL") or "300", TIMEOUT=str(TIMEOUT))

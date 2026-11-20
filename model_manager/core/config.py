@@ -1,6 +1,7 @@
 """Model catalog (models.yaml) and resolution of a catalog entry or --hfid into a Model."""
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -86,14 +87,14 @@ _CONNECT_ERRORS = (5, 6, 7, 28, 35)  # curl: proxy or host unresolved, connect r
 
 
 @cache
-def _hf_json(url: str, proxy: str) -> dict:
-    """A HuggingFace JSON document, or {} when unreachable. HF_TOKEN goes in on stdin, never in argv."""
+def _hf_json(url: str, proxy: str, token: str) -> dict:
+    """A HuggingFace JSON document, or {} when unreachable. The token reaches curl on stdin (-H @-), never in its
+    arguments, so it never shows in a process listing."""
     if proxy in _HUB_UNREACHABLE:
         return {}
-    token = os.environ.get("HF_TOKEN", "")
     cmd = ["curl", "-sfL", "--max-time", "10", *(["--proxy", proxy] if proxy else []),
-           *(["--config", "-"] if token else []), url]
-    r = subprocess.run(cmd, input=f'header = "Authorization: Bearer {token}"\n' if token else None,  # nosec B603: argv list, no shell
+           *(["-H", "@-"] if token else []), url]
+    r = subprocess.run(cmd, input=f"Authorization: Bearer {token}\n" if token else None,  # nosec B603: argv list, no shell
                        capture_output=True, text=True, check=False)
     if r.returncode in _CONNECT_ERRORS:
         _HUB_UNREACHABLE.add(proxy)
@@ -108,14 +109,21 @@ def hub_unreachable(proxy: str) -> bool:
     return proxy in _HUB_UNREACHABLE
 
 
-def hf_model_info(model_id: str, proxy: str) -> dict:
-    """HuggingFace model metadata with every file's size, or {} when the Hub is unreachable."""
-    return _hf_json(f"https://huggingface.co/api/models/{model_id}?blobs=true", proxy)
+def _token(token: str | None) -> str:
+    return os.environ.get("HF_TOKEN", "") if token is None else token
+
+
+def hf_model_info(model_id: str, proxy: str, blobs: bool = True, token: str | None = None) -> dict:
+    """HuggingFace model metadata, or {} when the Hub is unreachable. It always lists every file's size (?blobs=true),
+    so one fetch serves the category, the weight size and the download check; `blobs` is kept for callers. The token
+    defaults to HF_TOKEN; private and gated repos need it."""
+    del blobs
+    return _hf_json(f"https://huggingface.co/api/models/{model_id}?blobs=true", proxy, _token(token))
 
 
 def hf_config(model_id: str, proxy: str) -> dict | None:
     """The repo's config.json; None when unreadable (unreachable, or gated without HF_TOKEN)."""
-    return _hf_json(f"https://huggingface.co/{model_id}/resolve/main/config.json", proxy) or None
+    return _hf_json(f"https://huggingface.co/{model_id}/resolve/main/config.json", proxy, _token(None)) or None
 
 
 def hf_weight_bytes(model_id: str, proxy: str) -> int:
@@ -125,6 +133,17 @@ def hf_weight_bytes(model_id: str, proxy: str) -> int:
              if isinstance(f, dict))
     return sum(int(pick(f, "size", 0)) for name, f in names
                if name.endswith(".safetensors") and "/" not in name and not name.startswith("consolidated"))
+
+
+# A copy of the weights in the publisher's own format (Meta's original/): vLLM loads the safetensors.
+HF_EXCLUDE = "original/*"
+
+
+def hf_download_bytes(info: dict) -> int:
+    """Bytes `hf download --exclude HF_EXCLUDE` fetches, from hf_model_info(blobs=True); 0 when unknown."""
+    files = info.get("siblings") or []
+    return sum(int(f.get("size") or 0) for f in files
+               if isinstance(f, dict) and not fnmatch.fnmatch(str(f.get("rfilename", "")), HF_EXCLUDE))
 
 
 class Catalog:

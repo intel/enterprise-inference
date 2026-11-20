@@ -719,7 +719,7 @@ def test_weights_are_the_repo_root_safetensors(monkeypatch):
     files = [("model-00001-of-00002.safetensors", 4), ("model-00002-of-00002.safetensors", 4),
              ("original/consolidated.safetensors", 8), ("onnx/model.safetensors", 8), ("consolidated.safetensors", 8),
              ("pytorch_model.bin", 8)]
-    monkeypatch.setattr(config, "_hf_json", lambda url, proxy: {"siblings": [{"rfilename": n, "size": gib(g)}
+    monkeypatch.setattr(config, "_hf_json", lambda url, proxy, token: {"siblings": [{"rfilename": n, "size": gib(g)}
                                                                              for n, g in files]})
     assert config.hf_weight_bytes("org/m", "") == gib(8)
 
@@ -751,5 +751,5 @@ def test_hf_token_goes_on_stdin(monkeypatch):
     config._hf_json.cache_clear()
     assert config.hf_config("org/gated-token-test", "") == {"a": 1}
     cmd, stdin = calls[0]
-    assert "hf_secret" not in " ".join(cmd) and "hf_secret" in stdin and "--config" in cmd
+    assert "hf_secret" not in " ".join(cmd) and stdin == "Authorization: Bearer hf_secret\n" and ["-H", "@-"] == cmd[-3:-1]
     config._hf_json.cache_clear()
