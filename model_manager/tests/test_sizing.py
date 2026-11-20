@@ -153,6 +153,35 @@ def test_kv_by_tp_follows_the_kv_heads():
     assert s.kv_by_tp == {1: 256, 2: 128, 4: 64, 8: 32}
 
 
+LLAMA_3B_DRAFT = {**LLAMA_1B, "max_position_embeddings": 32768}
+
+
+@pytest.mark.parametrize("cfg, args, kw, serve", [
+    (LLAMA_8B, LLM_ARGS, {}, 131072),                                   # 16 GiB holds one full 131,072 request
+    (QWEN3_06B, LLM_ARGS, {}, 40960),                                   # the model's own limit
+    (LLAMA_8B, LLM_ARGS, {"streams": 4}, 32768),                        # 4 GiB pool: 32,768 tokens
+    (LLAMA_8B, LLM_ARGS, {"streams": 3}, 24576),                        # 3 GiB: a multiple of 1024 below the limit
+    (LLAMA_8B, [*LLM_ARGS, "--max-model-len", "4096"], {}, 4096),       # a given context is served as is
+    (GEMMA4, LLM_ARGS, {}, 262144),                                     # sliding layers hold a window, not the request
+    (WHISPER, ["--max-num-batched-tokens", "2048"], {}, 448),
+    (LLAMA_8B, LLM_ARGS, {"draft": (LLAMA_3B_DRAFT, gib(2.3))}, 32768),  # a draft's shorter limit caps it
+    (LLAMA_8B, [*LLM_ARGS, "--no-enable-chunked-prefill"], {}, 2048),    # whole prompts must fit the batch
+])
+def test_the_served_context_is_what_the_pool_holds(cfg, args, kw, serve):
+    s = sizer.size(cfg, gib(14.96), args, 1, **kw)
+    assert s.serve_len == serve
+    if not sizer.arg_value(args, "--max-model-len"):
+        assert s.max_model_len == min(8192, serve if serve < 8192 else 8192)  # the KV is still sized for 8K streams
+
+
+def test_the_served_context_fits_the_pool():
+    # vLLM starts only if one request of --max-model-len fits; the search never returns more than the pool holds.
+    for streams in (1, 2, 3, 5, 7, 16):
+        s = sizer.size(QWEN36, gib(67), LLM_ARGS, 1, streams=streams)
+        b = sizer.bytes_per_request(sizer.layout(QWEN36), 1, s.serve_len, 2, 2, 128, 2048, True)
+        assert b <= s.kv_gib * GIB and s.serve_len >= 8192
+
+
 @pytest.mark.parametrize("value, want", [("32K", 32768), ("32k", 32000), ("25.6k", 25600), ("1M", 2 ** 20), ("4096", 4096)])
 def test_vllm_numeric_suffixes(value, want):
     assert sizer.human_int(value) == want
@@ -308,7 +337,8 @@ def test_memory_auto_is_sized(hub):
     m, s, main, env = _sized(*LLAMA, "--memory", "auto")
     assert main["resources"]["limits"]["memory"] == main["resources"]["requests"]["memory"] == "40Gi"
     assert env["VLLM_CPU_KVCACHE_SPACE"] == "16"
-    assert main["args"][main["args"].index("--max-model-len") + 1] == "8192"
+    # Sized for 16 x 8192 tokens; the same 16 GiB pool holds one request of Llama's full 131,072.
+    assert main["args"][main["args"].index("--max-model-len") + 1] == "131072"
 
 
 def test_catalog_memory_auto_is_sized(hub, tmp_path):
@@ -385,7 +415,7 @@ def test_hfid_memory_defaults_to_auto(hub):
     # --hfid has no catalog memory, so it is sized as with --memory auto.
     m, s, main, env = _sized(*LLAMA)
     assert m.memory_auto_default and main["resources"]["limits"]["memory"] == "40Gi"
-    assert env["VLLM_CPU_KVCACHE_SPACE"] == "16" and main["args"][main["args"].index("--max-model-len") + 1] == "8192"
+    assert env["VLLM_CPU_KVCACHE_SPACE"] == "16" and main["args"][main["args"].index("--max-model-len") + 1] == "131072"
 
 
 def test_hfid_set_memory_wins(hub):
@@ -523,7 +553,7 @@ def _inputs(catalog, *argv):
 def test_a_sized_deploy_records_its_inputs(hub, tmp_path):
     catalog = _catalog(tmp_path, memory="auto")
     m, s, main, env = _sized("m", catalog=catalog)
-    assert m.sizing == {cli.SIZING_INPUTS: _inputs(catalog), cli.SIZED_CONTEXT: "8192"}
+    assert m.sizing == {cli.SIZING_INPUTS: _inputs(catalog), cli.SIZED_CONTEXT: "131072"}
     doc = yaml.safe_load(renderer.manifest(m, Catalog(catalog), cli.parse_args(["deploy", "m"]), {}, m.cpu, []))
     assert doc["metadata"]["annotations"] == m.sizing
 

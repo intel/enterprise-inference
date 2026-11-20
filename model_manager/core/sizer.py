@@ -235,17 +235,26 @@ def size(cfg: dict | None, weight_bytes: int, args: list[str], tp: int,
     weights = resident_bytes(cfg, weight_bytes, args) + (resident_bytes(draft[0], draft[1], args) if draft else 0)
     layers = layout(cfg) + (layout(draft[0]) if draft else [])
     given = arg_value(args, "--max-model-len")  # auto / -1: vLLM fits the context to the KV cache, sized for 8K here
-    max_len = human_int(given) if given not in ("", "auto", "-1") else min(MAX_MODEL_LEN, context_limit(cfg))
+    batched_arg = arg_value(args, "--max-num-batched-tokens")
+    limit = _serve_limit(cfg, draft, args, batched_arg)
+    max_len = human_int(given) if given not in ("", "auto", "-1") else min(MAX_MODEL_LEN, limit)
     dtype = arg_value(args, "--dtype")
     if dtype in ("", "auto"):
         dtype = text_config(cfg).get("torch_dtype") or text_config(cfg).get("dtype")
     model_bytes = DTYPE_BYTES.get(dtype, 2)
     kv_bytes = 1 if arg_value(args, "--kv-cache-dtype").startswith("fp8") else model_bytes
+    block = int(arg_value(args, "--block-size") or 128)
+    prefix_caching = _enabled(args, "--enable-prefix-caching", True)
+    chunked = _enabled(args, "--enable-chunked-prefill", False)
+
+    def request_bytes(t: int, length: int) -> int:
+        # Without chunked prefill and a set --max-num-batched-tokens, vLLM batches a whole prompt at once: the
+        # sliding and cross-attention layers then hold up to the request length (the safe side when unset).
+        batched = human_int(batched_arg) if batched_arg else (max_len if chunked else length)
+        return bytes_per_request(layers, t, length, kv_bytes, model_bytes, block, batched, prefix_caching)
+
     def kv_at(t: int) -> int:
-        per_request = bytes_per_request(
-            layers, t, max_len, kv_bytes, model_bytes, int(arg_value(args, "--block-size") or 128),
-            human_int(arg_value(args, "--max-num-batched-tokens") or str(max_len)),
-            _enabled(args, "--enable-prefix-caching", True))
+        per_request = request_bytes(t, max_len)
         return max(KV_MIN_GIB, math.ceil(per_request / GIB), math.ceil(per_request * streams / GIB))
 
     # kv_streams sets the full-length requests the KV holds, with no cap (the fit and NUMA pre-flight catch one that
@@ -254,9 +263,36 @@ def size(cfg: dict | None, weight_bytes: int, args: list[str], tp: int,
     kv_gib = kv_at(tp)
     # KV heads split across workers, so a larger TP needs less KV per worker; the NUMA hint compares at each TP.
     kv_by_tp = {t: kv_at(t) for t in (1, 2, 4, 8) if t == tp or not topology_error(cfg, t)}
+    serve_len = (max_len if given else
+                 _serve_len(lambda n: request_bytes(tp, n) <= kv_gib * GIB, max_len, limit))
     load = load_allowance_gib(cfg, weight_bytes, args) + (load_allowance_gib(draft[0], draft[1], args) if draft else 0)
     needed = weights / GIB + load + tp * (kv_gib + OVERHEAD_GIB)
     return Sizing(weights_gib=weights / GIB, kv_gib=kv_gib, tp=tp, max_model_len=max_len,
                   needed_gib=needed, memory_gi=math.ceil(needed * HEADROOM), load_gib=load, streams=streams,
-                  kv_by_tp=kv_by_tp)
+                  kv_by_tp=kv_by_tp, serve_len=serve_len)
 
+
+def _serve_limit(cfg: dict, draft: tuple[dict | None, int] | None, args: list[str], batched_arg: str) -> int:
+    """The longest context vLLM would start with: the model's (and a draft's) own limit, and without chunked
+    prefill a set --max-num-batched-tokens, which must then hold a whole prompt."""
+    limit = context_limit(cfg)
+    if draft:
+        try:
+            limit = min(limit, context_limit(draft[0]))
+        except Unsupported:  # a draft without a context length leaves the model's
+            pass
+    if batched_arg and not _enabled(args, "--enable-chunked-prefill", True):
+        limit = min(limit, human_int(batched_arg))
+    return limit
+
+
+def _serve_len(fits, low: int, high: int, step: int = 1024) -> int:
+    """The longest request (prompt + output) the sized KV pool holds on one worker, from the sized context `low` up
+    to the model's limit `high`: the limit when it fits, else the largest multiple of `step` that does."""
+    if fits(high):
+        return high
+    lo, hi = low // step, high // step  # lo * step <= low fits (the pool is sized for low); hi * step may not
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        lo, hi = (mid, hi) if fits(mid * step) else (lo, mid - 1)
+    return max(low, lo * step)

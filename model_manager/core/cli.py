@@ -399,12 +399,12 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
                            tp, load)
     m.memory, m.kv_cache_gb = f"{s.memory_gi}Gi", str(s.kv_gib)
     if not sizer.arg_value(args, "--max-model-len"):
-        m.max_model_len = str(s.max_model_len)
+        m.max_model_len = str(s.serve_len or s.max_model_len)
     m.sizing = {SIZING_INPUTS: inputs, **({SIZED_CONTEXT: m.max_model_len} if m.max_model_len else {})}
     info(f"  Memory: {m.memory} (auto) | needs {s.needed_gib:.1f} GiB = weights {s.weights_gib:.1f}"
          f"{_load_text(s.load_gib)} + KV {s.tp} x {s.kv_gib} + overhead {s.tp} x {sizer.OVERHEAD_GIB}, x "
-         f"{sizer.HEADROOM} headroom | KV for up to "
-         f"{s.streams} x {s.max_model_len} tokens")
+         f"{sizer.HEADROOM} headroom | KV for up to {s.streams} x {s.max_model_len} tokens"
+         f"{f'; serves up to {s.serve_len} tokens per request' if s.serve_len > s.max_model_len else ''}")
     return s
 
 

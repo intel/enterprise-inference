@@ -190,6 +190,7 @@ class Sizing:
     load_gib: float = 0.0                     # load-time allowances: quantized repack, multimodal encoders
     streams: int = 16                         # full-length requests the KV holds: kv_streams, else min(16, --max-num-seqs)
     kv_by_tp: dict = field(default_factory=dict)  # sized KV per worker at each valid TP, for the NUMA hint
+    serve_len: int = 0                        # --max-model-len served: the longest request the sized pool holds
 
 
 @dataclass
