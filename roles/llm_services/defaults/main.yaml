@@ -37,7 +37,10 @@ llm_services_namespace: "llm-inference"
 # Model storage PVC
 # =============================================================================
 llm_services_model_store_pvc: "model-store"
-llm_services_model_store_size: "100Gi"
+# Shared by every model: Llama-3.1-70B is about 141G, a 30B model about 61G (docs/customize/catalog.md).
+llm_services_model_store_size: "200Gi"
+# A Kubernetes quantity: number (decimal exponent allowed), then an optional unit.
+_llm_qty_re: '^([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E|)$'
 
 # Set storage_backend in env/<env>/global_config.yaml, not this. The core storage
 # role publishes _resolved_storage_backend in preflight, already trimmed and

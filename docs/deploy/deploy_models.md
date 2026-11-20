@@ -201,12 +201,13 @@ cards.
 ### Model store size
 
 All downloaded weights share one PVC, `model-store`, sized by
-`llm_services_model_store_size` (default `100Gi`). That holds the smaller
-models, but not Llama 3.1 70B (~140 GB), Nemotron 3 Super FP8 (~128 GB) or
-Nemotron 3 Ultra NVFP4 (~352 GB). Set it before the first inference install,
-in `global_config.yaml`, for example `llm_services_model_store_size: 1Ti` for
-all of them. Growing an existing PVC works only if its StorageClass allows
-volume expansion. A download that outlasts the deploy's two-hour wait resumes
+`llm_services_model_store_size` (default `200Gi`, see
+[Model-store size](../customize/catalog.md#model-store-size)). That holds
+Llama 3.1 70B (~141 GB) or Nemotron 3 Super FP8 (~128 GB), but not both, and
+not Nemotron 3 Ultra NVFP4 (~352 GB). For all of them, set
+`llm_services_model_store_size: 1Ti` in `config.inference.yaml` before the
+first inference install. A model that does not fit is refused before its
+download starts. A download that outlasts the deploy's two-hour wait resumes
 when the deploy is run again.
 
 Pod security is unchanged: the upstream `vllm/vllm-openai` image runs under the

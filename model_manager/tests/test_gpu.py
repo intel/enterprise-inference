@@ -22,7 +22,8 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import cli, config, download, k8s, policy, renderer  # noqa: E402
 from core.config import Catalog, Model  # noqa: E402
-from test_parity import BE, DOWNLOAD, GOLDEN, MM, NO_LITELLM_URL, NRI, POOL, _ready, case, run  # noqa: E402
+from test_parity import (BE, DOWNLOAD, GOLDEN, HF_EXCLUDE_DEV, MM, NO_LITELLM_URL, NRI, POOL,  # noqa: E402
+                         _ready, case, run)
 from test_units import _quiet_deploy  # noqa: E402
 
 # GPU pods are Burstable since the B300 run: no CPU limit, so kubelet's static CPU manager never pins them.
@@ -100,6 +101,8 @@ def test_gpu_parity(c, tmp_path, request):
     for pattern, repl in c["deviations"]:
         expected, n = re.subn(pattern, repl, expected, flags=re.M)
         assert n, f"stale deviation: {pattern}"
+    expected, n = re.subn(*HF_EXCLUDE_DEV, expected, flags=re.M)
+    assert n == len(re.findall(r"^\s+hf download '", expected, re.M)), "stale deviation: HF_EXCLUDE_DEV"
     assert run(MM / "model-manager", c, tmp_path) == expected
 
 
@@ -426,7 +429,7 @@ def test_the_rendered_download_job_carries_the_pin_and_the_toleration(monkeypatc
     monkeypatch.setattr(k8s, "get_json", lambda *a: {"status": {"succeeded": 1}})
     monkeypatch.setattr(download.time, "sleep", lambda _: None)
     monkeypatch.setattr(download, "_curl_ok", lambda *a: True)
-    monkeypatch.setattr(download, "hf_model_info", lambda *a: {})
+    monkeypatch.setattr(download, "hf_model_info", lambda *a, **k: {})
     catalog = Catalog.load()
     download.download_weights(config.resolve(catalog, "qwen3-0-6b-cuda", cli.Options()), catalog, [], ("n0", "123"))
     spec = next(d for d in map(yaml.safe_load, applied) if d["kind"] == "Job")["spec"]["template"]["spec"]
