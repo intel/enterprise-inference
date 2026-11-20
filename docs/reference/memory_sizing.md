@@ -46,10 +46,10 @@ Memory: 52Gi (auto) = weights 7.0 + load 29.0 (4.0 image encoder + 25.0 video pr
 |---|---|---|
 | Context (`--max-model-len`): sized for, and served | **The model's own limit** from `config.json` (`max_position_embeddings`, …) | `--max-model-len` in `args` / `--arg` |
 | `kv_streams`: requests of that context the KV holds at once | **1** | `kv_streams:` / `--kv-streams` |
-| Runtime overhead | **3 GiB per TP worker** | — |
-| Headroom | **× 1.15** on weights + load + runtime, **not on the KV**; plus a fixed **2 GiB** | — |
-| Minimum KV | **2 GiB** per worker | — |
-| Load allowances | **0.4 × weights** if quantized; **+4 GiB** with vision/audio; **+0.2 GiB per 1K tokens** of context for native video (Qwen-VL); per-layer embeddings in fp32 (Gemma E-series) | `--limit-mm-per-prompt` set to 0 |
+| Runtime overhead | **3 GiB per TP worker** | [`sizing:`](#tuning-the-constants) `overhead_gib` |
+| Headroom | **× 1.15** on weights + load + runtime, **not on the KV**; plus a fixed **2 GiB** | `sizing:` `headroom`, `margin_gib` |
+| Minimum KV | **2 GiB** per worker | `sizing:` `kv_min_gib` |
+| Load allowances | **0.4 × weights** if quantized; **+4 GiB** with vision/audio; **+0.2 GiB per 1K tokens** of context for native video (Qwen-VL); per-layer embeddings in fp32 (Gemma E-series) | `--limit-mm-per-prompt` set to 0; `sizing:` `quantized_repack`, `multimodal_gib`, `video_gib_per_1k` |
 | TP | The last `--tensor-parallel-size` vLLM receives, else 1 | `--tensor-parallel-size` in `args` / `--tp` |
 
 ## The formula
@@ -140,6 +140,7 @@ Example: Qwen3-4B, defaults. The pool is 36 GiB = 262,144 tokens, its full conte
 | Split across NUMA nodes | `--tp 2` | `"--tensor-parallel-size", "2"` | 43Gi, KV 8 per worker |
 | Multimodal model without video | `--arg --limit-mm-per-prompt.video=0` | in `args` | Qwen2.5-VL-3B: 52Gi → 24Gi |
 | Multimodal model as text only | `--arg --limit-mm-per-prompt.image=0 --arg --limit-mm-per-prompt.video=0` | in `args` | Drops the multimodal allowances |
+| Recalibrate for other hardware or a new vLLM | — | [`runtimes.vllm.sizing`](#tuning-the-constants) | Every `memory: auto` model of the runtime |
 | Fixed memory and KV, no sizing | `--memory 64Gi --env VLLM_CPU_KVCACHE_SPACE=40` | `memory: 64Gi`, `VLLM_CPU_KVCACHE_SPACE: "40"` in `env` | Used as is, fit-checked |
 
 ```yaml
@@ -211,11 +212,12 @@ GiB its weights 15.0 + KV 1 x 8 + overhead 1 x 3 need.`
 
 A sized deploy records its inputs as annotations on the `LLMInferenceService`:
 `memory-sizing.model-manager.io/inputs` is a hash of the model, draft, image, TP, effective
-args and `kv_streams` (when set), and `…/max-model-len` is the sized context.
+args, `kv_streams` and the [`sizing:` overrides](#tuning-the-constants) (each when set), and
+`…/max-model-len` is the sized context.
 
 - **Same inputs:** the redeploy keeps the live memory, KV and context, without calling Hugging
   Face, so an Ansible re-run never changes a running model.
-- **Changed inputs** (e.g. `--tp 2`, other args, a new image, `--kv-streams`): it's sized again.
+- **Changed inputs** (e.g. `--tp 2`, other args, a new image, `--kv-streams`, a `sizing:` value): it's sized again.
 - **`--memory auto` on the command line:** always sizes again.
 
 Hugging Face is asked for two documents per model (the file list and `config.json`). After
@@ -314,10 +316,44 @@ The KV and weight sizes don't depend on the hardware: they come from `config.jso
 allocator. The runtime overhead, quantized repack and encoder allowances do depend on it (CPU
 ISA, thread count, vLLM / torch version), so recheck them on other hardware or a new vLLM.
 
+## Tuning the constants
+
+The estimated parts are measured on the [test environment](#test-environment). To recalibrate
+them for other hardware or a new vLLM, set them per runtime in `models.yaml`:
+
+```yaml
+runtimes:
+  vllm:
+    sizing:                   # every key optional; unset = this default
+      overhead_gib: 3         # runtime per TP worker
+      headroom: 1.15          # on weights + load + runtime (not the KV); >= 1
+      margin_gib: 2           # per pod
+      kv_min_gib: 2           # KV floor per worker; a whole number >= 1
+      quantized_repack: 0.4   # x weights (AWQ, GPTQ)
+      multimodal_gib: 4       # image / audio encoder
+      video_gib_per_1k: 0.2   # native video, per 1K tokens of context
+```
+
+- **Where:** `runtimes.<name>.sizing` in `models.yaml`, or in `runtimes/<name>/values.yaml`
+  (`models.yaml` wins, key by key). These numbers depend on the hardware and vLLM, not on the
+  model, so they're per runtime. A model's own needs go through the [overrides](#overrides).
+- **Checked at load:** an unknown key, a negative value, `headroom` below 1 or a fractional
+  `kv_min_gib` stops the deploy with the reason.
+- **Shown:** the deploy log ends with the values that differ from the defaults:
+  `| runtimes.vllm.sizing: overhead_gib 4, headroom 1.1`.
+- **Redeploys:** changed values join the [recorded inputs](#redeploys), so each `memory: auto`
+  model is sized again on its next deploy. Values equal to the defaults change nothing.
+- **They apply to the pre-flight too:** the fit and NUMA checks use the same `overhead_gib`, and
+  the load allowances count against a fixed `memory`.
+- **How to measure:** deploy with `memory: auto` and read the pod cgroup's non-reclaimable memory
+  (`anon` in `memory.stat`) idle and under load. Page cache (`file`) is reclaimable. Then
+  compare: the runtime outside W + KV against `overhead_gib` (+ the headroom on the weights),
+  and a multimodal model's extra against its allowance.
+
 ## Limits
 
 - **The constants are estimates:** 3 GiB per worker, × 1.15 and 2 GiB, the one-request default and the
-  allowances. Calibrate them against the peak memory of real deploys. Text models peaked at
+  allowances. [Tune them](#tuning-the-constants) against the peak memory of real deploys. Text models peaked at
   81–93% of the sized limit, with 3–8 GiB of overhead per worker. The multimodal allowances
   come from two models: Qwen2.5-VL-3B and Gemma 4 E4B. Check a large VLM's peak before relying
   on them.

@@ -551,6 +551,66 @@ def test_kv_streams_joins_the_sizing_inputs_only_when_set(hub, tmp_path):
     assert _inputs(cat, "--kv-streams", "20") != _inputs(cat)
 
 
+def _sizing_catalog(tmp_path, sizing, **entry):
+    """A catalog of model m whose vllm runtime has a sizing: block."""
+    catalog = _catalog(tmp_path, **entry)
+    data = yaml.safe_load(catalog.read_text())
+    data["runtimes"]["vllm"]["sizing"] = sizing
+    catalog.write_text(yaml.safe_dump(data))
+    return catalog
+
+
+def test_runtime_sizing_overrides_the_constants(hub, tmp_path, capsys):
+    k = {"overhead_gib": 4, "headroom": 1.1, "margin_gib": 1, "kv_min_gib": 4}
+    m, s, main, env = _sized("m", catalog=_sizing_catalog(tmp_path, k, memory="auto", args=["--max-model-len", "8192"]))
+    assert s.k == config.SizingConstants(**k, quantized_repack=0.4, multimodal_gib=4, video_gib_per_1k=0.2)
+    assert s.kv_gib == 4  # the floor: one 8K request of Llama-8B is 1 GiB
+    assert s.memory_gi == math.ceil((14.96 + 4) * 1.1 + 4 + 1)
+    assert main["resources"]["limits"]["memory"] == f"{s.memory_gi}Gi"
+    err = capsys.readouterr().out
+    assert "overhead 4 (1 x 4) + headroom 1.9 (10%)" in err and "margin 1 GiB" in err
+    assert "runtimes.vllm.sizing: overhead_gib 4, headroom 1.1, margin_gib 1, kv_min_gib 4" in err
+
+
+def test_runtime_sizing_overrides_the_load_allowances():
+    k = config.SizingConstants(quantized_repack=0.2, multimodal_gib=2, video_gib_per_1k=0.1)
+    assert sizer.load_allowance_gib(AWQ, gib(5), [], K128, k) == pytest.approx(0.2 * 5)
+    assert sizer.load_allowance_gib(QWEN_VL, gib(5), [], K128, k) == pytest.approx(2 + 0.1 * 128)
+    assert sizer.size(QWEN_VL, gib(7), LLM_ARGS, 1, k=k).load_gib == pytest.approx(2 + 0.1 * 128)
+
+
+def test_runtime_sizing_defaults_match_the_module_constants():
+    k = config.SizingConstants()
+    assert (k.overhead_gib, k.headroom, k.margin_gib, k.kv_min_gib) == (
+        sizer.OVERHEAD_GIB, sizer.HEADROOM, sizer.MARGIN_GIB, sizer.KV_MIN_GIB) == (3, 1.15, 2, 2)
+    assert k.overrides() == {} and config.sizing_constants("", "x") == k == config.sizing_constants(None, "x")
+    assert sizer.size(LLAMA_8B, gib(14.96), LLM_ARGS, 1).k == k
+
+
+@pytest.mark.parametrize("block, error", [
+    ({"overhed_gib": 4}, "overhed_gib is not a sizing setting"),
+    ({"headroom": 0.9}, "headroom must be a number >= 1"),
+    ({"margin_gib": -1}, "margin_gib must be a number >= 0"),
+    ({"kv_min_gib": 1.5}, "kv_min_gib must be a whole number >= 1"),
+    ({"overhead_gib": "3"}, "overhead_gib must be a number"),
+    ({"overhead_gib": True}, "overhead_gib must be a number"),
+    ([1], "must be a mapping"),
+])
+def test_runtime_sizing_rejects_bad_values(hub, tmp_path, capsys, block, error):
+    cat = _sizing_catalog(tmp_path, block, memory="auto")
+    with pytest.raises(SystemExit):
+        config.resolve(Catalog(cat), "m", cli.parse_args(["deploy", "m"]))
+    assert error in capsys.readouterr().err
+
+
+def test_runtime_sizing_joins_the_sizing_inputs_only_when_changed(hub, tmp_path):
+    for d in "abc":
+        (tmp_path / d).mkdir()
+    plain = _inputs(_catalog(tmp_path / "a", memory="auto"))
+    assert _inputs(_sizing_catalog(tmp_path / "b", {"headroom": 1.15}, memory="auto")) == plain  # a default value
+    assert _inputs(_sizing_catalog(tmp_path / "c", {"headroom": 1.2}, memory="auto")) != plain
+
+
 def test_numa_gate_suggests_the_tp_that_fits_many_streams(hub, tmp_path, monkeypatch, capsys):
     # 256 streams of 8K: 256 GiB KV per worker at tp 1 overflows a 252 GiB NUMA node; at tp 2 each worker holds 128.
     monkeypatch.setattr(policy, "_schedulable_nodes", lambda m: [_numa_node()])

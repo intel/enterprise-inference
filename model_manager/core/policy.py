@@ -424,7 +424,7 @@ def _numa_node_gib(m: Model) -> tuple[float, int] | None:
 def _numa_error(m: Model, s: Sizing) -> str:
     """vLLM binds each TP worker's memory to its NUMA node, so a worker's share must fit in one."""
     # Weights and load allowances (repack, encoder profiling) split across the workers, each on its NUMA node.
-    per_worker = (s.weights_gib + s.load_gib) / s.tp + s.kv_gib + sizer.OVERHEAD_GIB
+    per_worker = (s.weights_gib + s.load_gib) / s.tp + s.kv_gib + s.k.overhead_gib
     numa = _numa_node_gib(m)
     if numa is None or per_worker <= numa[0]:
         return ""
@@ -432,7 +432,7 @@ def _numa_error(m: Model, s: Sizing) -> str:
     # A sized KV shrinks with TP (kv_by_tp); a set VLLM_CPU_KVCACHE_SPACE is per worker at any TP. A TP that does not
     # split the heads is not in kv_by_tp, so it is never suggested.
     fits = next((t for t in (2, 4, 8) if s.tp < t <= max_tp and (t in s.kv_by_tp or not s.kv_by_tp)
-                 and (s.weights_gib + s.load_gib) / t + s.kv_by_tp.get(t, s.kv_gib) + sizer.OVERHEAD_GIB <= size), 0)
+                 and (s.weights_gib + s.load_gib) / t + s.kv_by_tp.get(t, s.kv_gib) + s.k.overhead_gib <= size), 0)
     split = f"1/{fits} of the weights" + (f" and {s.kv_by_tp[fits]} GiB of KV" if fits in s.kv_by_tp else "")
     hint = (f"Deploy with --tp {fits} (or --tensor-parallel-size {fits} in its args): each worker then holds {split} "
             "on its own NUMA node." if fits else
@@ -440,7 +440,7 @@ def _numa_error(m: Model, s: Sizing) -> str:
             "or use a smaller (e.g. quantized) model.")
     return (f"{m.name} needs {per_worker:.0f} GiB per TP worker at tp={s.tp} (weights {s.weights_gib / s.tp:.1f}"
             f"{f' + load {s.load_gib / s.tp:.1f}' if s.load_gib else ''} + KV {s.kv_gib} + overhead "
-            f"{sizer.OVERHEAD_GIB} GiB), but a NUMA node has {size:.0f} GiB and vLLM binds "
+            f"{s.k.overhead_gib:g} GiB), but a NUMA node has {size:.0f} GiB and vLLM binds "
             f"each worker's memory to its NUMA node. {hint}")
 
 
@@ -452,7 +452,7 @@ def memory_gate(m: Model, s: Sizing | None) -> None:
     have = mem_bytes(m.memory) / sizer.GIB
     errors = [f"memory {m.memory} is below the {math.ceil(s.needed_gib)}Gi {m.name} needs at tp={s.tp}: weights "
               f"{s.weights_gib:.1f}{f' + load {s.load_gib:.1f}' if s.load_gib else ''} + KV {s.tp} x {s.kv_gib} + "
-              f"overhead {s.tp} x {sizer.OVERHEAD_GIB} GiB. Raise "
+              f"overhead {s.tp} x {s.k.overhead_gib:g} GiB. Raise "
               "--memory or lower VLLM_CPU_KVCACHE_SPACE."] if have and s.needed_gib > have else []
     errors += [e for e in (_numa_error(m, s),) if e]
     if not errors:

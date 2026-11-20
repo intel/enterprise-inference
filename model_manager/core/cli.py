@@ -381,7 +381,7 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
     if m.memory_auto:
         draft = (hf_config(m.draft_model_id, proxy), draft_weights) if m.draft_model_id else None
         try:
-            s = sizer.size(cfg, weights, args, tp, draft, int(m.kv_streams or 0))
+            s = sizer.size(cfg, weights, args, tp, draft, int(m.kv_streams or 0), m.sizing_k)
         except (sizer.Unsupported, ValueError) as e:  # ValueError: a non-integer engine arg such as --max-num-seqs
             reason = f"Hugging Face is unreachable (proxy: {proxy or 'none'})" if hub_unreachable(proxy) else e
             if not m.memory_auto_default:
@@ -393,8 +393,8 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
     if not s:
         draft_cfg = hf_config(m.draft_model_id, proxy) if m.draft_model_id else None
         context = sizer.served_context(cfg, args)
-        load = (sizer.load_allowance_gib(cfg, weights, args, context)
-                + sizer.load_allowance_gib(draft_cfg, draft_weights, args, context))
+        load = (sizer.load_allowance_gib(cfg, weights, args, context, m.sizing_k)
+                + sizer.load_allowance_gib(draft_cfg, draft_weights, args, context, m.sizing_k))
         return _static_fit(m, sizer.resident_bytes(cfg, weights, args),
                            sizer.resident_bytes(draft_cfg, draft_weights, args), int(kv or renderer.category_kv_cache(m)),
                            tp, load)
@@ -402,14 +402,16 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
     if not sizer.arg_value(args, "--max-model-len"):
         m.max_model_len = str(s.max_model_len)
     m.sizing = {SIZING_INPUTS: inputs, **({SIZED_CONTEXT: m.max_model_len} if m.max_model_len else {})}
-    overhead = s.tp * sizer.OVERHEAD_GIB
-    headroom = (s.weights_gib + s.load_gib + overhead) * (sizer.HEADROOM - 1)
+    k = s.k
+    overhead = s.tp * k.overhead_gib
+    headroom = (s.weights_gib + s.load_gib + overhead) * (k.headroom - 1)
     parts = " + ".join(f"{gib:.1f} {name}" for name, gib in s.load_parts.items())
     load = f"{_load_text(s.load_gib)} ({parts})" if parts else ""
     info(f"  Memory: {m.memory} (auto) = weights {s.weights_gib:.1f}{load}"
-         f" + overhead {overhead} ({s.tp} x {sizer.OVERHEAD_GIB}) + headroom {headroom:.1f}"
-         f" ({round((sizer.HEADROOM - 1) * 100)}%) + KV {s.tp * s.kv_gib} ({s.tp} x {s.kv_gib})"
-         f" + margin {sizer.MARGIN_GIB} GiB | KV for up to {s.streams} x {s.max_model_len} tokens")
+         f" + overhead {overhead:g} ({s.tp} x {k.overhead_gib:g}) + headroom {headroom:.1f}"
+         f" ({(k.headroom - 1) * 100:g}%) + KV {s.tp * s.kv_gib} ({s.tp} x {s.kv_gib})"
+         f" + margin {k.margin_gib:g} GiB | KV for up to {s.streams} x {s.max_model_len} tokens"
+         f"{f' | runtimes.{m.runtime}.sizing: {_kv_text(k.overrides())}' if k.overrides() else ''}")
     return s
 
 
@@ -431,10 +433,11 @@ SIZED_CONTEXT = "memory-sizing.model-manager.io/max-model-len"
 
 
 def _sizing_inputs(m: Model, args: list[str], tp: int) -> str:
-    """What memory: auto sized from: the model, its draft, the image, TP, the effective engine args and kv_streams
-    (only when set, so deploys sized before it existed keep their hash)."""
-    key = json.dumps([m.model_id, m.draft_model_id, m.image, tp, args, *([m.kv_streams] if m.kv_streams else [])],
-                     separators=(",", ":"))
+    """What memory: auto sized from: the model, its draft, the image, TP, the effective engine args, and kv_streams
+    and the runtime's sizing overrides (each only when set, so deploys sized before they existed keep their hash)."""
+    overrides = m.sizing_k.overrides()
+    key = json.dumps([m.model_id, m.draft_model_id, m.image, tp, args, *([m.kv_streams] if m.kv_streams else []),
+                      *([overrides] if overrides else [])], separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
@@ -456,6 +459,10 @@ def _keep_live_sizing(m: Model, inputs: str) -> bool:
     return True
 
 
+def _kv_text(values: dict) -> str:
+    return ", ".join(f"{key} {value:g}" for key, value in values.items())
+
+
 def _load_text(load_gib: float) -> str:
     return f" + load {load_gib:.1f}" if load_gib else ""
 
@@ -467,11 +474,12 @@ def _static_fit(m: Model, weight_bytes: int, draft_bytes: int, kv_gib: int, tp: 
     if not weight_bytes or (m.draft_model_id and not draft_bytes):
         return None
     weights = (weight_bytes + draft_bytes) / sizer.GIB
+    k = m.sizing_k
     s = Sizing(weights_gib=weights, kv_gib=kv_gib, tp=tp, max_model_len=0,
-               needed_gib=weights + load_gib + tp * (kv_gib + sizer.OVERHEAD_GIB), memory_gi=0, load_gib=load_gib)
+               needed_gib=weights + load_gib + tp * (kv_gib + k.overhead_gib), memory_gi=0, load_gib=load_gib, k=k)
     if s.needed_gib > mem_bytes(m.memory) / sizer.GIB:
         warn(f"Memory {m.memory} of {m.name} is below the {s.needed_gib:.1f} GiB its weights {weights:.1f}"
-             f"{_load_text(load_gib)} + KV {tp} x {kv_gib} + overhead {tp} x {sizer.OVERHEAD_GIB} need.")
+             f"{_load_text(load_gib)} + KV {tp} x {kv_gib} + overhead {tp} x {k.overhead_gib:g} need.")
     return s
 
 

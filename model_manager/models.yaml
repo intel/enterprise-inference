@@ -560,6 +560,18 @@ runtimes:
   vllm:
     default_version: "0.24.0"       # used when a model/CLI doesn't pick a version
 
+    # memory: auto's estimated parts (docs/reference/memory_sizing.md#tuning-the-constants).
+    # Every key is optional; unset = the built-in default shown. Changing one re-sizes
+    # memory: auto models on their next deploy.
+    # sizing:
+    #   overhead_gib: 3         # runtime per TP worker
+    #   headroom: 1.15          # on weights + load + runtime (not the KV)
+    #   margin_gib: 2           # per pod
+    #   kv_min_gib: 2           # KV floor per worker (whole GiB)
+    #   quantized_repack: 0.4   # x weights (AWQ, GPTQ)
+    #   multimodal_gib: 4       # image / audio encoder
+    #   video_gib_per_1k: 0.2   # native video, per 1K tokens of context
+
     # Common env — applied to every vLLM pod. VLLM_CPU_KVCACHE_SPACE is NOT here:
     # it is set per-category below (via ${KV_CACHE_GB} ← category kv_cache_gb) so
     # each workload class sizes its own KV cache.

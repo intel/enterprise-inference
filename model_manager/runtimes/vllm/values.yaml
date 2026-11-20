@@ -19,6 +19,9 @@
 #   runtime_name             ClusterServingRuntime name to reference  (InferenceService)
 #   serving_runtime_manifest path to a raw CR manifest to apply       (InferenceService)
 #   model_downloader_image   image for the weight-download job        (OVMS)
+#   sizing                   memory: auto's estimated parts: overhead_gib, headroom, margin_gib,
+#                            kv_min_gib, quantized_repack, multimodal_gib, video_gib_per_1k
+#                            (docs/reference/memory_sizing.md#tuning-the-constants)
 # =============================================================================
 
 device: cpu

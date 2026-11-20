@@ -197,6 +197,43 @@ def _merge(base: dict, overlay: dict) -> dict:
     return out
 
 
+@dataclass(frozen=True)
+class SizingConstants:
+    """The estimated parts of memory: auto (docs/reference/memory_sizing.md#why-these-constants), measured on Xeon with
+    vLLM 0.24 / 0.28. Overridden per runtime by runtimes.<name>.sizing in models.yaml or runtimes/<name>/values.yaml."""
+    overhead_gib: float = 3         # runtime per TP worker: its process, kernel scratch, one batch's activations
+    headroom: float = 1.15          # on weights + load + runtime; the KV pool is allocated exactly, so none on it
+    margin_gib: float = 2           # per pod: small models, page cache in the cgroup
+    kv_min_gib: int = 2             # per worker: vLLM needs one full request; short-context models some concurrency
+    quantized_repack: float = 0.4   # x the quantized weights: repacked for the CPU kernel, both copies briefly resident
+    multimodal_gib: float = 4       # vision / audio encoder profiling at start-up
+    video_gib_per_1k: float = 0.2   # native-video (temporal patch) profiling, per 1K tokens of context
+
+    def overrides(self) -> dict:
+        """The values that differ from the built-in defaults."""
+        default = SizingConstants()
+        return {k: v for k, v in vars(self).items() if v != getattr(default, k)}
+
+
+def sizing_constants(block: Any, where: str) -> SizingConstants:
+    """runtimes.<name>.sizing: any of SizingConstants' fields; unknown keys and out-of-range values abort."""
+    if block in (None, "", {}):
+        return SizingConstants()
+    if not isinstance(block, dict):
+        abort(f"{where} must be a mapping of {', '.join(vars(SizingConstants()))}")
+    values = {}
+    for key, value in block.items():
+        if key not in vars(SizingConstants()):
+            abort(f"{where}.{key} is not a sizing setting; use {', '.join(vars(SizingConstants()))}")
+        lowest = 1 if key in ("headroom", "kv_min_gib") else 0
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < lowest \
+                or (key == "kv_min_gib" and not isinstance(value, int)):
+            kind = "a whole number" if key == "kv_min_gib" else "a number"
+            abort(f"{where}.{key} must be {kind} >= {lowest}, got: {value!r}")
+        values[key] = value
+    return SizingConstants(**values)
+
+
 @dataclass
 class Sizing:
     """Memory of one pod for a vLLM model (core/sizer.py)."""
@@ -210,6 +247,7 @@ class Sizing:
     streams: int = 1                          # full-context requests the KV holds: kv_streams (default 1)
     kv_by_tp: dict = field(default_factory=dict)  # sized KV per worker at each valid TP, for the NUMA hint
     load_parts: dict = field(default_factory=dict)  # load_gib by allowance name, for the deploy log
+    k: SizingConstants = field(default_factory=SizingConstants)  # the constants it was sized with
 
 
 @dataclass
@@ -221,6 +259,7 @@ class Model:
     draft_model_id: str = ""                  # speculative-decoding draft, fetched to <weights>/draft
     runtime: str = ""
     rt: dict = field(default_factory=dict)    # merged runtime config
+    sizing_k: SizingConstants = field(default_factory=SizingConstants)  # runtimes.<name>.sizing
     ver: dict = field(default_factory=dict)   # selected runtime version entry (env/args deltas)
     version: str = ""                         # "" for runtimes without a versions: map
     runtime_image: str = ""
@@ -296,6 +335,7 @@ def resolve(catalog: Catalog, target: str, o: Any) -> Model:
         abort("No model specified. Use: model-manager <command> <model-name> or --hfid <hf/repo>")
 
     m.rt = catalog.runtime_config(m.runtime)
+    m.sizing_k = sizing_constants(pick(m.rt, "sizing"), f"runtimes.{m.runtime}.sizing")
     m.kind = m.kind or text(pick(m.rt, "kind", "LLMInferenceService"))
     _select_image(catalog, m, o)
 

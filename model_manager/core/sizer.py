@@ -11,23 +11,23 @@ import math
 import re
 from dataclasses import dataclass
 
-from .config import Sizing
+from .config import Sizing, SizingConstants
 
 GIB = 1024 ** 3
 DEFAULT_STREAMS = 1     # requests of the full context the KV cache holds at once, unless kv_streams says otherwise
-OVERHEAD_GIB = 3
-# Headroom on the estimated parts only (weights, load allowances, runtime): the KV pool is allocated at exactly
-# VLLM_CPU_KVCACHE_SPACE and does not grow, so it is added as is. A fixed margin covers what 15% of a small model
-# does not (the runtime varies by ~2 GiB between models).
-HEADROOM = 1.15
-MARGIN_GIB = 2
-KV_MIN_GIB = 2
-# Load-time allowances, measured on Xeon with vLLM 0.28 (docs/reference/memory_sizing.md#load-allowances):
-QUANTIZED_REPACK = 0.4    # x the quantized weight bytes: repacked for the CPU kernel, both copies briefly resident
-MULTIMODAL_GIB = 4        # vision / audio encoder profiling at start-up (Qwen2.5-VL-3B, Gemma 4 E4B: +2-2.5 GiB)
-# Encoders with temporal patches (Qwen-VL) profile a dummy video as long as the context allows: per 1K tokens
-# (Qwen2.5-VL-3B: +2.3 GiB at 32K, +26.4 GiB at 128K). Frame-sampling encoders (Gemma) add next to nothing.
-VIDEO_GIB_PER_1K = 0.2
+# The estimated parts (runtime, headroom, margin, KV floor, load allowances): config.SizingConstants, overridden per
+# runtime by runtimes.<name>.sizing. Headroom applies to weights, load and runtime only: the KV pool is allocated at
+# exactly VLLM_CPU_KVCACHE_SPACE and does not grow. Video: encoders with temporal patches (Qwen-VL) profile a dummy
+# video as long as the context allows (Qwen2.5-VL-3B: +2.3 GiB at 32K, +26.4 GiB at 128K); frame-sampling encoders
+# (Gemma) add next to nothing.
+DEFAULTS = SizingConstants()
+OVERHEAD_GIB = DEFAULTS.overhead_gib
+HEADROOM = DEFAULTS.headroom
+MARGIN_GIB = DEFAULTS.margin_gib
+KV_MIN_GIB = DEFAULTS.kv_min_gib
+QUANTIZED_REPACK = DEFAULTS.quantized_repack
+MULTIMODAL_GIB = DEFAULTS.multimodal_gib
+VIDEO_GIB_PER_1K = DEFAULTS.video_gib_per_1k
 PLE_BYTES = 4             # per-layer embeddings (Gemma 3n, Gemma 4 E2B / E4B): a float32 copy of the tables
 DTYPE_BYTES = {"float32": 4, "float": 4, "bfloat16": 2, "float16": 2, "half": 2}
 
@@ -209,12 +209,14 @@ def _mm_limit(args: list[str], modality: str) -> int | None:
     return int(value) if str(value).isdigit() else None
 
 
-def load_allowance_gib(cfg: dict | None, weight_bytes: int, args: list[str], context: int = 0) -> float:
+def load_allowance_gib(cfg: dict | None, weight_bytes: int, args: list[str], context: int = 0,
+                       k: SizingConstants = DEFAULTS) -> float:
     """Memory beyond weights, KV and the per-worker runtime that a deploy needs (see load_allowances)."""
-    return sum(load_allowances(cfg, weight_bytes, args, context).values())
+    return sum(load_allowances(cfg, weight_bytes, args, context, k).values())
 
 
-def load_allowances(cfg: dict | None, weight_bytes: int, args: list[str], context: int = 0) -> dict[str, float]:
+def load_allowances(cfg: dict | None, weight_bytes: int, args: list[str], context: int = 0,
+                    k: SizingConstants = DEFAULTS) -> dict[str, float]:
     """The load allowances by name, in GiB: the repack copy of quantized weights; the encoder profiling of a
     multimodal model unless --limit-mm-per-prompt sets every modality it has to 0; a natively encoded video, which
     grows with the context; and per-layer embedding tables."""
@@ -222,13 +224,14 @@ def load_allowances(cfg: dict | None, weight_bytes: int, args: list[str], contex
         return {}
     parts = {}
     if _quantized(cfg):
-        parts[f"quantized repack at {QUANTIZED_REPACK} x weights"] = QUANTIZED_REPACK * weight_bytes / GIB
+        parts[f"quantized repack at {k.quantized_repack} x weights"] = k.quantized_repack * weight_bytes / GIB
     present = ["image", "video"] * ("vision_config" in cfg) + ["audio"] * ("audio_config" in cfg)
-    if any(_mm_limit(args, k) != 0 for k in present):
-        parts["/".join(dict.fromkeys(k for k in present if k != "video") or ["video"]) + " encoder"] = MULTIMODAL_GIB
+    if any(_mm_limit(args, m) != 0 for m in present):
+        parts["/".join(dict.fromkeys(m for m in present if m != "video") or ["video"]) + " encoder"] = k.multimodal_gib
     native_video = (cfg.get("vision_config") or {}).get("temporal_patch_size")
     if native_video and cfg.get("video_token_id") is not None and _mm_limit(args, "video") != 0:
-        parts[f"video profiling at {VIDEO_GIB_PER_1K} per 1K of {context} tokens"] = VIDEO_GIB_PER_1K * context / 1024
+        parts[f"video profiling at {k.video_gib_per_1k} per 1K of {context} tokens"] = \
+            k.video_gib_per_1k * context / 1024
     t = text_config(cfg)
     if t.get("hidden_size_per_layer_input"):
         tables = (t.get("vocab_size_per_layer_input") or t.get("vocab_size") or 0) * t.get("num_hidden_layers", 0)
@@ -237,7 +240,7 @@ def load_allowances(cfg: dict | None, weight_bytes: int, args: list[str], contex
 
 
 def size(cfg: dict | None, weight_bytes: int, args: list[str], tp: int,
-         draft: tuple[dict | None, int] | None = None, streams: int = 0) -> Sizing:
+         draft: tuple[dict | None, int] | None = None, streams: int = 0, k: SizingConstants = DEFAULTS) -> Sizing:
     """Memory and VLLM_CPU_KVCACHE_SPACE for one pod; raises Unsupported when the model cannot be sized."""
     if not weight_bytes:
         raise Unsupported("no safetensors size on HuggingFace")
@@ -268,22 +271,22 @@ def size(cfg: dict | None, weight_bytes: int, args: list[str], tp: int,
 
     def kv_at(t: int) -> int:
         per_request = bytes_per_request(layers, t, max_len, kv_bytes, model_bytes, block, batched, prefix_caching)
-        return max(KV_MIN_GIB, math.ceil(per_request * streams / GIB))
+        return max(k.kv_min_gib, math.ceil(per_request * streams / GIB))
 
     # kv_streams requests of the full context, with no cap: the fit and NUMA pre-flight catch one that does not fit.
     streams = streams or DEFAULT_STREAMS
     kv_gib = kv_at(tp)
     # KV heads split across workers, so a larger TP needs less KV per worker; the NUMA hint compares at each TP.
     kv_by_tp = {t: kv_at(t) for t in (1, 2, 4, 8) if t == tp or not topology_error(cfg, t)}
-    load_parts = load_allowances(cfg, weight_bytes, args, max_len)
-    for name, gib in (load_allowances(draft[0], draft[1], args, max_len) if draft else {}).items():
+    load_parts = load_allowances(cfg, weight_bytes, args, max_len, k)
+    for name, gib in (load_allowances(draft[0], draft[1], args, max_len, k) if draft else {}).items():
         load_parts[name] = load_parts.get(name, 0) + gib
     load = sum(load_parts.values())
-    needed = weights / GIB + load + tp * (kv_gib + OVERHEAD_GIB)
-    memory = (weights / GIB + load + tp * OVERHEAD_GIB) * HEADROOM + tp * kv_gib + MARGIN_GIB
+    needed = weights / GIB + load + tp * (kv_gib + k.overhead_gib)
+    memory = (weights / GIB + load + tp * k.overhead_gib) * k.headroom + tp * kv_gib + k.margin_gib
     return Sizing(weights_gib=weights / GIB, kv_gib=kv_gib, tp=tp, max_model_len=max_len,
                   needed_gib=needed, memory_gi=math.ceil(memory), load_gib=load, streams=streams,
-                  kv_by_tp=kv_by_tp, load_parts=load_parts)
+                  kv_by_tp=kv_by_tp, load_parts=load_parts, k=k)
 
 
 def served_context(cfg: dict | None, args: list[str]) -> int:
