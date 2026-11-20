@@ -205,7 +205,7 @@ class Sizing:
     tp: int
     max_model_len: int
     needed_gib: float                         # weights + load + tp x (kv + overhead)
-    memory_gi: int                            # needed_gib with headroom: the request and limit
+    memory_gi: int                            # (weights + load + tp x overhead) x 1.15 + tp x kv + 2: the limit
     load_gib: float = 0.0                     # load-time allowances: quantized repack, multimodal encoders
     streams: int = 1                          # full-context requests the KV holds: kv_streams (default 1)
     kv_by_tp: dict = field(default_factory=dict)  # sized KV per worker at each valid TP, for the NUMA hint

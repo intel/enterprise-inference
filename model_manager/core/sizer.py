@@ -16,7 +16,11 @@ from .config import Sizing
 GIB = 1024 ** 3
 DEFAULT_STREAMS = 1     # requests of the full context the KV cache holds at once, unless kv_streams says otherwise
 OVERHEAD_GIB = 3
+# Headroom on the estimated parts only (weights, load allowances, runtime): the KV pool is allocated at exactly
+# VLLM_CPU_KVCACHE_SPACE and does not grow, so it is added as is. A fixed margin covers what 15% of a small model
+# does not (the runtime varies by ~2 GiB between models).
 HEADROOM = 1.15
+MARGIN_GIB = 2
 KV_MIN_GIB = 2
 # Load-time allowances, measured on Xeon with vLLM 0.28 (docs/reference/memory_sizing.md#load-allowances):
 QUANTIZED_REPACK = 0.4    # x the quantized weight bytes: repacked for the CPU kernel, both copies briefly resident
@@ -267,8 +271,9 @@ def size(cfg: dict | None, weight_bytes: int, args: list[str], tp: int,
     load = (load_allowance_gib(cfg, weight_bytes, args, max_len)
             + (load_allowance_gib(draft[0], draft[1], args, max_len) if draft else 0))
     needed = weights / GIB + load + tp * (kv_gib + OVERHEAD_GIB)
+    memory = (weights / GIB + load + tp * OVERHEAD_GIB) * HEADROOM + tp * kv_gib + MARGIN_GIB
     return Sizing(weights_gib=weights / GIB, kv_gib=kv_gib, tp=tp, max_model_len=max_len,
-                  needed_gib=needed, memory_gi=math.ceil(needed * HEADROOM), load_gib=load, streams=streams,
+                  needed_gib=needed, memory_gi=math.ceil(memory), load_gib=load, streams=streams,
                   kv_by_tp=kv_by_tp)
 
 

@@ -50,7 +50,14 @@ def gib(x: float) -> int:
     return int(x * GIB)
 
 
-@pytest.mark.parametrize("tp, kv, memory", [(1, 16, 40), (2, 8, 43), (4, 4, 50)])
+def test_headroom_is_on_the_estimated_parts_not_the_kv():
+    # The KV pool is allocated exactly, so more streams add their KV as is: 15% only on weights + load + runtime.
+    one, sixteen = (sizer.size(LLAMA_8B, gib(14.96), LLM_ARGS, 1, streams=k) for k in (1, 16))
+    assert sixteen.memory_gi - one.memory_gi == sixteen.kv_gib - one.kv_gib == 240
+    assert (one.memory_gi, sixteen.memory_gi) == (39, 279)
+
+
+@pytest.mark.parametrize("tp, kv, memory", [(1, 16, 39), (2, 8, 43), (4, 4, 50)])
 def test_dense_memory_by_tp(tp, kv, memory):
     # One request of Llama's full 131,072 tokens: as many as 16 x 8K. Weights split across workers; KV heads split
     # too, so only the per-worker overhead grows with tp.
@@ -74,7 +81,7 @@ def test_sliding_layers_hold_the_window_plus_a_batch():
     s = sizer.size(GEMMA4, gib(48.07), [*LLM_ARGS, *K8], 1, streams=16)
     assert (s.kv_gib, s.memory_gi) == (13, 74)
     s = sizer.size(GEMMA4, gib(48.07), LLM_ARGS, 1)  # default: one request of 262,144 tokens
-    assert (s.kv_gib, s.memory_gi, s.max_model_len) == (6, 66, 262144)
+    assert (s.kv_gib, s.memory_gi, s.max_model_len) == (6, 67, 262144)
 
 
 def test_linear_attention_state_pads_the_page():
@@ -96,7 +103,7 @@ def test_encoder_decoder_caches_decoder_and_audio_frames():
     assert sizer.bytes_per_request(layers, 1, 448, 4, 4, 128, 2048, False) == 180 * MIB
     assert sizer.bytes_per_request(layers, 1, 448, 4, 4, 128, 448, False) == 144 * MIB
     s = sizer.size(WHISPER, gib(0.90), args, 1, streams=16)
-    assert (s.kv_gib, s.memory_gi, s.max_model_len) == (3, 8, 448)  # context capped at max_target_positions
+    assert (s.kv_gib, s.memory_gi, s.max_model_len) == (3, 10, 448)  # context capped at max_target_positions
 
 
 def test_kinds_are_padded_to_equal_kv_cache_groups():
@@ -127,7 +134,7 @@ def test_widened_weights_are_sized():
 
 def test_draft_model_adds_weights_and_kv():
     s = sizer.size(LLAMA_8B, gib(14.96), LLM_ARGS, 1, draft=(LLAMA_1B, gib(2.30)))
-    assert (round(s.weights_gib, 2), s.kv_gib, s.memory_gi) == (17.26, 20, 47)
+    assert (round(s.weights_gib, 2), s.kv_gib, s.memory_gi) == (17.26, 20, 46)
 
 
 @pytest.mark.parametrize("extra, kv", [(["--kv-cache-dtype", "fp8_e4m3"], 8), (["--max-num-seqs", "4"], 16),
@@ -149,7 +156,7 @@ def test_kv_streams_set_the_streams_without_a_cap(streams, seqs, kv):
     s = sizer.size(LLAMA_8B, gib(14.96), [*LLM_ARGS, "--max-model-len=16384", "--max-num-seqs", seqs], 1,
                    streams=streams)
     assert (s.streams, s.kv_gib) == (streams, kv)
-    assert s.memory_gi == math.ceil((14.96 + kv + 3) * sizer.HEADROOM)
+    assert s.memory_gi == math.ceil((14.96 + 3) * sizer.HEADROOM + kv + sizer.MARGIN_GIB)
 
 
 def test_kv_by_tp_follows_the_kv_heads():
@@ -253,10 +260,10 @@ def test_load_allowances(cfg, args, context, load):
 def test_load_allowances_are_sized():
     s = sizer.size(AWQ, gib(5.3), LLM_ARGS, 1)  # Llama-3 AWQ: KV for one 131,072-token request
     assert s.load_gib == pytest.approx(0.4 * 5.3)
-    assert s.memory_gi == math.ceil((5.3 + 0.4 * 5.3 + 16 + 3) * sizer.HEADROOM)
+    assert s.memory_gi == math.ceil((5.3 + 0.4 * 5.3 + 3) * sizer.HEADROOM + 16 + sizer.MARGIN_GIB)
     # The video allowance follows the sized context.
     assert sizer.size(QWEN_VL, gib(14.96), LLM_ARGS, 1).memory_gi == math.ceil(
-        (14.96 + 4 + 0.2 * 128 + 16 + 3) * sizer.HEADROOM)
+        (14.96 + 4 + 0.2 * 128 + 3) * sizer.HEADROOM + 16 + sizer.MARGIN_GIB)
     assert sizer.size(QWEN_VL, gib(14.96), [*LLM_ARGS, *K8], 1).load_gib == pytest.approx(4 + 0.2 * 8)
 
 
@@ -346,7 +353,7 @@ def _catalog(tmp_path, **entry):
 
 def test_memory_auto_is_sized(hub):
     m, s, main, env = _sized(*LLAMA, "--memory", "auto")
-    assert main["resources"]["limits"]["memory"] == main["resources"]["requests"]["memory"] == "40Gi"
+    assert main["resources"]["limits"]["memory"] == main["resources"]["requests"]["memory"] == "39Gi"
     assert env["VLLM_CPU_KVCACHE_SPACE"] == "16"
     # Sized for 16 x 8192 tokens; the same 16 GiB pool holds one request of Llama's full 131,072.
     assert main["args"][main["args"].index("--max-model-len") + 1] == "131072"
@@ -354,7 +361,7 @@ def test_memory_auto_is_sized(hub):
 
 def test_catalog_memory_auto_is_sized(hub, tmp_path):
     m, s, main, env = _sized("m", catalog=_catalog(tmp_path, memory="auto"))
-    assert main["resources"]["limits"]["memory"] == "40Gi"
+    assert main["resources"]["limits"]["memory"] == "39Gi"
 
 
 def test_without_memory_auto_nothing_is_sized(hub, tmp_path):
@@ -425,7 +432,7 @@ def test_unknown_weights_skip_the_check(hub, monkeypatch, capsys):
 def test_hfid_memory_defaults_to_auto(hub):
     # --hfid has no catalog memory, so it is sized as with --memory auto.
     m, s, main, env = _sized(*LLAMA)
-    assert m.memory_auto_default and main["resources"]["limits"]["memory"] == "40Gi"
+    assert m.memory_auto_default and main["resources"]["limits"]["memory"] == "39Gi"
     assert env["VLLM_CPU_KVCACHE_SPACE"] == "16" and main["args"][main["args"].index("--max-model-len") + 1] == "131072"
 
 
@@ -483,7 +490,7 @@ def test_memory_auto_outside_llm_is_rejected(hub, capsys):
     (["--tensor-parallel-size", "2"], [], 2, "43Gi"),           # the catalog's TP, which vLLM gets
     (["--tensor-parallel-size", "2"], ["--tp", "4"], 4, "50Gi"),  # --tp wins, as in the rendered args
     (["--tensor_parallel_size=2"], [], 2, "43Gi"),
-    ([], [], 1, "40Gi"),
+    ([], [], 1, "39Gi"),
 ])
 def test_tp_from_the_catalog_args(hub, tmp_path, model_args, argv, tp, memory):
     m, s, main, env = _sized("m", *argv, catalog=_catalog(tmp_path, memory="auto", args=model_args))
@@ -498,7 +505,7 @@ def test_bad_catalog_tp_rejected(hub, tmp_path, capsys):
 
 def test_draft_from_the_catalog_is_sized(hub, tmp_path):
     m, s, main, env = _sized("m", catalog=_catalog(tmp_path, memory="auto", draft_model_id="org/draft"))
-    assert main["resources"]["limits"]["memory"] == "47Gi" and env["VLLM_CPU_KVCACHE_SPACE"] == "20"
+    assert main["resources"]["limits"]["memory"] == "46Gi" and env["VLLM_CPU_KVCACHE_SPACE"] == "20"
 
 
 @pytest.mark.parametrize("argv, entry, streams, kv", [
@@ -601,14 +608,14 @@ def test_changed_inputs_re_size_a_deployed_model(hub, monkeypatch, tmp_path, liv
 def test_a_deployed_model_without_recorded_inputs_is_re_sized(hub, monkeypatch, tmp_path):
     monkeypatch.setattr(k8s, "get_json", lambda *a: {"spec": _live("")["spec"]})
     m, s, main, env = _sized("m", catalog=_catalog(tmp_path, memory="auto"))
-    assert main["resources"]["limits"]["memory"] == "40Gi"
+    assert main["resources"]["limits"]["memory"] == "39Gi"
 
 
 def test_memory_auto_on_the_cli_re_sizes_a_deployed_model(hub, monkeypatch, tmp_path):
     catalog = _catalog(tmp_path, memory="auto")
     monkeypatch.setattr(k8s, "get_json", lambda *a: _live(_inputs(catalog, "--memory", "auto")))
     m, s, main, env = _sized("m", "--memory", "auto", catalog=catalog)
-    assert main["resources"]["limits"]["memory"] == "40Gi" and env["VLLM_CPU_KVCACHE_SPACE"] == "16"
+    assert main["resources"]["limits"]["memory"] == "39Gi" and env["VLLM_CPU_KVCACHE_SPACE"] == "16"
 
 
 def test_fixed_memory_deploys_get_the_topology_check(hub, capsys):

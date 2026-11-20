@@ -402,9 +402,9 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
     if not sizer.arg_value(args, "--max-model-len"):
         m.max_model_len = str(s.max_model_len)
     m.sizing = {SIZING_INPUTS: inputs, **({SIZED_CONTEXT: m.max_model_len} if m.max_model_len else {})}
-    info(f"  Memory: {m.memory} (auto) | needs {s.needed_gib:.1f} GiB = weights {s.weights_gib:.1f}"
-         f"{_load_text(s.load_gib)} + KV {s.tp} x {s.kv_gib} + overhead {s.tp} x {sizer.OVERHEAD_GIB}, x "
-         f"{sizer.HEADROOM} headroom | KV for up to {s.streams} x {s.max_model_len} tokens")
+    info(f"  Memory: {m.memory} (auto) | (weights {s.weights_gib:.1f}{_load_text(s.load_gib)} + overhead {s.tp} x "
+         f"{sizer.OVERHEAD_GIB}) x {sizer.HEADROOM} + KV {s.tp} x {s.kv_gib} + {sizer.MARGIN_GIB} | KV for up to "
+         f"{s.streams} x {s.max_model_len} tokens")
     return s
 
 
