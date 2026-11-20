@@ -122,7 +122,9 @@ _llm_ai_gateway_url: >-
 # namespace. An admission policy admits only pods built from the published
 # template (pinned image, fixed command, catalogue name), so creating a Job
 # there cannot run anything else with model-manager's rights.
-llm_services_ui_deploy: "{{ headlamp_enabled | default(false) | bool }}"
+# Not on OpenShift: the platform deploys no Headlamp there, and the policy
+# admits no pod with an injected Istio sidecar.
+llm_services_ui_deploy: "{{ headlamp_enabled | default(false) | bool and cluster_distribution | default('kubernetes') != 'openshift' }}"
 llm_services_mm_namespace: "model-manager"
 # Stock image with kubectl, Python and PyYAML; model-manager is mounted from a
 # ConfigMap. Pinned by digest; keep the tag on the cluster's Kubernetes minor.

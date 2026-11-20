@@ -20,9 +20,35 @@
       kind: Namespace
       metadata:
         name: "{{ llm_services_namespace }}"
-        labels:
-          istio.io/dataplane-mode: "ambient"
+        labels: "{{ istio_namespace_labels | default({'istio.io/dataplane-mode': 'ambient'}) }}"
   when: istio_enabled | default(false) | bool
+
+# OpenShift's mesh runs sidecars, which take a port's protocol from the oldest Service selecting
+# the pod. vLLM serves TLS on 8000: KServe's workload Service says https, but istiod's
+# InferencePool shadow Service names the port http-0 and can be the older one (or tie on
+# creation time), which breaks every TLS call. K8s runs ambient: ztunnel ignores protocols.
+- name: "llm_services | Declare vLLM's port as TLS for the sidecars"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: networking.istio.io/v1
+      kind: Sidecar
+      metadata:
+        name: kserve-workload-tls
+        namespace: "{{ llm_services_namespace }}"
+      spec:
+        workloadSelector:
+          labels:
+            kserve.io/component: workload
+        ingress:
+          - port:
+              number: 8000
+              protocol: TLS
+              name: tls-vllm
+            defaultEndpoint: 127.0.0.1:8000
+  when:
+    - istio_enabled | default(false) | bool
+    - cluster_distribution | default('kubernetes') == 'openshift'
 
 - name: "llm_services | Label namespace — PSS"
   kubernetes.core.k8s:
