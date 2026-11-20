@@ -469,6 +469,23 @@ def test_the_request_check_counts_gpu_nodes_with_their_taint_and_no_cpu_node(mon
         assert (policy._request_errors(m, "8", False) == []) is fits
 
 
+def test_the_gpus_and_the_cpu_must_fit_on_the_same_node(monkeypatch, capsys):
+    """n0 has the 8 GPUs, n1 has 1: alone, each check finds room, the CPU check on n1 while n0's CPUs are taken."""
+    for var in ("MM_SKIP_PREFLIGHT", "MM_PREFLIGHT", "MM_NRI_PREFLIGHT"):
+        monkeypatch.delenv(var, raising=False)
+    busy = {"items": [{"spec": {"nodeName": "n0", "containers": [{"resources": {"requests": {"cpu": "60"}}}]}}]}
+    m = Model(**{**GPU_MODEL, "gpus": "8", "memory": "16Gi"})
+    for pods in ({"items": []}, busy):
+        objects = {"nodes": _nodes(8, 1), "pods": pods, "pvc": None}
+        monkeypatch.setattr(k8s, "get_json", lambda *a, objects=objects: objects[a[0]])
+        if pods is busy:
+            with pytest.raises(SystemExit):
+                policy.preflight_gate(policy.GpuRuntime("model-store"), m, 8, "8")
+        else:
+            policy.preflight_gate(policy.GpuRuntime("model-store"), m, 8, "8")
+    assert "room for 0 where its GPUs are free too" in capsys.readouterr().err
+
+
 def test_gpu_preflight_refuses_when_the_cluster_cannot_be_read(monkeypatch):
     monkeypatch.setattr(k8s, "get_json", lambda *a: None)
     assert policy.GpuRuntime("model-store").preflight(Model(**GPU_MODEL, gpus="1"), 1) == [

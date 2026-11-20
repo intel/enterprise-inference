@@ -213,8 +213,9 @@ class GpuRuntime(BestEffort):
     label = "GPU"
 
     def __init__(self, pvc: str) -> None:
-        """pvc: the model-store claim. rolls: deploy clears it when only spec.replicas changes, so the pods stay."""
-        self.pvc, self.rolls, self.download_nodes = pvc, True, ()
+        """pvc: the model-store claim. rolls: deploy clears it when only spec.replicas changes, so the pods stay.
+        slots: per node, how many new replicas its free GPUs take, once preflight has counted them."""
+        self.pvc, self.rolls, self.download_nodes, self.slots = pvc, True, (), None
 
     def annotations(self, m: Model, tp: int) -> tuple[dict, str]:
         return {}, m.cpu
@@ -245,7 +246,8 @@ class GpuRuntime(BestEffort):
         terms, unbound = _model_store(m.namespace, self.pvc)
         if terms:
             free = {name: f for name, f in free.items() if _node_matches(ready[name], terms)}
-        per_node = [max(f, 0) // need for f in free.values()]
+        self.slots = {name: max(f, 0) // need for name, f in free.items()}
+        per_node = list(self.slots.values())
         # A store that binds on first use lands on one node, and every replica must mount it there.
         fit = max(per_node, default=0) if unbound else sum(per_node)
         # A rollout must also end with every replica placed, once the model's own pods have released their GPUs.
@@ -276,6 +278,10 @@ class GpuRuntime(BestEffort):
             where = " of one node, where the model store that binds on first use is created" if unbound else ""
             return [f"Only {fit} of {new} new replicas fit on the free {resource}{where}; the rest would stay Pending."]
         return []
+
+    def node_slots(self, m: Model, tp: int, node: str) -> int | None:
+        """The CPU and memory check then counts a replica only on a node where its GPUs are free too."""
+        return None if self.slots is None else self.slots.get(node, 0)
 
     def failure(self, m: Model, tp: int) -> str:
         return (f"GPU pre-flight failed: cannot place {m.name} ({m.gpus} x {m.accel_resource}). Override "
@@ -528,8 +534,9 @@ def _request_errors(m: Model, cpu: str, amx: bool, policy: BestEffort | None = N
     if replicas <= slots:
         return []
     where = "; ".join(free) or "no schedulable node" + (" with AMX" if amx else "")
+    gpus = " where its GPUs are free too" if m.gpu else ""
     return [f"{replicas} replica(s) requesting {cpu} CPU and {m.memory} each: the nodes it can use have room for "
-            f"{slots} (free: {where}); the rest would stay Pending."]
+            f"{slots}{gpus} (free: {where}); the rest would stay Pending."]
 
 
 def preflight_gate(policy: BestEffort, m: Model, tp: int, cpu: str, running: int = 0, amx: bool = False) -> None:
@@ -546,7 +553,7 @@ def preflight_gate(policy: BestEffort, m: Model, tp: int, cpu: str, running: int
     # A policy that checks allocatable, not free, capacity counts every replica, running ones too.
     placed = probe if policy.counts_running_pods else dataclasses.replace(m, replicas=str(total))
     placement = policy.preflight(placed, tp)
-    errors = placement + _request_errors(probe, cpu, amx, policy if policy.counts_running_pods else None, tp)
+    errors = placement + _request_errors(probe, cpu, amx, policy if policy.counts_running_pods or m.gpu else None, tp)
     if not errors:
         return
     what = f"{extra} replica(s)" + (f" beyond the {running} running" if running else "") + \
