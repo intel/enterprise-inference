@@ -33,7 +33,7 @@ langfuse_helm_repo_name: "langfuse"
 langfuse_helm_chart: "langfuse/langfuse"
 
 # Hostname for the Langfuse UI (overridable in global_config.yaml)
-langfuse_hostname: "langfuse.{{ base_domain_name | default('inference-example.com') }}"
+langfuse_hostname: "langfuse.{{ base_domain_name | default('inteltoolkits.ai') }}"
 # Path mode: <base><langfuse_path> redirects to the own host (the stock image
 # cannot run under a path).
 langfuse_path: "/langfuse"
@@ -56,7 +56,7 @@ langfuse_pin_issuer_host: true
 # Default admin account — seeded on first startup via LANGFUSE_INIT_* env vars
 # Email defaults to admin@<base_domain_name>
 # Password: set via langfuse_admin_password before install, or auto-generated
-langfuse_admin_email: "admin@{{ base_domain_name | default('inference-example.com') }}"
+langfuse_admin_email: "admin@{{ base_domain_name | default('inteltoolkits.ai') }}"
 langfuse_admin_password: "{{ lookup('password', '/dev/null length=24 chars=ascii_letters,digits') }}"
 
 # PostgreSQL — reuse platform PostgreSQL

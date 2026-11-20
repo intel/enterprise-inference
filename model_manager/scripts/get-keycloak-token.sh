@@ -43,19 +43,20 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ── Proxy normalisation (reuse installer's env helper if present) ───────────
-# Walks up from wherever this script lives until it finds es_auto_installer.sh,
-# so the same file works from model_manager/scripts/ or a symlink elsewhere.
+# Walks up from wherever this script lives until it finds the installer (toolkit_manager.sh,
+# or es_auto_installer.sh in an older checkout), so it works from a symlink elsewhere too.
 _gt_script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")" )" && pwd)"
 _gt_search="$_gt_script_dir"
 for _ in 1 2 3 4 5; do
-  if [[ -x "$_gt_search/es_auto_installer.sh" ]]; then
-    eval "$("$_gt_search/es_auto_installer.sh" env 2>/dev/null)" 2>/dev/null || true
-    break
-  fi
+  for _gt_inst in toolkit_manager.sh es_auto_installer.sh; do
+    [[ -x "$_gt_search/$_gt_inst" ]] || continue
+    eval "$("$_gt_search/$_gt_inst" env 2>/dev/null)" 2>/dev/null || true
+    break 2
+  done
   _gt_search=$(dirname "$_gt_search")
   [[ "$_gt_search" == "/" ]] && break
 done
-unset _gt_script_dir _gt_search
+unset _gt_script_dir _gt_search _gt_inst
 
 # ── Preflight checks ──────────────────────────────────────────────────────────
 if ! command -v kubectl &>/dev/null; then
@@ -102,13 +103,13 @@ if [[ -z "$GATEWAY_IP" && -n "$_gt_ocp" ]]; then
 fi
 
 if [[ -z "$GATEWAY_IP" && -z "${_gt_router:-}" ]]; then
-  _gt_err "Could not find Envoy Gateway LoadBalancer IP.\n  Is the platform installed? Run: ./es_auto_installer.sh install platform"
+  _gt_err "Could not find Envoy Gateway LoadBalancer IP.\n  Is the platform installed? Run: ./toolkit_manager.sh install platform"
 fi
 
 # Discover domains from Keycloak CR
 KEYCLOAK_DOMAIN=$(kubectl get keycloaks -n keycloak -o jsonpath='{.items[0].spec.hostname.hostname}' 2>/dev/null)
 if [[ -z "$KEYCLOAK_DOMAIN" ]]; then
-  _gt_err "Could not read Keycloak hostname from cluster.\n  Is Keycloak installed? Run: ./es_auto_installer.sh install keycloak"
+  _gt_err "Could not read Keycloak hostname from cluster.\n  Is Keycloak installed? Run: ./toolkit_manager.sh install keycloak"
 fi
 # Strip protocol prefix if present (handles both http:// and https://)
 KEYCLOAK_DOMAIN="${KEYCLOAK_DOMAIN#http://}"
@@ -128,7 +129,7 @@ CLIENT_SECRET=$(kubectl get secret keycloak-client-secret -n keycloak \
   -o jsonpath='{.data.client-secret}' 2>/dev/null | base64 -d 2>/dev/null)
 
 if [[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]]; then
-  _gt_err "Secret 'keycloak-client-secret' not found in namespace 'keycloak'.\n  Run the inference stack install to create it:\n  ./es_auto_installer.sh install inference"
+  _gt_err "Secret 'keycloak-client-secret' not found in namespace 'keycloak'.\n  Run the inference stack install to create it:\n  ./toolkit_manager.sh install inference"
 fi
 
 # ── Keycloak reachability: prefer direct (external), fall back to port-forward ─

@@ -204,7 +204,7 @@
             clickhouse_password: "{{ lookup('password', '/dev/null length=24 chars=ascii_letters,digits') }}"
             # Default admin account — seeded on first startup via LANGFUSE_INIT_* env vars
             # Password set via LANGFUSE_ADMIN_PASSWORD env var at install time, or auto-generated
-            admin_email: "{{ langfuse_admin_email | default('admin@' + (base_domain_name | default('inference-example.com'))) }}"
+            admin_email: "{{ langfuse_admin_email | default('admin@' + (base_domain_name | default('inteltoolkits.ai'))) }}"
             admin_password: "{{ langfuse_admin_password }}"
             admin_name: "admin"
             # API keys for LiteLLM integration (pre-generated, stable)

@@ -1743,3 +1743,16 @@ def test_space_check_runs_only_before_a_download_and_counts_reusable_bytes(tmp_p
     if fails:
         assert "big needs" in r.stdout and "Delete an unused model's weights" in r.stdout
         assert "llm_services_model_store_size" in r.stdout and "allows volume expansion" in r.stdout
+
+
+@pytest.mark.parametrize("installers", [["toolkit_manager.sh"], ["es_auto_installer.sh"],
+                                        ["toolkit_manager.sh", "es_auto_installer.sh"]])
+def test_repo_root_found_by_either_installer_name(monkeypatch, tmp_path, installers):
+    """A checkout is recognised by toolkit_manager.sh, its former name es_auto_installer.sh, or both."""
+    mm_dir = tmp_path / "checkout/ext/enterprise.ai-inference/model_manager"
+    mm_dir.mkdir(parents=True)
+    for installer in installers:
+        (tmp_path / "checkout" / installer).write_text("#!/bin/bash\n")
+    monkeypatch.setattr(config, "MM_DIR", mm_dir)
+    monkeypatch.delenv("MM_GLOBAL_CONFIG_SEARCH", raising=False)
+    assert config._repo_roots()[0] == tmp_path / "checkout"

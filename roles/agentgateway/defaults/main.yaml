@@ -31,7 +31,7 @@ agentgateway_inference_extension_enabled: true
 
 # --- Gateway API CRDs (agentgateway needs the standard channel) ---
 # Only applied when absent (agentgateway as the sole gateway); with the
-# ai-solutions platform, envoy_gateway owns them. Same version it ships.
+# Toolkit Manager platform, envoy_gateway owns them. Same version it ships.
 agentgateway_gateway_api_version: "v1.6.1"
 agentgateway_gateway_api_manifest: >-
   https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ agentgateway_gateway_api_version }}/standard-install.yaml
@@ -50,7 +50,7 @@ ai_gateway_namespace: "{{ kserve_llmisvc_namespace | default('llm-inference') }}
 ai_gateway_service_name: "ai-gateway"
 
 # External inference hostname (eg-gateway TLS listener → ai-gateway).
-inference_hostname: "inference.{{ base_domain_name | default('inference-example.com') }}"
+inference_hostname: "inference.{{ base_domain_name | default('inteltoolkits.ai') }}"
 # Path mode (routing_mode: path): <base>/inference, prefix stripped for the AI
 # gateway; the API takes bearer tokens, so cookies of the shared host are dropped.
 inference_path: "/inference"

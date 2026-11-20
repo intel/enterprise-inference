@@ -51,7 +51,7 @@ An inference request enters through the **LLM gateway**, which authenticates and
 **Stands up model serving on a freshly prepared machine, then serves an LLM.** In three steps you'll install Intel® Inference Toolkit, deploy a model, and see it answer.
 
 > [!NOTE]
-> **Prerequisite:** Toolkit Manager installs and operates this toolkit. `es_auto_installer.sh` is
+> **Prerequisite:** Toolkit Manager installs and operates this toolkit. `toolkit_manager.sh` is
 > its installer, and it clones this repository into `ext/enterprise.ai-inference/`. Clone the
 > [**Toolkit Manager**](https://github.com/intel/enterprise-ai-solutions)
 > repo, prep the machine, and create an environment, then run every command below from its root:
@@ -59,7 +59,7 @@ An inference request enters through the **LLM gateway**, which authenticates and
 > ```bash
 > git clone https://github.com/intel/enterprise-ai-solutions.git
 > cd enterprise-ai-solutions
-> ./es_auto_installer.sh configure && ./es_auto_installer.sh init local
+> ./toolkit_manager.sh configure && ./toolkit_manager.sh init local
 > ```
 >
 > Intel® Inference Toolkit needs the cluster, gateway, auth, and storage Toolkit Manager
@@ -71,7 +71,7 @@ An inference request enters through the **LLM gateway**, which authenticates and
 Deploys KServe, the ServingRuntimes, the AI gateway, the Keycloak realm and client, and — with `auth_type: litellm_vkey` or `litellm_enabled: true` — LiteLLM and Langfuse. No models are deployed yet.
 
 ```bash
-./es_auto_installer.sh install inference
+./toolkit_manager.sh install inference
 
 export KUBECONFIG=$(pwd)/env/local/kubeconfig.yaml
 kubectl get pods -n kserve   # controller should be Running
@@ -114,9 +114,9 @@ Call the model — the `model` field selects which one answers:
 curl -sk --noproxy '*' \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  --resolve "inference.solutions.ai:443:$GATEWAY_IP" \
+  --resolve "inference.inteltoolkits.ai:443:$GATEWAY_IP" \
   -d '{"model":"qwen3-0-6b","messages":[{"role":"user","content":"Hello!"}],"max_tokens":64}' \
-  https://inference.solutions.ai/v1/chat/completions
+  https://inference.inteltoolkits.ai/v1/chat/completions
 ```
 
 See what is serving:

@@ -126,5 +126,5 @@ kserve_envoy_ai_controller_service: "ai-gateway-controller"
 kserve_enable_gateway_api: true
 kserve_gateway_name: "eg-gateway"
 kserve_gateway_namespace: "envoy-gateway-system"
-kserve_ingress_domain: "{{ base_domain_name | default('inference-example.com') }}"
+kserve_ingress_domain: "{{ base_domain_name | default('inteltoolkits.ai') }}"
 kserve_ingress_class: "{{ (gateway_platform | default({})).class_name | default('eg', true) }}"

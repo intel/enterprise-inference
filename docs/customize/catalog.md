@@ -306,7 +306,7 @@ deployed manually afterward. Set `model_deploy_strict: true` to make any auto-de
 failure fatal instead.
 
 To skip the deploy phase for a single run without editing config, use
-`./es_auto_installer.sh install inference --skip-models` (or `SKIP_MODEL_DEPLOYMENT=true`).
+`./toolkit_manager.sh install inference --skip-models` (or `SKIP_MODEL_DEPLOYMENT=true`).
 
 Extra flags can be appended to every auto-deploy invocation via `model_deploy_flags`,
 e.g. `"--wait-timeout 1800"` for large models.

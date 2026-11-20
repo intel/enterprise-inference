@@ -130,14 +130,14 @@ No caching or tracing in this path (add observability via OpenTelemetry sidecar 
 ### Step 1: Client → eg-gateway (TLS Termination)
 
 ```
-curl https://litellm.inference-example.com/v1/chat/completions \
+curl https://litellm.inteltoolkits.ai/v1/chat/completions \
   -H "Authorization: Bearer sk-<virtual-key>" \
   -d '{"model": "llama3-8b-awq", "messages": [...]}'
 ```
 
 - Client connects to `192.168.120.103:443` (eg-gateway LoadBalancer)
-- TLS terminated at the HTTPS listener (`*.inference-example.com`)
-- Hostname `litellm.inference-example.com` matched by HTTPRoute
+- TLS terminated at the HTTPS listener (`*.inteltoolkits.ai`)
+- Hostname `litellm.inteltoolkits.ai` matched by HTTPRoute
 
 **Kubernetes resources:**
 - `Gateway/eg-gateway` in `envoy-gateway-system` (listeners: http/80, https/443)

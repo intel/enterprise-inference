@@ -47,7 +47,7 @@ envoy_ai_gateway_namespace: "envoy-ai-gateway-system"
 # litellm_enabled: true         # add LiteLLM with Keycloak auth (always on with auth_type=litellm_vkey)
 # litellm_version: "v1.105.1"
 # litellm_namespace: "litellm"
-# litellm_hostname: "litellm.inference-example.com"  # defaults to litellm.<base_domain_name>
+# litellm_hostname: "litellm.inteltoolkits.ai"  # defaults to litellm.<base_domain_name>
 # litellm_cache_enabled: true
 # litellm_cache_ttl: 600
 # litellm_reconcile: true       # upgrade an existing release with the current settings (default: left as is)
@@ -59,8 +59,8 @@ envoy_ai_gateway_namespace: "envoy-ai-gateway-system"
 # --- Langfuse ---
 # langfuse_enabled: false       # tracing for LiteLLM; default: on whenever LiteLLM is on
 # langfuse_namespace: "langfuse"
-# langfuse_hostname: "langfuse.inference-example.com"  # defaults to langfuse.<base_domain_name>
-# langfuse_admin_email: "admin@inference-example.com"  # defaults to admin@<base_domain_name>
+# langfuse_hostname: "langfuse.inteltoolkits.ai"  # defaults to langfuse.<base_domain_name>
+# langfuse_admin_email: "admin@inteltoolkits.ai"  # defaults to admin@<base_domain_name>
 # langfuse_admin_password: set via LANGFUSE_ADMIN_PASSWORD env var
 
 # --- CPU Policy ---
@@ -74,7 +74,7 @@ envoy_ai_gateway_namespace: "envoy-ai-gateway-system"
 # This must match the value the cluster was installed with: it decides both how
 # kubelet is configured (solutions repo) and how model manifests are rendered
 # (this repo). Changing it on an existing cluster requires re-running
-# `./es_auto_installer.sh install kubernetes` so kubelet is reconfigured.
+# `./toolkit_manager.sh install kubernetes` so kubelet is reconfigured.
 kubernetes_cpu_policy: "nri-balloons"
 
 # NRI Balloons tuning (only when kubernetes_cpu_policy=nri-balloons):
@@ -94,7 +94,7 @@ kubernetes_cpu_policy: "nri-balloons"
 
 # Deploy models during installation (true/false)
 # Set to false to install infrastructure only without deploying any models
-# Can be overridden with: ./es_auto_installer.sh install inference --skip-models
+# Can be overridden with: ./toolkit_manager.sh install inference --skip-models
 llm_services_deploy_models: false
 
 # Catalog models deployed on install whatever llm_services_deploy_models says —

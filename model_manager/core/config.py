@@ -395,7 +395,9 @@ def _select_image(catalog: Catalog, m: Model, o: Any) -> None:
 def _repo_roots() -> list[Path]:
     """Where to look for solution configs: MM_GLOBAL_CONFIG_SEARCH, the enclosing repo, sibling checkouts."""
     roots = [Path(p) for p in (os.environ.get("MM_GLOBAL_CONFIG_SEARCH") or "").split(":") if p]
-    roots += [d for d in (MM_DIR, *list(MM_DIR.parents)[:-1]) if (d / "es_auto_installer.sh").is_file()][:1]
+    # toolkit_manager.sh, or es_auto_installer.sh (its former name) in an older checkout.
+    roots += [d for d in (MM_DIR, *list(MM_DIR.parents)[:-1])
+              if any((d / n).is_file() for n in ("toolkit_manager.sh", "es_auto_installer.sh"))][:1]
     return roots + sorted(p for p in MM_DIR.parent.parent.glob("*ai-solutions*") if p.is_dir())
 
 

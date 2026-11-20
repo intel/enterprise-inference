@@ -235,7 +235,7 @@ from openai import OpenAI
 client = OpenAI(
     # auth_type jwt:          https://inference.<base_domain_name>/v1
     # auth_type litellm_vkey: https://litellm.<base_domain_name>/v1
-    base_url="https://inference.solutions.ai/v1",
+    base_url="https://inference.inteltoolkits.ai/v1",
     api_key="<KEYCLOAK_JWT_OR_LITELLM_KEY>",
 )
 

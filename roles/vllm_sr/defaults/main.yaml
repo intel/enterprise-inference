@@ -95,8 +95,8 @@ vllm_sr_dashboard_allowed_groups: []
 # Foreign var (canonical owner: enterprise-ai-solutions gateway component flag;
 # envoy_gateway_enabled is its alias).
 vllm_sr_gateway_publish: "{{ gateway_enabled | default(envoy_gateway_enabled | default(true)) | bool }}"
-vllm_sr_dashboard_hostname: "vllm-sr.{{ base_domain_name | default('inference-example.com') }}"
-vllm_sr_dashboard_admin_email: "admin@{{ base_domain_name | default('inference-example.com') }}"
+vllm_sr_dashboard_hostname: "vllm-sr.{{ base_domain_name | default('inteltoolkits.ai') }}"
+vllm_sr_dashboard_admin_email: "admin@{{ base_domain_name | default('inteltoolkits.ai') }}"
 vllm_sr_dashboard_admin_name: "admin"
 vllm_sr_dashboard_secret: "vllm-sr-dashboard"  # checkov:skip=CKV_SECRET_6: Secret name, not a value
 vllm_sr_dashboard_port: 8700                   # chart dashboard.service.port

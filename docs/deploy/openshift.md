@@ -18,14 +18,14 @@ detects. Nothing in `global_config.yaml` or `models.yaml` changes between platfo
    StorageClass. Follow
    [Deploy on OpenShift](https://github.com/intel/enterprise-ai-solutions/blob/main/docs/deploy/openshift.md)
    in the platform repo.
-2. **Install the platform layer:** run `./es_auto_installer.sh install platform --env <env>`
+2. **Install the platform layer:** run `./toolkit_manager.sh install platform --env <env>`
    (see that guide's *Installer configuration*).
 
 ## Install the inference layer
 
 ```bash
-./es_auto_installer.sh init inference --env ocp     # once
-./es_auto_installer.sh install inference --env ocp
+./toolkit_manager.sh init inference --env ocp     # once
+./toolkit_manager.sh install inference --env ocp
 ```
 
 | Component | On OpenShift |
