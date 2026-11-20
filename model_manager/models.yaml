@@ -1,599 +1,300 @@
-# =============================================================================
-# Model Manager — model catalog & runtime configuration
-# =============================================================================
-#   models:    what to deploy (one entry per model)
-#   runtimes:  per-engine deploy config (images, versions, env, categories)
-#
-#   ./model-manager deploy <name> --wait             # deploy a catalog model
-#   ./model-manager deploy --hfid <hf/repo> --cpu 8  # deploy any HuggingFace model by id (no edit needed)
-#   ./model-manager undeploy <name>
-#   ./model-manager list                             # catalog models and their status, plus others deployed
-# =============================================================================
+# Model catalog: what model-manager can deploy, and the engines that serve it.
+# Fields, server binding, cpu: auto, chat templates: docs/customize/catalog.md
+# Runtimes, categories, KV cache, how settings combine: docs/customize/runtimes.md
+# Usage: ./model-manager deploy <name> --wait | undeploy <name> | list
 
-
-# =============================================================================
-# Defaults — cluster-wide fallbacks applied to every model that omits a value
-# =============================================================================
 defaults:
-  namespace: llm-inference        # target namespace for deployments
-  runtime: vllm                   # default engine when a model omits one
-  replicas: 1                     # default replica count
-  require_amx: true               # only schedule model pods on nodes with Intel AMX
+  namespace: llm-inference
+  runtime: iims
+  replicas: 1
+  require_amx: true
 
-# =============================================================================
-# Storage — where downloaded model weights live
-# =============================================================================
 storage:
-  pvc_name: model-store           # PVC that holds downloaded model weights
+  pvc_name: model-store
 
-# =============================================================================
-# Network — proxy + connectivity settings for pulling weights from HuggingFace
-# =============================================================================
 network:
-  http_proxy: ""                  # e.g. http://proxy:911 — empty inherits from env
-  https_proxy: ""                 # e.g. http://proxy:912
-  no_proxy: ""                    # e.g. localhost,127.0.0.1,10.0.0.0/8
-  connectivity_check: https://huggingface.co   # reachability probe before download
-
-
-# =============================================================================
-# Models — what to deploy (one entry per model)
-# =============================================================================
-# Required: name, model_id. Everything else is optional and inherits from the
-# runtime/category. CLI flags override any field for a one-off deploy.
-#
-# Common fields:
-#   category:        llm | embed | rerank | vlm   (drives default args + cpu/memory)
-#   cpu / memory:    resource requests            (default from category)
-#                    cpu: auto — NUMA-aware: under nri-balloons, the free
-#                    physical cores of one NUMA node per TP rank on the smallest
-#                    schedulable node (the category cpu under other policies).
-#                    A deployed model keeps its CPU; --cpu N overrides.
-#   replicas:        replica count                (default: 1)
-#   autoscaling:     KEDA (keda_enabled) between min and max replicas; replaces replicas
-#                    {min_replicas: 1, max_replicas: 3, scale_target: N}
-#                    scales up when the runtime's signal per replica exceeds scale_target
-#                    (signal + default: runtimes/<name>/values.yaml → autoscaling)
-#   namespace:       target namespace             (default: llm-inference)
-#   node:            pin to a specific node
-#   routing:         epp | direct
-#   image:           override the runtime image entirely
-#   autodeploy:      true → bring up automatically during install
-#   chat_template:   inline Jinja, or an absolute path → vLLM --chat-template
-#                    Inline Jinja (multi-line: use a `|` block scalar) is stored
-#                    in a <model>-chat-template ConfigMap and mounted read-only
-#                    at /etc/chat-template — it is deliberately NOT inlined into
-#                    the LLMInferenceService, because the KServe controller runs
-#                    the spec through Go text/template and rejects `{{ ... }}`.
-#                    The ConfigMap is created on deploy and removed on undeploy.
-#                    An absolute path (leading /) is passed through untouched and
-#                    must already exist in the pod — e.g. a file you placed on the
-#                    model PVC, visible at /mnt/models/<file>. vLLM exits if it is
-#                    missing, so prefer inline Jinja unless the file is external.
-#                    Must be a single string — if a HF repo publishes a LIST of
-#                    named templates, copy just the one you want (usually
-#                    "default"). Literal CR (\r) survives: use a double-quoted
-#                    scalar with "\r" escapes (a `|` block scalar cannot carry CR,
-#                    as YAML normalizes line breaks).
-#   chat_template_file: file under chat-templates/ (MM_CHAT_TEMPLATES), or an
-#                    absolute host path, whose content is used as chat_template —
-#                    one shared file instead of inline duplication. Mutually
-#                    exclusive with chat_template.
-#   draft_model_id:  speculative-decoding draft model (HuggingFace repo), fetched
-#                    by the download Job into the model's directory, so the pod
-#                    sees it at /mnt/models/draft — reference that path in args
-#                    (--speculative-config.model /mnt/models/draft).
-#   args: [ ... ]    extra engine args   (appended after category/version args)
-#   env:  { ... }    extra env vars      (merged over runtime env)
-#
-# Server binding — pick the model server + version. Two equivalent forms:
-#   servers: (preferred)   declares the known-good server/version allow-list
-#     servers: { vllm: { versions: ["0.24.0","0.19.1"], default: "0.24.0" } }
-#     default_server: vllm
-#   shorthand (single)     runtime: + server_version:   (no allow-list)
-#
-# Select at deploy: --server <engine> --server-version <v>   (must be declared)
-# Run variants side by side: --as <alt-name>
+  http_proxy: ""                  # empty: inherit from the environment
+  https_proxy: ""
+  no_proxy: ""
+  connectivity_check: https://huggingface.co
 
 models:
 
-  # LLM — small Qwen3, test model (servers: form)
-  - name: qwen3-0-6b                                                # deploy name + the "model" id used in API requests
-    model_id: Qwen/Qwen3-0.6B                                       # HuggingFace repo to pull weights from
-    category: llm                                                   # workload class → picks vLLM llm args + cpu/memory defaults
-    servers:                                                        # servers this model may run on (allow-list)
-      vllm: { versions: ["0.24.0", "0.19.1"], default: "0.24.0" }   # engine: allowed versions + default
-    default_server: vllm                                            # server used when --server is not passed
-    cpu: 8                                                          # CPU cores requested (overrides category default)
-    memory: 16Gi                                                    # memory requested (overrides category default)
-
-  # LLM — quantized Llama-3 8B, chat/completion (shorthand form)
-  - name: llama3-8b-awq
-    model_id: casperhansen/llama-3-8b-instruct-awq
-    category: llm
-    runtime: vllm
-    server_version: "0.24.0"
-    cpu: 16
-    memory: 32Gi
-
-  # LLM — Qwen3.5 2B INT4 on OpenVINO (flat runtime, no version)
-  - name: qwen3-5-2b-ovms
-    model_id: OpenVINO/Qwen3.5-2B-int4-ov
-    runtime: openvino
+  # ── LLMs ───────────────────────────────────────────────────────────────────
+  - name: qwen3-0-6b
+    model_id: Qwen/Qwen3-0.6B
     category: llm
     cpu: 8
-    memory: 16Gi
-
-  # Embedding — BGE base English (768-dim)
-  - name: bge-base-en
-    model_id: BAAI/bge-base-en-v1.5
-    category: embed
-    runtime: vllm
-    server_version: "0.24.0"
-
-  # Reranker — BGE reranker for RAG pipelines
-  - name: bge-reranker
-    model_id: BAAI/bge-reranker-base
-    category: rerank
-    runtime: vllm
-    server_version: "0.24.0"
-
-  # ── Tuned CPU sizing + TP + tool-call parsers + chat templates.
-  #    TP 1 for every CPU model: vLLM binds one NUMA node per TP rank and the NRI
-  #    balloon is chosen by --tp, so raise both together with `--tp N`. Memory is
-  #    a sizing estimate.
-  #    `cpu: auto` sizes each model to the free physical cores of one NUMA
-  #    node (minus reserved) per TP rank, on the smallest node; `--cpu N` overrides.
-  - name: llama-3-1-8b
-    model_id: meta-llama/Llama-3.1-8B-Instruct
-    category: llm
-    runtime: vllm
-    server_version: "0.28.0"
-    cpu: auto                        # one NUMA node per TP rank, per node
-    memory: 64Gi
-    args: [ "--block-size", "128", "--dtype", "bfloat16", "--distributed_executor_backend", "mp", "--enable_chunked_prefill", "--enforce-eager", "--max-num-batched-tokens", "2048", "--max-num-seqs", "256", "--enable-prefix-caching", "--enable-auto-tool-choice", "--tool-call-parser", "llama3_json", "--tensor-parallel-size", "1" ]
-    env:
-      VLLM_RPC_TIMEOUT: "100000"
-      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
-      VLLM_ENGINE_ITERATION_TIMEOUT_S: "120"
-      TRITON_CACHE_DIR: "/tmp/.triton"
-      USER: "vllm"
-      VLLM_CPU_KVCACHE_SPACE: "40"
-      VLLM_CPU_NUM_OF_RESERVED_CPU: "0"
-      HF_HUB_DISABLE_XET: "1"
-      VLLM_CPU_SGL_KERNEL: "1"
-
-  - name: llama-3-2-3b
-    model_id: meta-llama/Llama-3.2-3B-Instruct
-    category: llm
-    runtime: vllm
-    server_version: "0.28.0"
-    cpu: auto                        # one NUMA node per TP rank, per node
-    memory: 64Gi
-    args: [ "--block-size", "128", "--dtype", "bfloat16", "--distributed_executor_backend", "mp", "--enable_chunked_prefill", "--enforce-eager", "--max-num-batched-tokens", "2048", "--max-num-seqs", "256", "--enable-prefix-caching", "--enable-auto-tool-choice", "--tool-call-parser", "llama3_json", "--tensor-parallel-size", "1" ]
-    env:
-      VLLM_RPC_TIMEOUT: "100000"
-      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
-      VLLM_ENGINE_ITERATION_TIMEOUT_S: "120"
-      TRITON_CACHE_DIR: "/tmp/.triton"
-      USER: "vllm"
-      VLLM_CPU_KVCACHE_SPACE: "40"
-      VLLM_CPU_NUM_OF_RESERVED_CPU: "0"
-      HF_HUB_DISABLE_XET: "1"
-      VLLM_CPU_SGL_KERNEL: "1"
-
-  - name: deepseek-r1-qwen-32b
-    model_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
-    category: llm
-    runtime: vllm
-    server_version: "0.28.0"
-    cpu: auto                        # one NUMA node per TP rank, per node
-    memory: 128Gi
-    args: [ "--block-size", "128", "--dtype", "bfloat16", "--distributed_executor_backend", "mp", "--enable_chunked_prefill", "--enforce-eager", "--max-num-batched-tokens", "2048", "--max-num-seqs", "256", "--enable-prefix-caching", "--tensor-parallel-size", "1" ]
-    env:
-      VLLM_RPC_TIMEOUT: "100000"
-      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
-      VLLM_ENGINE_ITERATION_TIMEOUT_S: "120"
-      TRITON_CACHE_DIR: "/tmp/.triton"
-      USER: "vllm"
-      VLLM_CPU_KVCACHE_SPACE: "40"
-      VLLM_CPU_NUM_OF_RESERVED_CPU: "0"
-      HF_HUB_DISABLE_XET: "1"
-      VLLM_CPU_SGL_KERNEL: "1"
-
-  - name: deepseek-r1-llama-8b
-    model_id: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-    category: llm
-    runtime: vllm
-    server_version: "0.28.0"
-    cpu: auto                        # one NUMA node per TP rank, per node
-    memory: 64Gi
-    args: [ "--block-size", "128", "--dtype", "bfloat16", "--distributed_executor_backend", "mp", "--enable_chunked_prefill", "--enforce-eager", "--max-num-batched-tokens", "2048", "--max-num-seqs", "256", "--enable-prefix-caching", "--tensor-parallel-size", "1" ]
-    env:
-      VLLM_RPC_TIMEOUT: "100000"
-      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
-      VLLM_ENGINE_ITERATION_TIMEOUT_S: "120"
-      TRITON_CACHE_DIR: "/tmp/.triton"
-      USER: "vllm"
-      VLLM_CPU_KVCACHE_SPACE: "40"
-      VLLM_CPU_NUM_OF_RESERVED_CPU: "0"
-      HF_HUB_DISABLE_XET: "1"
-      VLLM_CPU_SGL_KERNEL: "1"
+    memory: 24Gi
 
   - name: qwen3-1-7b
     model_id: Qwen/Qwen3-1.7B
     category: llm
-    runtime: vllm
-    server_version: "0.28.0"
-    cpu: auto                        # one NUMA node per TP rank, per node
+    cpu: auto
     memory: 64Gi
-    args: [ "--block-size", "128", "--dtype", "bfloat16", "--distributed_executor_backend", "mp", "--enable_chunked_prefill", "--enforce-eager", "--max-num-batched-tokens", "2048", "--max-num-seqs", "256", "--enable-prefix-caching", "--enable-auto-tool-choice", "--tool-call-parser", "hermes", "--tensor-parallel-size", "1" ]
-    env:
-      VLLM_RPC_TIMEOUT: "100000"
-      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
-      VLLM_ENGINE_ITERATION_TIMEOUT_S: "120"
-      TRITON_CACHE_DIR: "/tmp/.triton"
-      USER: "vllm"
-      VLLM_CPU_KVCACHE_SPACE: "40"
-      VLLM_CPU_NUM_OF_RESERVED_CPU: "0"
-      HF_HUB_DISABLE_XET: "1"
-      VLLM_CPU_SGL_KERNEL: "1"
+    args: [ --enable-auto-tool-choice, --tool-call-parser, hermes ]
 
   - name: qwen3-4b
     model_id: Qwen/Qwen3-4B-Instruct-2507
     category: llm
-    runtime: vllm
-    server_version: "0.28.0"
-    cpu: auto                        # one NUMA node per TP rank, per node
+    cpu: auto
     memory: 64Gi
-    args: [ "--block-size", "128", "--dtype", "bfloat16", "--distributed_executor_backend", "mp", "--enable_chunked_prefill", "--enforce-eager", "--max-num-batched-tokens", "2048", "--max-num-seqs", "256", "--enable-prefix-caching", "--enable-auto-tool-choice", "--tool-call-parser", "hermes", "--tensor-parallel-size", "1" ]
-    env:
-      VLLM_RPC_TIMEOUT: "100000"
-      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
-      VLLM_ENGINE_ITERATION_TIMEOUT_S: "120"
-      TRITON_CACHE_DIR: "/tmp/.triton"
-      USER: "vllm"
-      VLLM_CPU_KVCACHE_SPACE: "40"
-      VLLM_CPU_NUM_OF_RESERVED_CPU: "0"
-      HF_HUB_DISABLE_XET: "1"
-      VLLM_CPU_SGL_KERNEL: "1"
-
-  - name: qwen2-5-coder-7b
-    model_id: Qwen/Qwen2.5-Coder-7B-Instruct
-    category: llm
-    runtime: vllm
-    server_version: "0.28.0"
-    cpu: auto                        # one NUMA node per TP rank, per node
-    memory: 64Gi
-    chat_template_file: tool_chat_template_qwen3coder.jinja
-    args: [ "--block-size", "128", "--dtype", "bfloat16", "--distributed_executor_backend", "mp", "--enable_chunked_prefill", "--enforce-eager", "--max-num-batched-tokens", "2048", "--max-num-seqs", "256", "--enable-prefix-caching", "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder", "--tensor-parallel-size", "1" ]
-    env:
-      VLLM_RPC_TIMEOUT: "100000"
-      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
-      VLLM_ENGINE_ITERATION_TIMEOUT_S: "120"
-      TRITON_CACHE_DIR: "/tmp/.triton"
-      USER: "vllm"
-      VLLM_CPU_KVCACHE_SPACE: "40"
-      VLLM_CPU_NUM_OF_RESERVED_CPU: "0"
-      HF_HUB_DISABLE_XET: "1"
-      VLLM_CPU_SGL_KERNEL: "1"
-
-  - name: qwen3-coder-30b
-    model_id: Qwen/Qwen3-Coder-30B-A3B-Instruct
-    category: llm
-    runtime: vllm
-    server_version: "0.28.0"
-    cpu: auto                        # one NUMA node per TP rank, per node
-    memory: 160Gi
-    chat_template_file: tool_chat_template_qwen3coder.jinja
-    args: [ "--block-size", "128", "--dtype", "bfloat16", "--distributed_executor_backend", "mp", "--trust-remote-code", "--max-num-batched-tokens", "2048", "--max-num-seqs", "256", "--enable-prefix-caching", "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_xml", "--tensor-parallel-size", "1" ]
-    env:
-      VLLM_RPC_TIMEOUT: "100000"
-      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
-      VLLM_ENGINE_ITERATION_TIMEOUT_S: "120"
-      TRITON_CACHE_DIR: "/tmp/.triton"
-      USER: "vllm"
-      VLLM_CPU_KVCACHE_SPACE: "60"
-      VLLM_CPU_NUM_OF_RESERVED_CPU: "2"
-      HF_HUB_DISABLE_XET: "1"
-      VLLM_CPU_SGL_KERNEL: "1"
-
-  - name: qwen2-5-coder-14b
-    model_id: Qwen/Qwen2.5-Coder-14B-Instruct
-    category: llm
-    runtime: vllm
-    server_version: "0.28.0"
-    cpu: auto                        # one NUMA node per TP rank, per node
-    memory: 96Gi
-    chat_template_file: tool_chat_template_qwen3coder.jinja
-    args: [ "--block-size", "128", "--dtype", "bfloat16", "--distributed_executor_backend", "mp", "--enable_chunked_prefill", "--enforce-eager", "--max-num-batched-tokens", "2048", "--max-num-seqs", "256", "--enable-prefix-caching", "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_xml", "--tensor-parallel-size", "1" ]
-    env:
-      VLLM_RPC_TIMEOUT: "100000"
-      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
-      VLLM_ENGINE_ITERATION_TIMEOUT_S: "120"
-      TRITON_CACHE_DIR: "/tmp/.triton"
-      USER: "vllm"
-      VLLM_CPU_KVCACHE_SPACE: "40"
-      VLLM_CPU_NUM_OF_RESERVED_CPU: "0"
-      HF_HUB_DISABLE_XET: "1"
-      VLLM_CPU_SGL_KERNEL: "1"
-      TORCHDYNAMO_DISABLE: "1"
-
-  - name: nemotron-nano-4b
-    model_id: nvidia/Llama-3.1-Nemotron-Nano-4B-v1.1
-    category: llm
-    runtime: vllm
-    server_version: "0.28.0"
-    cpu: auto                        # one NUMA node per TP rank, per node
-    memory: 48Gi
-    args: [ "--block-size", "128", "--dtype", "bfloat16", "--enable_chunked_prefill", "--enforce-eager", "--max-num-batched-tokens", "2048", "--max-num-seqs", "256", "--enable-prefix-caching", "--enable-auto-tool-choice", "--tool-call-parser", "llama3_json", "--tensor-parallel-size", "1" ]
-    env:
-      VLLM_RPC_TIMEOUT: "100000"
-      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
-      VLLM_ENGINE_ITERATION_TIMEOUT_S: "120"
-      TRITON_CACHE_DIR: "/tmp/.triton"
-      USER: "vllm"
-      VLLM_CPU_KVCACHE_SPACE: "20"
-      VLLM_CPU_NUM_OF_RESERVED_CPU: "0"
-      HF_HUB_DISABLE_XET: "1"
-      HF_HUB_OFFLINE: "1"
-      VLLM_CPU_SGL_KERNEL: "1"
+    args: [ --enable-auto-tool-choice, --tool-call-parser, hermes ]
 
   - name: qwen3-30b-a3b
     model_id: Qwen/Qwen3-30B-A3B-Instruct-2507
     category: llm
-    runtime: vllm
-    server_version: "0.28.0"
-    cpu: auto                        # one NUMA node per TP rank, per node
+    cpu: auto
     memory: 160Gi
     chat_template_file: tool_chat_template_qwen3coder.jinja
-    args: [ "--block-size", "128", "--dtype", "bfloat16", "--distributed_executor_backend", "mp", "--enable_chunked_prefill", "--enable-prefix-caching", "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_xml", "--tensor-parallel-size", "1" ]
-    env:
-      VLLM_RPC_TIMEOUT: "100000"
-      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
-      VLLM_ENGINE_ITERATION_TIMEOUT_S: "120"
-      TRITON_CACHE_DIR: "/tmp/.triton"
-      USER: "vllm"
-      VLLM_CPU_KVCACHE_SPACE: "60"
-      VLLM_CPU_NUM_OF_RESERVED_CPU: "0"
-      HF_HUB_DISABLE_XET: "1"
-      VLLM_CPU_SGL_KERNEL: "1"
-      TORCHINDUCTOR_CACHE_DIR: "/tmp/.torch_compile"
-      XDG_CACHE_HOME: "/tmp/.cache"
-      HF_HOME: "/tmp/.cache/huggingface"
+    args: [ --enable-auto-tool-choice, --tool-call-parser, qwen3_xml ]
+
+  - name: qwen3-6-35b-a3b
+    model_id: Qwen/Qwen3.6-35B-A3B
+    category: llm
+    cpu: auto
+    memory: 128Gi
+    # Linear attention on CPU rejects prefix caching and chunked prefill; vision tower off (AMX kernel crash).
+    args: [ --enable-auto-tool-choice, --tool-call-parser, qwen3_xml, --no-enable-prefix-caching,
+            --no-enable-chunked-prefill, --max-model-len, "32768", --max-num-batched-tokens, "32768",
+            --limit-mm-per-prompt.image, "0", --limit-mm-per-prompt.video, "0" ]
+
+  - name: qwen2-5-coder-7b
+    model_id: Qwen/Qwen2.5-Coder-7B-Instruct
+    category: llm
+    cpu: auto
+    memory: 64Gi
+    chat_template_file: tool_chat_template_qwen3coder.jinja
+    args: [ --enable-auto-tool-choice, --tool-call-parser, qwen3_coder ]
+
+  - name: qwen2-5-coder-14b
+    model_id: Qwen/Qwen2.5-Coder-14B-Instruct
+    category: llm
+    cpu: auto
+    memory: 96Gi
+    chat_template_file: tool_chat_template_qwen3coder.jinja
+    args: [ --enable-auto-tool-choice, --tool-call-parser, qwen3_xml ]
+
+  - name: qwen3-coder-30b
+    model_id: Qwen/Qwen3-Coder-30B-A3B-Instruct
+    category: llm
+    cpu: auto
+    memory: 160Gi
+    chat_template_file: tool_chat_template_qwen3coder.jinja
+    args: [ --enable-auto-tool-choice, --tool-call-parser, qwen3_xml ]
+
+  - name: qwen3-5-2b-ovms
+    model_id: OpenVINO/Qwen3.5-2B-int4-ov
+    category: llm
+    runtime: openvino
+    cpu: 8
+    memory: 16Gi
+
+  - name: llama3-8b-awq
+    model_id: casperhansen/llama-3-8b-instruct-awq
+    category: llm
+    cpu: 16
+    memory: 32Gi
+
+  - name: deepseek-r1-qwen-32b
+    model_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
+    category: llm
+    cpu: auto
+    memory: 128Gi
+
+  - name: nemotron-nano-4b
+    model_id: nvidia/Llama-3.1-Nemotron-Nano-4B-v1.1
+    category: llm
+    cpu: auto
+    memory: 48Gi
+    args: [ --enable-auto-tool-choice, --tool-call-parser, llama3_json ]
 
   - name: gemma-4-26b
     model_id: google/gemma-4-26B-A4B-it
     category: llm
-    runtime: vllm
-    server_version: "0.28.0"
-    cpu: auto                        # one NUMA node per TP rank, per node
+    cpu: auto
     memory: 128Gi
     chat_template_file: tool_chat_template_gemma4.jinja
-    args: [ "--block-size", "128", "--dtype", "bfloat16", "--distributed_executor_backend", "mp", "--enable_chunked_prefill", "--enforce-eager", "--enable-prefix-caching", "--enable-auto-tool-choice", "--tool-call-parser", "gemma4", "--tensor-parallel-size", "1" ]
-    env:
-      # Gemma runs without the AMX SGL kernel: its vision tower feeds a 3D tensor
-      # ("mat1 must be a 2D tensor"); overrides the runtime-wide VLLM_CPU_SGL_KERNEL=1.
-      VLLM_CPU_SGL_KERNEL: "0"
-      HF_HOME: "/data"
-      TRITON_CACHE_DIR: "/tmp/.triton"
-      VLLM_CPU_KVCACHE_SPACE: "40"
-      VLLM_RPC_TIMEOUT: "100000"
-      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
-      VLLM_ENGINE_ITERATION_TIMEOUT_S: "120"
-      USER: "vllm"
+    args: [ --enable-auto-tool-choice, --tool-call-parser, gemma4 ]
+    env: { VLLM_CPU_SGL_KERNEL: "0" }  # its vision tower feeds the AMX SGL kernel a 3D tensor (vllm runtime sets 1)
 
-  - name: whisper-small
+  - name: whisper-small                # speech-to-text (/v1/audio/transcriptions)
     model_id: openai/whisper-small
     category: llm
-    runtime: vllm
-    server_version: "0.28.0"
-    cpu: auto                        # one NUMA node per TP rank, per node
+    cpu: auto
     memory: 24Gi
-    # Encoder-decoder: prefix caching (llm category default) kills the engine on the
-    # first request ("CrossAttentionManager does not support caching"), so it is off.
-    args: [ "--dtype", "float32", "--enforce-eager", "--no-enable-prefix-caching", "--tensor-parallel-size", "1" ]
-    env:
-      VLLM_RPC_TIMEOUT: "100000"
-      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
-      VLLM_ENGINE_ITERATION_TIMEOUT_S: "120"
-      TRITON_CACHE_DIR: "/tmp/.triton"
-      USER: "vllm"
-      VLLM_CPU_KVCACHE_SPACE: "10"
-      VLLM_CPU_NUM_OF_RESERVED_CPU: "0"
-      HF_HUB_DISABLE_XET: "1"
-      VLLM_CPU_SGL_KERNEL: "1"
-      TORCHDYNAMO_DISABLE: "1"
-      TORCH_INDUCTOR_CACHE_DIR: "/tmp/torchinductor_cache"
-      XDG_CACHE_HOME: "/tmp/.cache"
-      HF_HOME: "/tmp/huggingface"
+    # Encoder-decoder: prefix caching kills the engine on the first request (no cross-attention caching).
+    args: [ --dtype, float32, --enforce-eager, --no-enable-prefix-caching ]
+    env: { TORCHDYNAMO_DISABLE: "1" }
 
-  # Guard model — content-safety classifier backing the LiteLLM guardrail
-  # (guardrail_model; deployed whenever the guardrail is on, the default with
-  # auth_type: litellm_vkey).
-  # Sizing: cpu 8, memory 16Gi, KV cache 4 GiB, max-num-seqs 8, TP 1.
-  # memory: 8Gi OOM-killed the pod (exit 137, peak ~8.6GiB); the guard is
-  # default-on and fail-closed, so a guard OOM blocks every LiteLLM request.
+  # Backs the LiteLLM guardrail, which is fail-closed: an OOM here blocks every request.
   - name: qwen3guard
     model_id: Qwen/Qwen3Guard-Gen-0.6B
     category: llm
-    runtime: vllm
-    server_version: "0.28.0"
     cpu: 8
-    memory: 16Gi
-    args: [ "--block-size", "128", "--dtype", "bfloat16", "--max-num-seqs", "8", "--tensor-parallel-size", "1" ]
-    env:
-      VLLM_CPU_KVCACHE_SPACE: "4"
-      VLLM_CPU_SGL_KERNEL: "1"
-      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
-      HF_HUB_DISABLE_XET: "1"
-      USER: "vllm"
-      HOME: "/tmp"
-      XDG_CACHE_HOME: "/tmp/.cache"
-      VLLM_CACHE_ROOT: "/tmp/vllm"
+    memory: 24Gi
 
-  # ── Agent toolkit models ───────────────────────────────────────────
-  # JSON-valued vLLM flags use dot notation (--flag.key value): KServe evals the arg
-  # string, which strips the quotes from inline JSON.
-  # Qwen3.6-35B-A3B: hybrid linear-attention MoE (Qwen3_5MoeForConditionalGeneration)
-  # that needs vLLM 0.28 — pinned here so no other model changes version.
-  # - Prefix caching and chunked prefill off: with them on, vLLM rejects the config for
-  #   linear attention on CPU ("--mamba-block-size can only be set with
-  #   --enable-prefix-caching"). The --no-enable-* flags override the llm category defaults.
-  # - 32k context: the model default (262144) is far past what a CPU KV cache holds.
-  #   Without chunked prefill a batch must hold a full prompt, so batched tokens = context.
-  # - Text-only: the vision tower crashes the AMX kernel ("mat1 must be a 2D tensor").
-  # TP 1 (vLLM 0.28 CPU needs one NUMA node per TP rank).
-  - name: qwen3-6-35b-a3b
-    model_id: Qwen/Qwen3.6-35B-A3B
-    category: llm
-    runtime: vllm
-    server_version: "0.28.0"
-    cpu: auto                        # one NUMA node per TP rank, per node
-    memory: 128Gi
-    args: [ "--block-size", "128", "--dtype", "bfloat16", "--distributed_executor_backend", "mp", "--trust-remote-code", "--enforce-eager", "--no-enable-prefix-caching", "--no-enable-chunked-prefill", "--max-model-len", "32768", "--max-num-batched-tokens", "32768", "--limit-mm-per-prompt.image", "0", "--limit-mm-per-prompt.video", "0", "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_xml", "--tensor-parallel-size", "1" ]
-    env:
-      VLLM_CPU_KVCACHE_SPACE: "50"
-      VLLM_RPC_TIMEOUT: "100000"
-      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
-      VLLM_ENGINE_ITERATION_TIMEOUT_S: "120"
-      VLLM_CPU_NUM_OF_RESERVED_CPU: "0"
-      HF_HUB_DISABLE_XET: "1"
-      VLLM_CPU_SGL_KERNEL: "1"
-      TRITON_CACHE_DIR: "/tmp/.triton"
-      TORCHINDUCTOR_CACHE_DIR: "/tmp/.torch_compile"
-      XDG_CACHE_HOME: "/tmp/.cache"
-      USER: "vllm"
-
-  # Speculative-decoding variants: base entry + a small draft model, TP 1.
+  # Speculative decoding: the draft is fetched to /mnt/models/draft; enable it with --speculative-config args.
   - name: llama-3-1-8b-specdec
     model_id: meta-llama/Llama-3.1-8B-Instruct
-    draft_model_id: meta-llama/Llama-3.2-1B-Instruct  # fetched to /mnt/models/draft
+    draft_model_id: meta-llama/Llama-3.2-1B-Instruct
     category: llm
-    runtime: vllm
-    server_version: "0.28.0"
-    cpu: auto                        # one NUMA node per TP rank, per node
+    cpu: auto
     memory: 64Gi
-    args: [ "--block-size", "128", "--dtype", "bfloat16", "--distributed_executor_backend", "mp", "--enable_chunked_prefill", "--enforce-eager", "--max-num-batched-tokens", "2048", "--max-num-seqs", "256", "--enable-prefix-caching", "--enable-auto-tool-choice", "--tool-call-parser", "llama3_json", "--tensor-parallel-size", "1", "--speculative-config.method", "draft_model", "--speculative-config.model", "/mnt/models/draft", "--speculative-config.num_speculative_tokens", "5" ]
-    env:
-      VLLM_RPC_TIMEOUT: "100000"
-      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
-      VLLM_ENGINE_ITERATION_TIMEOUT_S: "120"
-      TRITON_CACHE_DIR: "/tmp/.triton"
-      USER: "vllm"
-      VLLM_CPU_KVCACHE_SPACE: "40"
-      VLLM_CPU_NUM_OF_RESERVED_CPU: "0"
-      HF_HUB_DISABLE_XET: "1"
-      VLLM_CPU_SGL_KERNEL: "1"
+    args: [ --enable-auto-tool-choice, --tool-call-parser, llama3_json ]
 
   - name: qwen3-coder-30b-specdec
     model_id: Qwen/Qwen3-Coder-30B-A3B-Instruct
-    draft_model_id: Qwen/Qwen3-0.6B  # fetched to /mnt/models/draft
+    draft_model_id: Qwen/Qwen3-0.6B
     category: llm
-    runtime: vllm
-    server_version: "0.28.0"
-    cpu: auto                        # one NUMA node per TP rank, per node
+    cpu: auto
     memory: 160Gi
     chat_template_file: tool_chat_template_qwen3coder.jinja
-    args: [ "--block-size", "128", "--dtype", "bfloat16", "--distributed_executor_backend", "mp", "--trust-remote-code", "--max-num-batched-tokens", "2048", "--max-num-seqs", "256", "--enable-prefix-caching", "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_xml", "--tensor-parallel-size", "1", "--speculative-config.method", "draft_model", "--speculative-config.model", "/mnt/models/draft", "--speculative-config.num_speculative_tokens", "5" ]
-    env:
-      VLLM_RPC_TIMEOUT: "100000"
-      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
-      VLLM_ENGINE_ITERATION_TIMEOUT_S: "120"
-      TRITON_CACHE_DIR: "/tmp/.triton"
-      USER: "vllm"
-      VLLM_CPU_KVCACHE_SPACE: "60"
-      VLLM_CPU_NUM_OF_RESERVED_CPU: "2"
-      HF_HUB_DISABLE_XET: "1"
-      VLLM_CPU_SGL_KERNEL: "1"
+    args: [ --enable-auto-tool-choice, --tool-call-parser, qwen3_xml ]
 
-  # NOTE: needs the upstream vLLM Qwen2.5-Coder vocab-padding fix
-  # (https://github.com/vllm-project/vllm/pull/42775), or the draft model is
-  # rejected at load (vocab 151936 vs 152064). Not loadable until it ships.
+  # Needs vllm-project/vllm#42775: the draft's vocab (151936) differs from the base (152064).
   - name: qwen2-5-coder-14b-specdec
     model_id: Qwen/Qwen2.5-Coder-14B-Instruct
-    draft_model_id: Qwen/Qwen2.5-Coder-0.5B-Instruct  # fetched to /mnt/models/draft
+    draft_model_id: Qwen/Qwen2.5-Coder-0.5B-Instruct
     category: llm
-    runtime: vllm
-    server_version: "0.28.0"
-    cpu: auto                        # one NUMA node per TP rank, per node
+    cpu: auto
     memory: 96Gi
     chat_template_file: tool_chat_template_qwen3coder.jinja
-    args: [ "--block-size", "128", "--dtype", "bfloat16", "--distributed_executor_backend", "mp", "--enable_chunked_prefill", "--enforce-eager", "--max-num-batched-tokens", "2048", "--max-num-seqs", "256", "--enable-prefix-caching", "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_xml", "--tensor-parallel-size", "1", "--speculative-config.method", "draft_model", "--speculative-config.model", "/mnt/models/draft", "--speculative-config.num_speculative_tokens", "5" ]
-    env:
-      VLLM_RPC_TIMEOUT: "100000"
-      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
-      VLLM_ENGINE_ITERATION_TIMEOUT_S: "120"
-      TRITON_CACHE_DIR: "/tmp/.triton"
-      USER: "vllm"
-      VLLM_CPU_KVCACHE_SPACE: "40"
-      VLLM_CPU_NUM_OF_RESERVED_CPU: "0"
-      HF_HUB_DISABLE_XET: "1"
-      VLLM_CPU_SGL_KERNEL: "1"
-      TORCHDYNAMO_DISABLE: "1"
+    args: [ --enable-auto-tool-choice, --tool-call-parser, qwen3_xml ]
 
+  # Intel Inference Microservices catalog: per-model images. Llama repos are gated (HF_TOKEN).
+  - name: iim-qwen3-4b
+    model_id: Qwen/Qwen3-4B
+    category: llm
+    image: docker.io/intel/inference-xeon-qwen-qwen3-4b:0.1.0
+    cpu: auto
+    memory: 32Gi
+    args: [ --enable-auto-tool-choice, --tool-call-parser, hermes ]
 
-# =============================================================================
-# Runtimes — per-engine deploy config (images, versions, env, categories)
-# =============================================================================
-# Per-engine deploy config, so the full picture of what a server runs with is in
-# one place. Low-level plumbing (device, kind, routing, CR manifest pointer)
-# lives in runtimes/<name>/values.yaml and is merged in at load.
-#
-# Effective config a pod receives (each layer overrides the one before it):
-#   env   = common env   + category env  + version env delta   + per-model env  + --env
-#   args  = category args + version args delta  + per-model args  + --arg
-#   image = the selected version's image
-#
-# Version selected by:  --server-version  >  model server_version:  >  default_version
+  - name: iim-qwen3-8b
+    model_id: Qwen/Qwen3-8B
+    category: llm
+    image: docker.io/intel/inference-xeon-qwen-qwen3-8b:0.1.0
+    cpu: auto
+    memory: 48Gi
+    args: [ --enable-auto-tool-choice, --tool-call-parser, hermes ]
+
+  - name: iim-qwen3-30b-a3b
+    model_id: Qwen/Qwen3-30B-A3B
+    category: llm
+    image: docker.io/intel/inference-xeon-qwen-qwen3-30b-a3b:0.1.0
+    cpu: auto
+    memory: 96Gi
+    args: [ --enable-auto-tool-choice, --tool-call-parser, hermes ]
+
+  - name: llama-3-1-8b
+    model_id: meta-llama/Llama-3.1-8B-Instruct
+    category: llm
+    image: docker.io/intel/inference-xeon-meta-llama-llama-3.1-8b-instruct:0.1.0
+    cpu: auto
+    memory: 40Gi
+    args: [ --enable-auto-tool-choice, --tool-call-parser, llama3_json ]
+
+  - name: llama-3-2-3b
+    model_id: meta-llama/Llama-3.2-3B-Instruct
+    category: llm
+    image: docker.io/intel/inference-xeon-meta-llama-llama-3.2-3b-instruct:0.1.0
+    cpu: auto
+    memory: 32Gi
+    args: [ --enable-auto-tool-choice, --tool-call-parser, llama3_json ]
+
+  - name: iim-granite-3-2-2b
+    model_id: ibm-granite/granite-3.2-2b-instruct
+    category: llm
+    image: docker.io/intel/inference-xeon-ibm-granite-granite-3.2-2b-instruct:0.1.0
+    cpu: auto
+    memory: 32Gi
+
+  - name: iim-phi-4-reasoning
+    model_id: microsoft/Phi-4-reasoning
+    category: llm
+    image: docker.io/intel/inference-xeon-microsoft-phi-4-reasoning:0.1.0
+    cpu: auto
+    memory: 56Gi
+
+  - name: iim-mistral-7b-v0-2
+    model_id: mistralai/Mistral-7B-Instruct-v0.2
+    category: llm
+    image: docker.io/intel/inference-xeon-mistralai-mistral-7b-instruct-v0.2:0.1.0
+    cpu: auto
+    memory: 40Gi
+
+  # ── VLMs ───────────────────────────────────────────────────────────────────
+  - name: iim-gemma-4-e4b
+    model_id: google/gemma-4-E4B-it
+    category: vlm
+    image: docker.io/intel/inference-xeon-google-gemma-4-e4b-it:0.1.0
+    cpu: auto
+    memory: 56Gi
+
+  - name: iim-qwen3-vl-30b-a3b
+    model_id: Qwen/Qwen3-VL-30B-A3B-Instruct
+    category: vlm
+    image: docker.io/intel/inference-xeon-qwen-qwen3-vl-30b-a3b-instruct:0.1.0
+    cpu: auto
+    memory: 96Gi
+
+  # ── Embedding and rerankers ────────────────────────────────────────────────
+  - name: bge-base-en
+    model_id: BAAI/bge-base-en-v1.5
+    category: embed
+
+  - name: bge-reranker
+    model_id: BAAI/bge-reranker-base
+    category: rerank
 
 runtimes:
 
-  # ── vLLM (CPU) ──────────────────────────────────────────────────────────────
-  # env is shared across all versions/categories; args live per-category below.
-  vllm:
-    default_version: "0.24.0"       # used when a model/CLI doesn't pick a version
+  # IIM launcher (python -m inference_runtime.cli serve); plumbing in runtimes/iims.
+  iims:
+    image: "docker.io/intel/inference-xeon-base:0.1.0"   # models without their own IIM image
+    categories:
+      llm:
+        args: [ --max-model-len, auto ]
+        env: { VLLM_CPU_KVCACHE_SPACE: "${KV_CACHE_GB}" }
+        defaults: { cpu: 8, memory: "32Gi", kv_cache_gb: 16 }
+      vlm:
+        args: [ --max-model-len, auto ]
+        env: { VLLM_CPU_KVCACHE_SPACE: "${KV_CACHE_GB}" }
+        defaults: { cpu: 16, memory: "48Gi", kv_cache_gb: 16 }
+      embed:
+        env: { VLLM_CPU_KVCACHE_SPACE: "${KV_CACHE_GB}" }
+        defaults: { cpu: 6, memory: "8Gi", kv_cache_gb: 2 }
+      rerank:
+        env: { VLLM_CPU_KVCACHE_SPACE: "${KV_CACHE_GB}" }
+        defaults: { cpu: 6, memory: "8Gi", kv_cache_gb: 2 }
 
-    # Common env — applied to every vLLM pod. VLLM_CPU_KVCACHE_SPACE is NOT here:
-    # it is set per-category below (via ${KV_CACHE_GB} ← category kv_cache_gb) so
-    # each workload class sizes its own KV cache.
+  # Upstream vLLM CPU images: pick with --server vllm [--server-version V].
+  vllm:
+    default_version: "0.28.0"
     env:
       USER: "vllm"
       VLLM_CPU_NUM_OF_RESERVED_CPU: "1"
       VLLM_CPU_SGL_KERNEL: "1"
       VLLM_NO_USAGE_STATS: "1"
       KMP_BLOCKTIME: "1"
-
-    # Server versions. Add a key, validate, then promote via default_version.
-    # Optional per-version env:/args: DELTAS layer on top of the common env
-    # above and the per-category args below.
     versions:
-      "0.24.0":
-        image: "docker.io/vllm/vllm-openai-cpu:v0.24.0"
-      # Only models that pin this version use it (e.g. qwen3-6-35b-a3b);
-      # default_version and every other model are unchanged.
-      "0.28.0":
-        image: "docker.io/vllm/vllm-openai-cpu:v0.28.0"
-      # Reference entry — copy, change key + image, tweak deltas. Deltas must suit
-      # the model: MoE-only flags (e.g. --enable-expert-parallel) crash dense models.
+      "0.33.0": { image: "docker.io/vllm/vllm-openai-cpu:v0.33.0" }
+      "0.24.0": { image: "docker.io/vllm/vllm-openai-cpu:v0.24.0" }
+      "0.28.0": { image: "docker.io/vllm/vllm-openai-cpu:v0.28.0" }
       "0.19.1":
         image: "docker.io/vllm/vllm-openai-cpu:v0.19.1"
         env: { VLLM_USE_V1: "1", VLLM_CPU_KVCACHE_SPACE: "12" }
         args: [ --max-num-seqs, "256" ]
-
-    # Per-category engine args + env + resource defaults (a model's own values
-    # override). VLLM_CPU_KVCACHE_SPACE is set here (not in the shared env above)
-    # so each workload class sizes its CPU KV cache appropriately —
-    # ${KV_CACHE_GB} is filled from this category's kv_cache_gb default.
     categories:
       llm:
         args: [ --dtype, bfloat16, --max-num-seqs, "128", --max-num-batched-tokens, "2048", --enable-prefix-caching, --enable-chunked-prefill ]
         env: { VLLM_CPU_KVCACHE_SPACE: "${KV_CACHE_GB}" }
         defaults: { cpu: 8, memory: "16Gi", kv_cache_gb: 8 }
-      # embed/rerank do no autoregressive generation, but vLLM CPU still sizes a
-      # KV cache at startup: without VLLM_CPU_KVCACHE_SPACE it requires most of
-      # the NUMA node's memory to be free and crashes when an LLM already runs on
-      # that node. So they set one too, from kv_cache_gb.
+      vlm:
+        args: [ --dtype, bfloat16, --max-num-seqs, "64", --max-num-batched-tokens, "1024" ]
+        env: { VLLM_CPU_KVCACHE_SPACE: "${KV_CACHE_GB}" }
+        defaults: { cpu: 16, memory: "48Gi", kv_cache_gb: 8 }
       embed:
         args: [ --dtype, bfloat16, --gpu-memory-utilization, "0.7" ]
         env: { VLLM_CPU_KVCACHE_SPACE: "${KV_CACHE_GB}" }
@@ -602,20 +303,8 @@ runtimes:
         args: [ --dtype, bfloat16, --gpu-memory-utilization, "0.7" ]
         env: { VLLM_CPU_KVCACHE_SPACE: "${KV_CACHE_GB}" }
         defaults: { cpu: 6, memory: "16Gi", kv_cache_gb: 16 }
-      vlm:
-        args: [ --dtype, bfloat16, --max-num-seqs, "64", --max-num-batched-tokens, "1024" ]
-        env: { VLLM_CPU_KVCACHE_SPACE: "${KV_CACHE_GB}" }
-        defaults: { cpu: 16, memory: "48Gi", kv_cache_gb: 8 }
 
-  # ── OpenVINO Model Server ─────────────────────────────────────────────────────
-  # Flat runtime (no version axis). image + plumbing live in
-  # runtimes/openvino/values.yaml.
-  #
-  # weight_format is a CONVERSION knob for `ovms --pull`: set it (e.g. int8, int4,
-  # fp16) ONLY when the model_id is a raw-HF repo that must be converted+quantized
-  # to OpenVINO IR. Leave it unset for models already published as OpenVINO IR
-  # (the OpenVINO/* repos below) — passing --weight-format to an already-converted
-  # model makes ovms --pull abort with "unsupported for OpenVINO models".
+  # OpenVINO Model Server; plumbing in runtimes/openvino.
   openvino:
     env: {}
     categories:

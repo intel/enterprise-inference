@@ -1,0 +1,19 @@
+# Intel Inference Microservices (IIM) vLLM runtime: low-level plumbing (CPU).
+# Image and per-category defaults live in models.yaml → runtimes.iims (models.yaml wins).
+
+device: cpu
+kind: LLMInferenceService
+routing: epp
+# The launcher picks its tuned vLLM profile; container.args are vLLM args sent as JSON in args_env, not CLI args.
+container:
+  command: ["python3", "-m", "inference_runtime.cli", "serve"]
+  args: ["--model", "/mnt/models", "--served-model-name", "$model"]   # last wins over the profile's
+  args_env: INFERENCE_ENGINE_ARGS
+  run_as_user: 1001             # the image's user
+env:
+  HF_HUB_OFFLINE: "1"           # weights are on /mnt/models; skip the launcher's Hub lookups
+  INFERENCE_MODEL_ID: "${MODEL_ID}"   # picks the profile; the base image has none baked in
+# Requests queued because the replica is saturated.
+autoscaling:
+  query: 'sum(vllm:num_requests_waiting{namespace="$namespace",model="$model"})'
+  scale_target: 2

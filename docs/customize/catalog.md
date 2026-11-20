@@ -24,6 +24,7 @@ models:              # 2. The models you can deploy — one entry per model
     vllm: { versions: ["0.24.0", "0.19.1"], default: "0.24.0" }
 
 runtimes:            # 3. The engines themselves — images, versions, shared settings
+  iims: { ... }
   vllm: { ... }
   openvino: { ... }
 ```
@@ -48,7 +49,7 @@ Applied to every model that doesn't override them.
 | Field | Default | Meaning |
 |---|---|---|
 | `namespace` | `llm-inference` | Target namespace for deployments |
-| `runtime` | `vllm` | Engine used when a model omits one |
+| `runtime` | `iims` | Engine used when a model omits one. See [Runtimes](runtimes.md) |
 | `replicas` | `1` | Replica count |
 | `require_amx` | `true` | Only schedule model pods on nodes with Intel® AMX. Relies on the NFD labels; NFD comes from the core platform layer's `node_feature_discovery` |
 
@@ -118,7 +119,7 @@ models:
 | `namespace` | Target namespace (default: `llm-inference`) |
 | `node` | Pin to a specific node |
 | `routing` | `epp` or `direct` |
-| `image` | Override the runtime image entirely |
+| `image` | Override the runtime image entirely, for the model's own runtime. A `--server` that picks a different runtime uses that runtime's image and version instead; naming the model's own server keeps `image` |
 | `args` | Extra engine args, appended after the category and version args |
 | `env` | Extra env vars, merged over the runtime env |
 | `autodeploy` | `true` → bring the model up during install. See [below](#auto-deploy-on-install) |

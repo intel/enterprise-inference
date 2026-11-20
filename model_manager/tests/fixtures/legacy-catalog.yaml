@@ -1,0 +1,69 @@
+# Catalog for the parity cases: the vllm-runtime models their legacy goldens were recorded
+# against, so changes to the shipped catalog do not change their output.
+defaults: {namespace: llm-inference, runtime: vllm, replicas: 1, require_amx: true}
+storage: {pvc_name: model-store}
+network: {http_proxy: '', https_proxy: '', no_proxy: '', connectivity_check: 'https://huggingface.co'}
+models:
+- name: qwen3-0-6b
+  model_id: Qwen/Qwen3-0.6B
+  category: llm
+  servers:
+    vllm:
+      versions: [0.24.0, 0.19.1]
+      default: 0.24.0
+  default_server: vllm
+  cpu: 8
+  memory: 16Gi
+- {name: llama3-8b-awq, model_id: casperhansen/llama-3-8b-instruct-awq, category: llm, runtime: vllm, server_version: 0.24.0, cpu: 16, memory: 32Gi}
+- {name: qwen3-5-2b-ovms, model_id: OpenVINO/Qwen3.5-2B-int4-ov, runtime: openvino, category: llm, cpu: 8, memory: 16Gi}
+- {name: bge-base-en, model_id: BAAI/bge-base-en-v1.5, category: embed, runtime: vllm, server_version: 0.24.0}
+- {name: bge-reranker, model_id: BAAI/bge-reranker-base, category: rerank, runtime: vllm, server_version: 0.24.0}
+- name: qwen2-5-coder-14b
+  model_id: Qwen/Qwen2.5-Coder-14B-Instruct
+  category: llm
+  runtime: vllm
+  server_version: 0.28.0
+  cpu: auto
+  memory: 96Gi
+  chat_template_file: tool_chat_template_qwen3coder.jinja
+  args: [--block-size, '128', --dtype, bfloat16, --distributed_executor_backend, mp, --enable_chunked_prefill, --enforce-eager, --max-num-batched-tokens,
+    '2048', --max-num-seqs, '256', --enable-prefix-caching, --enable-auto-tool-choice, --tool-call-parser, qwen3_xml, --tensor-parallel-size, '1']
+  env: {VLLM_RPC_TIMEOUT: '100000', VLLM_ALLOW_LONG_MAX_MODEL_LEN: '1', VLLM_ENGINE_ITERATION_TIMEOUT_S: '120', TRITON_CACHE_DIR: /tmp/.triton, USER: vllm,
+    VLLM_CPU_KVCACHE_SPACE: '40', VLLM_CPU_NUM_OF_RESERVED_CPU: '0', HF_HUB_DISABLE_XET: '1', VLLM_CPU_SGL_KERNEL: '1', TORCHDYNAMO_DISABLE: '1'}
+runtimes:
+  vllm:
+    default_version: 0.24.0
+    env: {USER: vllm, VLLM_CPU_NUM_OF_RESERVED_CPU: '1', VLLM_CPU_SGL_KERNEL: '1', VLLM_NO_USAGE_STATS: '1', KMP_BLOCKTIME: '1'}
+    versions:
+      0.24.0: {image: 'docker.io/vllm/vllm-openai-cpu:v0.24.0'}
+      0.28.0: {image: 'docker.io/vllm/vllm-openai-cpu:v0.28.0'}
+      0.19.1:
+        image: docker.io/vllm/vllm-openai-cpu:v0.19.1
+        env: {VLLM_USE_V1: '1', VLLM_CPU_KVCACHE_SPACE: '12'}
+        args: [--max-num-seqs, '256']
+    categories:
+      llm:
+        args: [--dtype, bfloat16, --max-num-seqs, '128', --max-num-batched-tokens, '2048', --enable-prefix-caching, --enable-chunked-prefill]
+        env: {VLLM_CPU_KVCACHE_SPACE: '${KV_CACHE_GB}'}
+        defaults: {cpu: 8, memory: 16Gi, kv_cache_gb: 8}
+      embed:
+        args: [--dtype, bfloat16, --gpu-memory-utilization, '0.7']
+        env: {VLLM_CPU_KVCACHE_SPACE: '${KV_CACHE_GB}'}
+        defaults: {cpu: 6, memory: 16Gi, kv_cache_gb: 16}
+      rerank:
+        args: [--dtype, bfloat16, --gpu-memory-utilization, '0.7']
+        env: {VLLM_CPU_KVCACHE_SPACE: '${KV_CACHE_GB}'}
+        defaults: {cpu: 6, memory: 16Gi, kv_cache_gb: 16}
+      vlm:
+        args: [--dtype, bfloat16, --max-num-seqs, '64', --max-num-batched-tokens, '1024']
+        env: {VLLM_CPU_KVCACHE_SPACE: '${KV_CACHE_GB}'}
+        defaults: {cpu: 16, memory: 48Gi, kv_cache_gb: 8}
+  openvino:
+    env: {}
+    categories:
+      llm:
+        defaults: {cpu: 8, memory: 16Gi}
+      embed:
+        defaults: {cpu: 6, memory: 12Gi}
+      rerank:
+        defaults: {cpu: 6, memory: 12Gi}
