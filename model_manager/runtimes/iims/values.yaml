@@ -4,7 +4,7 @@
 device: cpu
 kind: LLMInferenceService
 routing: epp
-# The image's launcher picks its tuned vLLM profile; it takes no CLI args, so ours go in as JSON.
+# The launcher picks its tuned vLLM profile; container.args are vLLM args sent as JSON in args_env, not CLI args.
 container:
   command: ["python3", "-m", "inference_runtime.cli", "serve"]
   args: ["--model", "/mnt/models", "--served-model-name", "$model"]   # last wins over the profile's

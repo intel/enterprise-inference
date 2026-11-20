@@ -710,7 +710,7 @@ def test_autoscaling_from_catalog_and_fixed_replicas_override(monkeypatch, tmp_p
     next(e for e in data["models"] if e["name"] == "qwen3-0-6b")["autoscaling"] = {
         "min_replicas": 2, "max_replicas": 4, "scale_target": 5}
     catalog = tmp_path / "models.yaml"
-    catalog.write_text(yaml.safe_dump(data))
+    catalog.write_text(yaml.safe_dump(data, sort_keys=False))   # keep the shipped key order
     m, doc = _render(monkeypatch, "qwen3-0-6b", catalog=catalog)
     assert (doc["spec"]["scaling"]["minReplicas"], doc["spec"]["scaling"]["maxReplicas"]) == (2, 4)
     assert doc["spec"]["scaling"]["keda"]["triggers"][0]["metadata"]["threshold"] == "5"

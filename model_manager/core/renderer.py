@@ -82,7 +82,7 @@ def args_json(m: Model, args: list[str]) -> str:
         else:
             prev = out[key]
             out[key] = a if prev is True else (prev if isinstance(prev, list) else [prev]) + [a]
-    return json.dumps(out, separators=(",", ":"))
+    return json.dumps(out, separators=(",", ":"), ensure_ascii=False)
 
 
 def _env(m: Model, catalog: Catalog, cli_args: list[str], cli_env: list[str], base: dict | None = None) -> str:
