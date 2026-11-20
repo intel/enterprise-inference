@@ -409,6 +409,7 @@
             security:
               allowInsecureImages: true
           replicaCount: "{{ _litellm_replicas }}"
+          numWorkers: "{{ litellm_num_workers | default(2) }}"
           image:
             repository: "{{ litellm_image_repository }}"
             tag: "{{ litellm_version }}"
@@ -430,7 +431,11 @@
           # PYTHONPATH = the config dir (hybrid router) so the router package next
           # to config.yaml is importable regardless of how litellm resolves it.
           envVars: >-
-            {{ {'UI_USERNAME': 'admin'} | combine(_litellm_proxy_env)
+            {{ {'UI_USERNAME': 'admin',
+                'LITELLM_RUST': (litellm_rust_enabled | bool | ternary('true', 'false')),
+                'LITELLM_MODE': 'PRODUCTION',
+                'LITELLM_LOG': 'ERROR',
+                'CHECKPOINT_DISABLE': '1'} | combine(_litellm_proxy_env)
                | combine({'PYTHONPATH': hybrid_router_mount_dir} if hybrid_router_enabled | bool else {})
                | combine(_litellm_sso_env if litellm_ui_sso | bool else {})
                | combine(_litellm_ui_path_env if litellm_ui_sso | bool and _litellm_path_mode | bool else {}) }}
@@ -470,11 +475,16 @@
               master_key: "os.environ/PROXY_MASTER_KEY"
               store_model_in_db: true
               ui_access_mode: "admin_only"
+              store_prompts_in_spend_logs: false
+              proxy_batch_write_at: 60
               # Keycloak is the only way into the UI.
               disable_password_login_when_sso_enabled: "{{ litellm_ui_sso | bool }}"
             litellm_settings:
               drop_params: true
               set_verbose: false
+              json_logs: true
+              request_timeout: 600
+              turn_off_message_logging: true
               cache: "{{ litellm_cache_enabled | default(true) | bool }}"
               cache_params:
                 type: redis
@@ -493,7 +503,10 @@
               callbacks: "{{ _litellm_hybrid_callbacks }}"
             # hybrid-router virtual model (empty list unless hybrid_router_enabled)
             model_list: "{{ _litellm_hybrid_model_list }}"
-            router_settings: "{{ _litellm_hybrid_router_settings if _litellm_hybrid_router_settings else {'routing_strategy': 'least-busy'} }}"
+            router_settings: >-
+              {{ (_litellm_hybrid_router_settings if _litellm_hybrid_router_settings
+                  else {'routing_strategy': 'simple-shuffle'})
+                 | combine({'num_retries': 0}) }}
           # Response cache. Keeps the Bitnami valkey subchart wiring (Service
           # name, wait logic) but runs the official upstream valkey/valkey image
           # instead of the deprecated bitnamilegacy/valkey. The Bitnami
