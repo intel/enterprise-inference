@@ -26,19 +26,20 @@ Sizing sets three things in the manifest, and prints how it got there:
 |---|---|
 | `resources.requests.memory` = `limits.memory` | The pod's memory |
 | `VLLM_CPU_KVCACHE_SPACE` | The KV cache, in GiB, **per vLLM worker** |
-| `--max-model-len` | The longest request vLLM accepts (the [served context](#sizing-vs-vllm-serving)) |
+| `--max-model-len` | The longest request vLLM accepts: the model's own context, unless you set one |
 
 ```
-Memory: 40Gi (auto) | needs 34.0 GiB = weights 15.0 + KV 1 x 16 + overhead 1 x 3, x 1.15 headroom | KV for up to 16 x 8192 tokens; serves up to 131072 tokens per request
+Memory: 40Gi (auto) | needs 34.0 GiB = weights 15.0 + KV 1 x 16 + overhead 1 x 3, x 1.15 headroom | KV for up to 1 x 131072 tokens
 ```
 
 ## Defaults
 
+**By default the KV cache holds one request of the model's full context.**
+
 | Parameter | Default | Override |
 |---|---|---|
-| Sized context: the length each guaranteed request can have | **8192** tokens, capped at the model's limit | `--max-model-len` in `args` / `--arg` |
-| `kv_streams`: requests of the sized context the KV holds at once | **16** (fewer if `--max-num-seqs` is lower) | `kv_streams:` / `--kv-streams` |
-| Served context (`--max-model-len`) | The longest request the sized KV pool holds, up to the model's limit | `--max-model-len` in `args` / `--arg` |
+| Context (`--max-model-len`): sized for, and served | **The model's own limit** from `config.json` (`max_position_embeddings`, …) | `--max-model-len` in `args` / `--arg` |
+| `kv_streams`: requests of that context the KV holds at once | **1** | `kv_streams:` / `--kv-streams` |
 | Runtime overhead | **3 GiB per TP worker** | — |
 | Headroom | **× 1.15** on the total | — |
 | Minimum KV | **2 GiB** per worker | — |
@@ -49,7 +50,7 @@ Memory: 40Gi (auto) | needs 34.0 GiB = weights 15.0 + KV 1 x 16 + overhead 1 x 3
 
 ```
 memory_gi = ceil( (W + load + TP × kv_gib + TP × 3 GiB) × 1.15 )
-kv_gib    = max( 2, ceil(per_request × kv_streams / GiB) )      # per worker
+kv_gib    = max( 2, ceil(per_request × kv_streams / GiB) )      # per worker; default: one full-context request
 ```
 
 | Term | Meaning |
@@ -57,10 +58,10 @@ kv_gib    = max( 2, ceil(per_request × kv_streams / GiB) )      # per worker
 | `W` | The repo-root `.safetensors` files (`original/`, `consolidated.*` skipped), plus a draft model's. Unquantized weights served with a wider `--dtype` scale up (bf16 as float32: × 2) |
 | `load` | The [load allowances](#load-allowances) |
 | `TP` | One vLLM worker per rank. Weights are split across them; each worker allocates the full `kv_gib` and its own 3 GiB |
-| `per_request` | The KV bytes one request of the sized context holds on one worker, by [layer layout](#how-the-kv-cache-is-computed) |
+| `per_request` | The KV bytes one request of the full context holds on one worker, by [layer layout](#how-the-kv-cache-is-computed) |
 
 KV heads are split across workers, so the KV per worker shrinks with TP while the pod total
-stays the same. Example: Llama-3.1-8B, 16 × 8K:
+stays the same. Example: Llama-3.1-8B, 1 × 131,072 tokens:
 
 | TP | `VLLM_CPU_KVCACHE_SPACE` | Memory |
 |---|---|---|
@@ -75,42 +76,40 @@ running, a 128-token block at a time, as their tokens arrive.
 
 | Setting | Means | Set by |
 |---|---|---|
-| `kv_streams` × sized context | **Sizing:** how big the pool is. The guarantee that `kv_streams` requests of the sized context all fit at once | `memory: auto` |
-| `--max-model-len` | **Serving:** the longest single request accepted. Longer requests get HTTP 400 (`This model's maximum context length is …`) before they run, however much KV is free | Sizing (the served context), or you |
+| `kv_streams` × context | **Sizing:** how big the pool is. The guarantee that `kv_streams` requests of the full context fit at once | `memory: auto` |
+| `--max-model-len` | **Serving:** the longest single request accepted. Longer requests get HTTP 400 (`This model's maximum context length is …`) before they run, however much KV is free | Sizing (the model's context), or you |
 | `--max-num-seqs` | **Serving:** the most requests vLLM batches at once. The catalog's 256 means "no practical limit". **Not a sizing target** | Catalog args |
 
-- **The served context is larger than the sized one.** A pool sized for 16 × 8K holds
-  131,072 tokens, so it also holds one 128K request. Sizing therefore serves the longest
-  request the pool holds, up to the model's limit, rounded down to a multiple of 1024.
-  It's also capped by a draft model's limit, and by `--max-num-batched-tokens` when chunked
-  prefill is off.
-- **How many requests run at once** is `min(--max-num-seqs, pool tokens ÷ tokens per request)`.
-  Short requests share the pool, so many more than `kv_streams` run together.
+- **One full-context request, or many shorter ones.** The default pool holds the model's whole
+  context once, e.g. 131,072 tokens for Llama-3.1-8B. That's also 16 × 8K, or 64 × 2K, so
+  short requests still run together.
+- **How many run at once** is `min(--max-num-seqs, pool tokens ÷ tokens per request)`.
 - **When the pool is full**, new requests wait and running ones may be preempted (evicted and
-  recomputed later). They get slower but don't fail. While a 120K request runs, it holds most
-  of a 128K pool, so other long requests queue behind it.
+  recomputed later). They get slower but don't fail.
+- **Short-context models get a small pool.** Llama-3-8B-AWQ (8K) gets the 2 GiB floor, about
+  2 × 8K. Raise `kv_streams` where many users need the full context at once.
 - **Long prefills are slow on CPU:** 120K tokens on Qwen3-4B took about 15 minutes.
 
-Example: Qwen3-4B, defaults. The pool is 18 GiB = 131,072 tokens, and the model's limit is 262,144:
+Example: Qwen3-4B, defaults. The pool is 36 GiB = 262,144 tokens, its full context:
 
 | Request | Result |
 |---|---|
-| 16 × 8K at once | All run together |
-| 1 × 120K | Runs, holding most of the pool |
-| 3 × 120K at once | 1 runs, 2 wait, then run in turn |
-| 1 × 256K | HTTP 400 immediately: longer than the served 131,072 |
+| 32 × 8K at once | All run together |
+| 1 × 256K | Runs, holding the whole pool |
+| 2 × 128K at once | Both run |
+| 3 × 128K at once | 2 run, 1 waits until a request finishes |
+| 1 request over 262,144 tokens | HTTP 400 immediately |
 
 ## Overrides
 
 | Goal | CLI | Catalog | Llama-3.1-8B result |
 |---|---|---|---|
-| Defaults | `--memory auto` | `memory: auto` | 40Gi, KV 16, serves 131,072 |
-| More guaranteed streams | `--kv-streams 32` | `kv_streams: 32` | 58Gi, KV 32 |
-| Guarantee longer requests | `--arg --max-model-len=32768` | `"--max-model-len", "32768"` in `args` | 95Gi, KV 64 (16 × 32K), serves 32,768 |
-| One guaranteed full-context request | `--arg --max-model-len=131072 --kv-streams 1` | both of the above | 40Gi, KV 16, serves 131,072 |
-| Short requests only | `--arg --max-model-len=8192` | `"--max-model-len", "8192"` | 40Gi, serves exactly 8192 |
+| Defaults | `--memory auto` | `memory: auto` | 40Gi, KV 16: 1 × 131,072 |
+| More full-context requests at once | `--kv-streams 4` | `kv_streams: 4` | 95Gi, KV 64 |
+| Shorter context, less memory | `--arg --max-model-len=32768` | `"--max-model-len", "32768"` in `args` | 26Gi, KV 4: 1 × 32K |
+| Many guaranteed short requests | `--arg --max-model-len=8192 --kv-streams 16` | both of the above | 40Gi, KV 16: 16 × 8K, serves 8192 |
 | Split across NUMA nodes | `--tp 2` | `"--tensor-parallel-size", "2"` | 43Gi, KV 8 per worker |
-| Multimodal model as text only | `--arg --limit-mm-per-prompt.image=0 --arg --limit-mm-per-prompt.video=0` | in `args` | Drops the 34 GiB allowances (gemma-4-26b: 113Gi → 74Gi) |
+| Multimodal model as text only | `--arg --limit-mm-per-prompt.image=0 --arg --limit-mm-per-prompt.video=0` | in `args` | Drops the multimodal allowances |
 | Fixed memory and KV, no sizing | `--memory 64Gi --env VLLM_CPU_KVCACHE_SPACE=40` | `memory: 64Gi`, `VLLM_CPU_KVCACHE_SPACE: "40"` in `env` | Used as is, fit-checked |
 
 ```yaml
@@ -118,8 +117,8 @@ Example: Qwen3-4B, defaults. The pool is 18 GiB = 131,072 tokens, and the model'
 - name: llama-3-1-8b
   model_id: meta-llama/Llama-3.1-8B-Instruct
   memory: auto
-  kv_streams: 32
-  args: [ "--max-model-len", "32768", "--tensor-parallel-size", "1" ]
+  kv_streams: 4
+  args: [ "--max-model-len", "32768", "--tensor-parallel-size", "1" ]   # KV for 4 x 32K
 ```
 
 Rules:
@@ -128,7 +127,9 @@ Rules:
   last one winning: category, version and model `args`, then `--arg` / `--tp`, then (on
   OpenShift) `VLLM_ADDITIONAL_ARGS`. vLLM's spellings and suffixes are accepted: `--max_model_len`,
   `32K` = 32,768, `25.6k` = 25,600.
-- **`--max-model-len auto` (or `-1`)** sizes for 8K and lets vLLM fit the context to the pool.
+- **`--max-model-len auto` (or `-1`)** sizes for the model's context and lets vLLM fit it to the pool.
+- **The context is capped** by a draft model's own limit, and by `--max-num-batched-tokens` when
+  chunked prefill is off (`--no-enable-chunked-prefill`).
 - **`memory: auto` + `VLLM_CPU_KVCACHE_SPACE`** (in the model's or a version's `env:`, or `--env`)
   is rejected, because `memory: auto` sizes both. The category's `${KV_CACHE_GB}` doesn't count.
   For the `--hfid` default, a KV setting keeps the category memory instead.
@@ -152,8 +153,8 @@ These run before the weights download. Only the topology check also runs with `-
 - **How the NUMA size is read:** node memory ÷ the `nri.intel.com/numa-nodes` label, per node.
   The check is skipped if any usable node lacks the label. NUMA nodes of a host are assumed
   equal, which is true of Xeon SNC but not of uneven DIMMs or CXL memory.
-- **Example:** Llama-3.1-8B with `--kv-streams 256` needs 274 GiB per worker at TP 1. On
-  252 GiB NUMA nodes it aborts with `Deploy with --tp 2 … 128 GiB of KV`.
+- **Example:** Llama-3.1-8B with `--kv-streams 16` (16 × 131K) needs 274 GiB per worker at
+  TP 1. On 252 GiB NUMA nodes it aborts with `Deploy with --tp 2 … 128 GiB of KV`.
 - **Overrides:** `MM_PREFLIGHT=warn` reports and continues. `MM_SKIP_PREFLIGHT=1` skips the
   fit and NUMA checks.
 
@@ -180,7 +181,7 @@ GiB its weights 15.0 + KV 1 x 8 + overhead 1 x 3 need.`
 
 A sized deploy records its inputs as annotations on the `LLMInferenceService`:
 `memory-sizing.model-manager.io/inputs` is a hash of the model, draft, image, TP, effective
-args and `kv_streams` (when set), and `…/max-model-len` is the served context.
+args and `kv_streams` (when set), and `…/max-model-len` is the sized context.
 
 - **Same inputs:** the redeploy keeps the live memory, KV and context, without calling Hugging
   Face, so an Ansible re-run never changes a running model.
@@ -219,17 +220,17 @@ page = 128 tokens (--block-size) of the widest layer; narrower layers fit more t
   `--kv-cache-dtype fp8*` (halves), `--block-size`, `--max-num-batched-tokens`,
   `--enable-prefix-caching`, `--max-model-len`.
 
-| Model (16 × 8K unless noted) | Layout | KV / worker | Memory |
-|---|---|---|---|
-| Qwen3-4B-Instruct-2507 | 36 full, 144 KiB/token | 18 GiB | 33Gi |
-| Llama-3.1-8B + Llama-3.2-1B draft | 32 + 16 full | 20 GiB | 47Gi |
-| gemma-4-26B-A4B-it | 25 sliding (window 1024) + 5 full; vision, audio, video | 13 GiB (30 GiB if all full) | 113Gi (74Gi text only) |
-| Qwen3.6-35B-A3B (catalog: 32K, no prefix caching) | 30 linear + 10 full, 1152-token pages | 12 GiB | 95Gi |
-| whisper-small (float32) | 12 decoder self-attention (≤ 448 tokens) + 12 cross-attention | 3 GiB | 8Gi |
-| gemma-4-E4B-it | 24 of 42 layers cache (18 share KV); multimodal | 4 GiB | 65Gi |
+| Model (defaults: 1 × full context) | Layout | Context | KV / worker | Memory |
+|---|---|---|---|---|
+| Qwen3-4B-Instruct-2507 | 36 full, 144 KiB/token | 262,144 | 36 GiB | 54Gi |
+| Llama-3.1-8B + Llama-3.2-1B draft | 32 + 16 full | 131,072 | 20 GiB | 47Gi |
+| gemma-4-26B-A4B-it | 25 sliding (window 1024) + 5 full; vision, audio, video | 262,144 | 6 GiB | 105Gi |
+| Qwen3.6-35B-A3B (catalog: 32K, no prefix caching) | 30 linear + 10 full, 1152-token pages | 32,768 | 2 GiB | 83Gi |
+| whisper-small (float32) | 12 decoder self-attention + 12 cross-attention | 448 | 2 GiB | 7Gi |
+| gemma-4-E4B-it | 24 of 42 layers cache (18 share KV); multimodal | 131,072 | 3 GiB | 64Gi |
 
 On a live cluster, vLLM's reported KV capacity was within 1.6% of this calculation for all
-of these layouts.
+of these layouts (at 16 × 8K, and at 1 × 262,144 for Qwen3-4B).
 
 ### Load allowances
 
@@ -244,7 +245,7 @@ The allowances count once per pod, and are split across workers for the NUMA che
 
 ## Limits
 
-- **The constants are estimates:** 3 GiB per worker, × 1.15, the 16 × 8K default and the
+- **The constants are estimates:** 3 GiB per worker, × 1.15, the one-request default and the
   allowances. Calibrate them against the peak memory of real deploys. Text models peaked at
   81–93% of the sized limit, with 3–8 GiB of overhead per worker. Multimodal models peaked
   well below it: the allowances are conservative.

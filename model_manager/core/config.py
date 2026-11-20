@@ -207,9 +207,8 @@ class Sizing:
     needed_gib: float                         # weights + load + tp x (kv + overhead)
     memory_gi: int                            # needed_gib with headroom: the request and limit
     load_gib: float = 0.0                     # load-time allowances: quantized repack, multimodal encoders
-    streams: int = 16                         # full-length requests the KV holds: kv_streams, else min(16, --max-num-seqs)
+    streams: int = 1                          # full-context requests the KV holds: kv_streams (default 1)
     kv_by_tp: dict = field(default_factory=dict)  # sized KV per worker at each valid TP, for the NUMA hint
-    serve_len: int = 0                        # --max-model-len served: the longest request the sized pool holds
 
 
 @dataclass
@@ -231,7 +230,7 @@ class Model:
     memory: str = ""
     memory_auto: bool = False                 # memory: auto: sized from the model (core/sizer.py)
     memory_auto_default: bool = False         # memory_auto as --hfid's default: falls back to `memory` if unsizable
-    kv_streams: str = ""                      # memory: auto: full-length requests the KV cache holds (default 16)
+    kv_streams: str = ""                      # memory: auto: full-context requests the KV cache holds (default 1)
     kv_cache_gb: str = ""                     # sized VLLM_CPU_KVCACHE_SPACE
     max_model_len: str = ""                   # sized --max-model-len
     sizing: dict = field(default_factory=dict)  # memory: auto's inputs + sized context, kept as CR annotations

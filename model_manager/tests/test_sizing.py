@@ -43,6 +43,7 @@ GEMMA4_E4B = {"model_type": "gemma4", "vision_config": {}, "audio_config": {},
               "text_config": {**GEMMA4["text_config"], "num_hidden_layers": 42, "num_kv_shared_layers": 18,
                               "layer_types": (["sliding_attention"] * 5 + ["full_attention"]) * 7}}
 MIB = 1024 ** 2
+K8 = ["--max-model-len", "8192"]  # with streams=16: the 16 x 8K layouts measured live against vLLM
 
 
 def gib(x: float) -> int:
@@ -51,9 +52,10 @@ def gib(x: float) -> int:
 
 @pytest.mark.parametrize("tp, kv, memory", [(1, 16, 40), (2, 8, 43), (4, 4, 50)])
 def test_dense_memory_by_tp(tp, kv, memory):
-    # Weights split across workers; KV heads split too, so only the per-worker overhead grows with tp.
+    # One request of Llama's full 131,072 tokens: as many as 16 x 8K. Weights split across workers; KV heads split
+    # too, so only the per-worker overhead grows with tp.
     s = sizer.size(LLAMA_8B, gib(14.96), LLM_ARGS, tp)
-    assert (s.kv_gib, s.memory_gi, s.max_model_len) == (kv, memory, 8192)
+    assert (s.kv_gib, s.memory_gi, s.max_model_len, s.streams) == (kv, memory, 131072, 1)
 
 
 def test_kv_heads_replicate_beyond_their_count():
@@ -69,8 +71,10 @@ def test_sliding_layers_hold_the_window_plus_a_batch():
     assert layers[5] == Layer("full", 2, 512)  # k_eq_v: global KV heads, global head size
     # full: 5 x 8192 tokens x 4 KiB; sliding: 25 x (1023 + 2048 tokens + a block) x 8 KiB, all in 1 MiB pages
     assert sizer.bytes_per_request(layers, 1, 8192, 2, 2, 128, 2048, True) == 785 * MIB
-    s = sizer.size(GEMMA4, gib(48.07), LLM_ARGS, 1)
+    s = sizer.size(GEMMA4, gib(48.07), [*LLM_ARGS, *K8], 1, streams=16)
     assert (s.kv_gib, s.memory_gi) == (13, 74)
+    s = sizer.size(GEMMA4, gib(48.07), LLM_ARGS, 1)  # default: one request of 262,144 tokens
+    assert (s.kv_gib, s.memory_gi, s.max_model_len) == (6, 66, 262144)
 
 
 def test_linear_attention_state_pads_the_page():
@@ -80,7 +84,7 @@ def test_linear_attention_state_pads_the_page():
     assert one_state == (10 * 29 + 30) * 2304 * 1024
     assert sizer.bytes_per_request(layers, 1, 32768, 2, 2, 128, 32768, True) == one_state + 30 * 2304 * 1024
     args = [*LLM_ARGS, "--no-enable-prefix-caching", "--max-model-len", "32768", "--max-num-batched-tokens", "32768"]
-    s = sizer.size(QWEN36, gib(66.97), args, 1)
+    s = sizer.size(QWEN36, gib(66.97), args, 1, streams=16)
     assert (s.kv_gib, s.memory_gi, s.max_model_len) == (12, 95, 32768)
 
 
@@ -91,7 +95,7 @@ def test_encoder_decoder_caches_decoder_and_audio_frames():
     # 12 x (4 self + 16 cross) fp32 blocks: cross-attention is reserved for the 2048 batched tokens, not 1500 frames
     assert sizer.bytes_per_request(layers, 1, 448, 4, 4, 128, 2048, False) == 180 * MIB
     assert sizer.bytes_per_request(layers, 1, 448, 4, 4, 128, 448, False) == 144 * MIB
-    s = sizer.size(WHISPER, gib(0.90), args, 1)
+    s = sizer.size(WHISPER, gib(0.90), args, 1, streams=16)
     assert (s.kv_gib, s.memory_gi, s.max_model_len) == (3, 8, 448)  # context capped at max_target_positions
 
 
@@ -126,17 +130,17 @@ def test_draft_model_adds_weights_and_kv():
     assert (round(s.weights_gib, 2), s.kv_gib, s.memory_gi) == (17.26, 20, 47)
 
 
-@pytest.mark.parametrize("extra, kv", [(["--kv-cache-dtype", "fp8_e4m3"], 8), (["--max-num-seqs", "4"], 4),
-                                       (["--max-model-len=4096"], 8)])
+@pytest.mark.parametrize("extra, kv", [(["--kv-cache-dtype", "fp8_e4m3"], 8), (["--max-num-seqs", "4"], 16),
+                                       (["--max-model-len=65536"], 8), (["--max-model-len=4096"], 2)])
 def test_engine_args_change_the_kv_cache(extra, kv):
     assert sizer.size(LLAMA_8B, gib(14.96), LLM_ARGS + extra, 1).kv_gib == kv
 
 
-@pytest.mark.parametrize("seqs, streams, kv", [("8", 8, 16), ("256", 16, 32)])
-def test_streams_follow_max_num_seqs(seqs, streams, kv):
-    # The KV holds min(16, --max-num-seqs) full-length requests; the deploy log reports that count.
-    s = sizer.size(LLAMA_8B, gib(14.96), [*LLM_ARGS, "--max-model-len=16384", "--max-num-seqs", seqs], 1)
-    assert (s.streams, s.kv_gib) == (streams, kv)
+@pytest.mark.parametrize("seqs", ["8", "256"])
+def test_the_default_is_one_request_of_the_full_context(seqs):
+    # --max-num-seqs is vLLM's scheduler limit, not a sizing target: the KV holds one 131,072-token request.
+    s = sizer.size(LLAMA_8B, gib(14.96), [*LLM_ARGS, "--max-num-seqs", seqs], 1)
+    assert (s.streams, s.kv_gib, s.max_model_len) == (1, 16, 131072)
 
 
 @pytest.mark.parametrize("streams, seqs, kv", [(20, "256", 40), (20, "8", 40), (64, "256", 128)])
@@ -150,37 +154,25 @@ def test_kv_streams_set_the_streams_without_a_cap(streams, seqs, kv):
 
 def test_kv_by_tp_follows_the_kv_heads():
     # Llama-8B has 8 KV heads: the per-worker KV halves with each TP doubling; tp 3 doesn't split the heads.
-    s = sizer.size(LLAMA_8B, gib(14.96), LLM_ARGS, 1, streams=256)
+    s = sizer.size(LLAMA_8B, gib(14.96), [*LLM_ARGS, *K8], 1, streams=256)
     assert s.kv_by_tp == {1: 256, 2: 128, 4: 64, 8: 32}
 
 
 LLAMA_3B_DRAFT = {**LLAMA_1B, "max_position_embeddings": 32768}
 
 
-@pytest.mark.parametrize("cfg, args, kw, serve", [
-    (LLAMA_8B, LLM_ARGS, {}, 131072),                                   # 16 GiB holds one full 131,072 request
-    (QWEN3_06B, LLM_ARGS, {}, 40960),                                   # the model's own limit
-    (LLAMA_8B, LLM_ARGS, {"streams": 4}, 32768),                        # 4 GiB pool: 32,768 tokens
-    (LLAMA_8B, LLM_ARGS, {"streams": 3}, 24576),                        # 3 GiB: a multiple of 1024 below the limit
-    (LLAMA_8B, [*LLM_ARGS, "--max-model-len", "4096"], {}, 4096),       # a given context is served as is
-    (GEMMA4, LLM_ARGS, {}, 262144),                                     # sliding layers hold a window, not the request
-    (WHISPER, ["--max-num-batched-tokens", "2048"], {}, 448),
-    (LLAMA_8B, LLM_ARGS, {"draft": (LLAMA_3B_DRAFT, gib(2.3))}, 32768),  # a draft's shorter limit caps it
-    (LLAMA_8B, [*LLM_ARGS, "--no-enable-chunked-prefill"], {}, 2048),    # whole prompts must fit the batch
+@pytest.mark.parametrize("cfg, args, kw, context, kv", [
+    (LLAMA_8B, LLM_ARGS, {}, 131072, 16),                                     # the model's own limit
+    (QWEN3_06B, LLM_ARGS, {}, 40960, 5),
+    (LLAMA_8B, [*LLM_ARGS, "--max-model-len", "4096"], {}, 4096, 2),          # a given context; KV floor 2 GiB
+    (GEMMA4, LLM_ARGS, {}, 262144, 6),                                        # sliding layers hold a window
+    (WHISPER, ["--max-num-batched-tokens", "2048"], {}, 448, 2),
+    (LLAMA_8B, LLM_ARGS, {"draft": (LLAMA_3B_DRAFT, gib(2.3))}, 32768, 5),    # a draft's shorter limit caps it
+    (LLAMA_8B, [*LLM_ARGS, "--no-enable-chunked-prefill"], {}, 2048, 2),      # whole prompts must fit the batch
 ])
-def test_the_served_context_is_what_the_pool_holds(cfg, args, kw, serve):
+def test_the_context_is_the_models_own(cfg, args, kw, context, kv):
     s = sizer.size(cfg, gib(14.96), args, 1, **kw)
-    assert s.serve_len == serve
-    if not sizer.arg_value(args, "--max-model-len"):
-        assert s.max_model_len == min(8192, serve if serve < 8192 else 8192)  # the KV is still sized for 8K streams
-
-
-def test_the_served_context_fits_the_pool():
-    # vLLM starts only if one request of --max-model-len fits; the search never returns more than the pool holds.
-    for streams in (1, 2, 3, 5, 7, 16):
-        s = sizer.size(QWEN36, gib(67), LLM_ARGS, 1, streams=streams)
-        b = sizer.bytes_per_request(sizer.layout(QWEN36), 1, s.serve_len, 2, 2, 128, 2048, True)
-        assert b <= s.kv_gib * GIB and s.serve_len >= 8192
+    assert (s.max_model_len, s.kv_gib, s.streams) == (context, kv, 1)
 
 
 @pytest.mark.parametrize("value, want", [("32K", 32768), ("32k", 32000), ("25.6k", 25600), ("1M", 2 ** 20), ("4096", 4096)])
@@ -188,16 +180,16 @@ def test_vllm_numeric_suffixes(value, want):
     assert sizer.human_int(value) == want
 
 
-@pytest.mark.parametrize("given, length", [("32K", 32768), ("-1", 8192), ("auto", 8192)])
+@pytest.mark.parametrize("given, length", [("32K", 32768), ("-1", 131072), ("auto", 131072)])
 def test_max_model_len_with_suffixes_and_auto(given, length):
     cfg = {**LLAMA_8B, "max_position_embeddings": 131072}
     s = sizer.size(cfg, gib(14.96), [*LLM_ARGS, "--max-model-len", given, "--max-num-batched-tokens", "8K"], 1)
     assert s.max_model_len == length
 
 
-def test_auto_max_model_len_is_kept_and_kv_sized_for_8k():
+def test_auto_max_model_len_is_kept_and_kv_sized_for_the_models_context():
     s = sizer.size(LLAMA_8B, gib(14.96), [*LLM_ARGS, "--max-model-len", "auto"], 1)
-    assert (s.kv_gib, s.max_model_len) == (16, 8192)
+    assert (s.kv_gib, s.max_model_len) == (16, 131072)
 
 
 @pytest.mark.parametrize("key", ["max_position_embeddings", "n_positions", "seq_length", "max_sequence_length"])
@@ -354,7 +346,7 @@ def test_without_memory_auto_nothing_is_sized(hub, tmp_path):
     assert "--max-model-len" not in main["args"] and round(s.needed_gib, 2) == 25.96  # 14.96 + 8 + 3
 
 
-@pytest.mark.parametrize("argv, kv", [(["--arg", "--max-model-len=4096"], "8"), (["--arg", "--max-model-len=auto"], "16")])
+@pytest.mark.parametrize("argv, kv", [(["--arg", "--max-model-len=65536"], "8"), (["--arg", "--max-model-len=auto"], "16")])
 def test_a_given_max_model_len_wins_and_is_not_repeated(hub, argv, kv):
     m, s, main, env = _sized(*LLAMA, "--memory", "auto", *argv)
     assert m.max_model_len == "" and main["args"].count(argv[1]) == 1 and env["VLLM_CPU_KVCACHE_SPACE"] == kv
@@ -376,7 +368,7 @@ def test_kv_without_memory_deploys_with_the_category_memory(hub):
     (["--memory", "auto", "--env", "VLLM_CPU_KVCACHE_SPACE=40"], "sizes both"),
     (["--memory", "64Gi", "--env", "VLLM_CPU_KVCACHE_SPACE=40G"], "whole number"),
     (["--memory", "auto", "--tp", "3"], "does not divide"),
-    (["--memory", "auto", "--arg", "--max-num-seqs=abc"], "cannot size"),
+    (["--memory", "auto", "--arg", "--max-model-len=abc"], "cannot size"),
     (["--hfid", "org/gated", "--memory", "auto"], "Set HF_TOKEN"),
 ])
 def test_sizing_rejects(hub, capsys, argv, error):
@@ -495,7 +487,7 @@ def test_draft_from_the_catalog_is_sized(hub, tmp_path):
     (["--kv-streams", "20"], {}, 20, "40"),                                   # CLI
     ([], {"kv_streams": 20}, 20, "40"),                                       # catalog
     (["--kv-streams", "24"], {"kv_streams": 20}, 24, "48"),                   # CLI wins
-    ([], {}, 16, "32"),                                                        # default
+    ([], {}, 1, "2"),                                                          # default: one 16K request
 ])
 def test_kv_streams_from_the_catalog_and_cli(hub, tmp_path, argv, entry, streams, kv):
     cat = _catalog(tmp_path, memory="auto", args=["--max-model-len", "16384"], **entry)
@@ -527,11 +519,12 @@ def test_kv_streams_joins_the_sizing_inputs_only_when_set(hub, tmp_path):
 def test_numa_gate_suggests_the_tp_that_fits_many_streams(hub, tmp_path, monkeypatch, capsys):
     # 256 streams of 8K: 256 GiB KV per worker at tp 1 overflows a 252 GiB NUMA node; at tp 2 each worker holds 128.
     monkeypatch.setattr(policy, "_schedulable_nodes", lambda m: [_numa_node()])
-    m, s, main, env = _sized("m", "--kv-streams", "256", catalog=_catalog(tmp_path, memory="auto"))
+    cat = _catalog(tmp_path, memory="auto", args=K8)
+    m, s, main, env = _sized("m", "--kv-streams", "256", catalog=cat)
     with pytest.raises(SystemExit):
         policy.memory_gate(m, s)
     assert "Deploy with --tp 2" in capsys.readouterr().err
-    m, s, main, env = _sized("m", "--kv-streams", "256", "--tp", "2", catalog=_catalog(tmp_path, memory="auto"))
+    m, s, main, env = _sized("m", "--kv-streams", "256", "--tp", "2", catalog=cat)
     policy.memory_gate(m, s)
 
 

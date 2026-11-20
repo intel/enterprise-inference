@@ -44,7 +44,7 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
   {GREEN}--cpu{RESET} N              CPU cores
   {GREEN}--memory{RESET} NGi         Memory (e.g. 32Gi), or auto: sized from the model (vLLM llm/vlm on CPU
                             only; the default with --hfid for llm, falling back to the category memory)
-  {GREEN}--kv-streams{RESET} N       With memory auto: full-length requests the KV cache holds (default 16)
+  {GREEN}--kv-streams{RESET} N       With memory auto: full-context requests the KV cache holds (default 1)
   {GREEN}--replicas{RESET} N         Fixed replica count (default: 1); turns autoscaling off
   {GREEN}--min-replicas{RESET} N     Autoscaling (KEDA): fewest replicas (default: 1)
   {GREEN}--max-replicas{RESET} N     Autoscaling: most replicas; above --min-replicas turns it on
@@ -399,12 +399,11 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
                            tp, load)
     m.memory, m.kv_cache_gb = f"{s.memory_gi}Gi", str(s.kv_gib)
     if not sizer.arg_value(args, "--max-model-len"):
-        m.max_model_len = str(s.serve_len or s.max_model_len)
+        m.max_model_len = str(s.max_model_len)
     m.sizing = {SIZING_INPUTS: inputs, **({SIZED_CONTEXT: m.max_model_len} if m.max_model_len else {})}
     info(f"  Memory: {m.memory} (auto) | needs {s.needed_gib:.1f} GiB = weights {s.weights_gib:.1f}"
          f"{_load_text(s.load_gib)} + KV {s.tp} x {s.kv_gib} + overhead {s.tp} x {sizer.OVERHEAD_GIB}, x "
-         f"{sizer.HEADROOM} headroom | KV for up to {s.streams} x {s.max_model_len} tokens"
-         f"{f'; serves up to {s.serve_len} tokens per request' if s.serve_len > s.max_model_len else ''}")
+         f"{sizer.HEADROOM} headroom | KV for up to {s.streams} x {s.max_model_len} tokens")
     return s
 
 
