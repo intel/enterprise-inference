@@ -18,12 +18,13 @@ DEFAULT_STREAMS = 1     # requests of the full context the KV cache holds at onc
 OVERHEAD_GIB = 3
 HEADROOM = 1.15
 KV_MIN_GIB = 2
-# Load-time allowances (measured on Xeon, intel/enterprise-inference#86): a quantized checkpoint is repacked
-# into the CPU kernel's layout at load, with both copies briefly resident; vLLM profiles a multimodal model's
-# encoders with their largest input at start-up, a full-size video costing the most.
-QUANTIZED_REPACK = 0.4    # x the quantized weight bytes
-MULTIMODAL_GIB = 10       # vision / audio towers
-VIDEO_GIB = 24            # video-capable models (Qwen2.5-VL-3B: ~21 GiB); a minimum
+# Load-time allowances, measured on Xeon with vLLM 0.28 (docs/reference/memory_sizing.md#load-allowances):
+QUANTIZED_REPACK = 0.4    # x the quantized weight bytes: repacked for the CPU kernel, both copies briefly resident
+MULTIMODAL_GIB = 4        # vision / audio encoder profiling at start-up (Qwen2.5-VL-3B, Gemma 4 E4B: +2-2.5 GiB)
+# Encoders with temporal patches (Qwen-VL) profile a dummy video as long as the context allows: per 1K tokens
+# (Qwen2.5-VL-3B: +2.3 GiB at 32K, +26.4 GiB at 128K). Frame-sampling encoders (Gemma) add next to nothing.
+VIDEO_GIB_PER_1K = 0.2
+PLE_BYTES = 4             # per-layer embeddings (Gemma 3n, Gemma 4 E2B / E4B): a float32 copy of the tables
 DTYPE_BYTES = {"float32": 4, "float": 4, "bfloat16": 2, "float16": 2, "half": 2}
 
 
@@ -204,18 +205,23 @@ def _mm_limit(args: list[str], modality: str) -> int | None:
     return int(value) if str(value).isdigit() else None
 
 
-def load_allowance_gib(cfg: dict | None, weight_bytes: int, args: list[str]) -> float:
-    """Memory beyond weights, KV and the per-worker runtime that a deploy needs while loading: the repack copy of
-    quantized weights, and the encoder profiling of a multimodal model unless --limit-mm-per-prompt sets every
-    modality it has to 0 (and video, separately)."""
+def load_allowance_gib(cfg: dict | None, weight_bytes: int, args: list[str], context: int = 0) -> float:
+    """Memory beyond weights, KV and the per-worker runtime that a deploy needs: the repack copy of quantized
+    weights; the encoder profiling of a multimodal model unless --limit-mm-per-prompt sets every modality it has to
+    0; a natively encoded video, which grows with the context; and per-layer embedding tables."""
     if not cfg:
         return 0.0
     extra = QUANTIZED_REPACK * weight_bytes / GIB if _quantized(cfg) else 0.0
     present = ["image", "video"] * ("vision_config" in cfg) + ["audio"] * ("audio_config" in cfg)
     if any(_mm_limit(args, k) != 0 for k in present):
         extra += MULTIMODAL_GIB
-    if cfg.get("video_token_id") is not None and _mm_limit(args, "video") != 0:
-        extra += VIDEO_GIB
+    native_video = (cfg.get("vision_config") or {}).get("temporal_patch_size")
+    if native_video and cfg.get("video_token_id") is not None and _mm_limit(args, "video") != 0:
+        extra += VIDEO_GIB_PER_1K * context / 1024
+    t = text_config(cfg)
+    if t.get("hidden_size_per_layer_input"):
+        tables = (t.get("vocab_size_per_layer_input") or t.get("vocab_size") or 0) * t.get("num_hidden_layers", 0)
+        extra += tables * t["hidden_size_per_layer_input"] * PLE_BYTES / GIB
     return extra
 
 
@@ -258,11 +264,22 @@ def size(cfg: dict | None, weight_bytes: int, args: list[str], tp: int,
     kv_gib = kv_at(tp)
     # KV heads split across workers, so a larger TP needs less KV per worker; the NUMA hint compares at each TP.
     kv_by_tp = {t: kv_at(t) for t in (1, 2, 4, 8) if t == tp or not topology_error(cfg, t)}
-    load = load_allowance_gib(cfg, weight_bytes, args) + (load_allowance_gib(draft[0], draft[1], args) if draft else 0)
+    load = (load_allowance_gib(cfg, weight_bytes, args, max_len)
+            + (load_allowance_gib(draft[0], draft[1], args, max_len) if draft else 0))
     needed = weights / GIB + load + tp * (kv_gib + OVERHEAD_GIB)
     return Sizing(weights_gib=weights / GIB, kv_gib=kv_gib, tp=tp, max_model_len=max_len,
                   needed_gib=needed, memory_gi=math.ceil(needed * HEADROOM), load_gib=load, streams=streams,
                   kv_by_tp=kv_by_tp)
+
+
+def served_context(cfg: dict | None, args: list[str]) -> int:
+    """The context a deploy runs with, for the allowances of a fixed memory: --max-model-len, else the model's; 0
+    when neither is known."""
+    given = arg_value(args, "--max-model-len")
+    try:
+        return human_int(given) if given not in ("", "auto", "-1") else (context_limit(cfg) if cfg else 0)
+    except (Unsupported, ValueError):
+        return 0
 
 
 def _context(cfg: dict, draft: tuple[dict | None, int] | None, args: list[str], batched_arg: str) -> int:

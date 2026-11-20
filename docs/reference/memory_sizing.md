@@ -43,7 +43,7 @@ Memory: 40Gi (auto) | needs 34.0 GiB = weights 15.0 + KV 1 x 16 + overhead 1 x 3
 | Runtime overhead | **3 GiB per TP worker** | — |
 | Headroom | **× 1.15** on the total | — |
 | Minimum KV | **2 GiB** per worker | — |
-| Load allowances | **0.4 × weights** if quantized; **+10 GiB** with vision/audio; **+24 GiB** with video | `--limit-mm-per-prompt` set to 0 |
+| Load allowances | **0.4 × weights** if quantized; **+4 GiB** with vision/audio; **+0.2 GiB per 1K tokens** of context for native video (Qwen-VL); per-layer embeddings in fp32 (Gemma E-series) | `--limit-mm-per-prompt` set to 0 |
 | TP | The last `--tensor-parallel-size` vLLM receives, else 1 | `--tensor-parallel-size` in `args` / `--tp` |
 
 ## The formula
@@ -109,6 +109,7 @@ Example: Qwen3-4B, defaults. The pool is 36 GiB = 262,144 tokens, its full conte
 | Shorter context, less memory | `--arg --max-model-len=32768` | `"--max-model-len", "32768"` in `args` | 26Gi, KV 4: 1 × 32K |
 | Many guaranteed short requests | `--arg --max-model-len=8192 --kv-streams 16` | both of the above | 40Gi, KV 16: 16 × 8K, serves 8192 |
 | Split across NUMA nodes | `--tp 2` | `"--tensor-parallel-size", "2"` | 43Gi, KV 8 per worker |
+| Multimodal model without video | `--arg --limit-mm-per-prompt.video=0` | in `args` | Qwen2.5-VL-3B: 51Gi → 22Gi |
 | Multimodal model as text only | `--arg --limit-mm-per-prompt.image=0 --arg --limit-mm-per-prompt.video=0` | in `args` | Drops the multimodal allowances |
 | Fixed memory and KV, no sizing | `--memory 64Gi --env VLLM_CPU_KVCACHE_SPACE=40` | `memory: 64Gi`, `VLLM_CPU_KVCACHE_SPACE: "40"` in `env` | Used as is, fit-checked |
 
@@ -224,31 +225,56 @@ page = 128 tokens (--block-size) of the widest layer; narrower layers fit more t
 |---|---|---|---|---|
 | Qwen3-4B-Instruct-2507 | 36 full, 144 KiB/token | 262,144 | 36 GiB | 54Gi |
 | Llama-3.1-8B + Llama-3.2-1B draft | 32 + 16 full | 131,072 | 20 GiB | 47Gi |
-| gemma-4-26B-A4B-it | 25 sliding (window 1024) + 5 full; vision, audio, video | 262,144 | 6 GiB | 105Gi |
+| gemma-4-26B-A4B-it | 25 sliding (window 1024) + 5 full; vision, audio, video | 262,144 | 6 GiB | 71Gi |
 | Qwen3.6-35B-A3B (catalog: 32K, no prefix caching) | 30 linear + 10 full, 1152-token pages | 32,768 | 2 GiB | 83Gi |
 | whisper-small (float32) | 12 decoder self-attention + 12 cross-attention | 448 | 2 GiB | 7Gi |
-| gemma-4-E4B-it | 24 of 42 layers cache (18 share KV); multimodal | 131,072 | 3 GiB | 64Gi |
+| gemma-4-E4B-it | 24 of 42 layers cache (18 share KV); multimodal; per-layer embeddings | 131,072 | 3 GiB | 41Gi |
+| Qwen2.5-VL-3B-Instruct (`vlm`) | 36 full; vision + native video | 128,000 | 5 GiB | 51Gi (22Gi without video) |
 
 On a live cluster, vLLM's reported KV capacity was within 1.6% of this calculation for all
 of these layouts (at 16 × 8K, and at 1 × 262,144 for Qwen3-4B).
 
 ### Load allowances
 
-| Allowance | When | Amount |
-|---|---|---|
-| Quantized repack | `quantization_config` (AWQ, GPTQ): vLLM repacks the weights for the CPU kernel, both copies briefly resident | 0.4 × weights |
-| Multimodal towers | `vision_config` / `audio_config`, unless every modality the model has is limited to 0 | 10 GiB |
-| Video | `video_token_id`, unless video is limited to 0 | 24 GiB more (a minimum: set `memory` for large video models) |
+Memory a deploy needs beyond its weights, KV cache and 3 GiB runtime, from what `config.json`
+declares. Measured on Xeon, vLLM 0.28, as the cgroup's peak:
 
-`--limit-mm-per-prompt` is read in both forms, `.image 0` and `'{"image": 0, "video": 0}'`.
-The allowances count once per pod, and are split across workers for the NUMA check.
+| Allowance | When | Amount | Measured |
+|---|---|---|---|
+| Quantized repack | `quantization_config` (AWQ, GPTQ): vLLM repacks the weights for the CPU kernel, both copies briefly resident | 0.4 × weights | Llama-3-8B-AWQ: about 0.2 × weights |
+| Vision / audio towers | `vision_config` / `audio_config`, unless every modality the model has is limited to 0 | 4 GiB | Images +2.5 GiB (Qwen2.5-VL-3B), images and audio +2.4 GiB (Gemma 4 E4B) |
+| Native video | `vision_config.temporal_patch_size` (Qwen2-VL, 2.5-VL, 3-VL, 3.5) with `video_token_id`, unless video is limited to 0 | 0.2 GiB per 1K tokens of context | Qwen2.5-VL-3B: +2.3 GiB at 32K, +26.4 GiB at 128K |
+| Per-layer embeddings | `hidden_size_per_layer_input` (Gemma 3n, Gemma 4 E2B / E4B) | The tables in fp32: vocab × layers × dim × 4 B | Gemma 4 E4B: 10.5 GiB allowed, about 9 GiB used |
+
+- **Why video depends on the context:** at start-up, vLLM profiles each modality with the
+  largest input the context allows. An encoder with temporal patches turns a long video into
+  that many tokens, so its profiling grows with `--max-model-len`. Frame-sampling encoders
+  (Gemma, LLaVA) add next to nothing for video, so only their towers count.
+- **Images don't scale like this:** the vision weights are already in `W`, and an image's
+  token count is bounded.
+- **`--limit-mm-per-prompt`** is read in both forms, `.image 0` and `'{"image": 0, "video": 0}'`.
+  Without video, a Qwen-VL model needs a small fraction of the memory: Qwen2.5-VL-3B goes
+  from 51Gi to 22Gi.
+- **Per pod:** the allowances count once per pod, and are split across workers for the NUMA check.
+
+Checked live with `memory: auto`. Each deploy served an image request; peak is the cgroup's,
+with non-reclaimable (anon) memory in brackets:
+
+| Deploy | Sized | Peak (anon) |
+|---|---|---|
+| Qwen2.5-VL-3B, images + video, 128K | 51Gi | 38.3 GiB (37.9) |
+| Qwen2.5-VL-3B, images + video, 32K | 26Gi | 26.0 GiB (19.9): the rest is page cache, reclaimed at the limit |
+| Qwen2.5-VL-3B, images only, 128K | 22Gi | 19.3 GiB (17.4) |
+| Gemma 4 E4B, images + audio + video, 131K | 41Gi | 36.4 GiB (32.3) |
+| Gemma 4 E4B, text only, 131K | 37Gi | 29.9 GiB (29.5) |
 
 ## Limits
 
 - **The constants are estimates:** 3 GiB per worker, × 1.15, the one-request default and the
   allowances. Calibrate them against the peak memory of real deploys. Text models peaked at
-  81–93% of the sized limit, with 3–8 GiB of overhead per worker. Multimodal models peaked
-  well below it: the allowances are conservative.
+  81–93% of the sized limit, with 3–8 GiB of overhead per worker. The multimodal allowances
+  come from two models: Qwen2.5-VL-3B and Gemma 4 E4B. Check a large VLM's peak before relying
+  on them.
 - **The KV rules are vLLM 0.28's CPU backend.** Recheck them when the catalog's
   `default_version` moves. MLA follows vLLM's spec, but is not validated: vLLM 0.28 has no
   CPU MLA backend.

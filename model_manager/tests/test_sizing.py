@@ -223,28 +223,46 @@ AWQ = {**LLAMA_8B, "quantization_config": {"quant_method": "awq", "bits": 4}}
 VLM = {**LLAMA_8B, "vision_config": {}, "video_token_id": 151656}  # nosec B105 - a vocabulary token id, not a secret
 
 
-@pytest.mark.parametrize("cfg, args, load", [
-    (LLAMA_8B, [], 0),
-    (AWQ, [], 0.4 * 5),                                                                # repack copy
-    ({**LLAMA_8B, "vision_config": {}}, [], 10),                                       # image tower
-    ({**LLAMA_8B, "audio_config": {}}, [], 10),                                        # audio tower
-    (VLM, [], 34),                                                                     # + full-size video
-    (VLM, ["--limit-mm-per-prompt.video", "0"], 10),
-    (VLM, ["--limit-mm-per-prompt.image=0", "--limit-mm-per-prompt.video=0"], 0),      # text only
-    (VLM, ["--limit-mm-per-prompt", '{"image": 0, "video": 0}'], 0),                   # JSON form
-    (VLM, ["--limit-mm-per-prompt", '{"image": {"count": 0}, "video": 2}'], 34),
+# Qwen-VL encoders take video natively (temporal patches); Gemma's VLM fixture samples frames.
+QWEN_VL = {**LLAMA_8B, "vision_config": {"temporal_patch_size": 2},
+           "video_token_id": 151656}  # nosec B105 - a vocabulary token id, not a secret
+PLE = {"text_config": {"num_hidden_layers": 42, "hidden_size_per_layer_input": 256, "vocab_size_per_layer_input": 262144}}
+K128, K32 = 131072, 32768
+
+
+@pytest.mark.parametrize("cfg, args, context, load", [
+    (LLAMA_8B, [], K128, 0),
+    (AWQ, [], K128, 0.4 * 5),                                                          # repack copy
+    ({**LLAMA_8B, "vision_config": {}}, [], K128, 4),                                  # image tower
+    ({**LLAMA_8B, "audio_config": {}}, [], K128, 4),                                   # audio tower
+    (VLM, [], K128, 4),                                                                # frame-sampled video: towers only
+    (QWEN_VL, [], K128, 4 + 0.2 * 128),                                                # native video: 0.2 GiB per 1K
+    (QWEN_VL, [], K32, 4 + 0.2 * 32),
+    (QWEN_VL, ["--limit-mm-per-prompt.video", "0"], K128, 4),                          # images only
+    (QWEN_VL, ["--limit-mm-per-prompt.image=0", "--limit-mm-per-prompt.video=0"], K128, 0),  # text only
+    (QWEN_VL, ["--limit-mm-per-prompt", '{"image": 0, "video": 0}'], K128, 0),        # JSON form
+    (QWEN_VL, ["--limit-mm-per-prompt", '{"image": {"count": 0}, "video": 2}'], K128, 4 + 0.2 * 128),
     ({**GEMMA4_E4B, "text_config": {}}, ["--limit-mm-per-prompt.image", "0",          # audio still on
-                                         "--limit-mm-per-prompt.video", "0"], 10),
+                                         "--limit-mm-per-prompt.video", "0"], K128, 4),
+    (PLE, [], K128, 42 * 262144 * 256 * 4 / GIB),                                      # per-layer embeddings, fp32
 ])
-def test_load_allowances(cfg, args, load):
-    assert sizer.load_allowance_gib(cfg, gib(5), args) == pytest.approx(load)
+def test_load_allowances(cfg, args, context, load):
+    assert sizer.load_allowance_gib(cfg, gib(5), args, context) == pytest.approx(load)
 
 
 def test_load_allowances_are_sized():
-    s = sizer.size(AWQ, gib(5.3), LLM_ARGS, 1)
+    s = sizer.size(AWQ, gib(5.3), LLM_ARGS, 1)  # Llama-3 AWQ: KV for one 131,072-token request
     assert s.load_gib == pytest.approx(0.4 * 5.3)
     assert s.memory_gi == math.ceil((5.3 + 0.4 * 5.3 + 16 + 3) * sizer.HEADROOM)
-    assert sizer.size(VLM, gib(14.96), LLM_ARGS, 1).memory_gi == math.ceil((14.96 + 34 + 16 + 3) * sizer.HEADROOM)
+    # The video allowance follows the sized context.
+    assert sizer.size(QWEN_VL, gib(14.96), LLM_ARGS, 1).memory_gi == math.ceil(
+        (14.96 + 4 + 0.2 * 128 + 16 + 3) * sizer.HEADROOM)
+    assert sizer.size(QWEN_VL, gib(14.96), [*LLM_ARGS, *K8], 1).load_gib == pytest.approx(4 + 0.2 * 8)
+
+
+def test_served_context_for_a_fixed_memory():
+    assert sizer.served_context(LLAMA_8B, ["--max-model-len", "32K"]) == 32768
+    assert sizer.served_context(LLAMA_8B, []) == 131072 and sizer.served_context(None, []) == 0
 
 
 def test_vlm_category_is_sized(hub):

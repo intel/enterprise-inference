@@ -392,8 +392,9 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
             m.memory_auto = False
     if not s:
         draft_cfg = hf_config(m.draft_model_id, proxy) if m.draft_model_id else None
-        load = (sizer.load_allowance_gib(cfg, weights, args)
-                + sizer.load_allowance_gib(draft_cfg, draft_weights, args))
+        context = sizer.served_context(cfg, args)
+        load = (sizer.load_allowance_gib(cfg, weights, args, context)
+                + sizer.load_allowance_gib(draft_cfg, draft_weights, args, context))
         return _static_fit(m, sizer.resident_bytes(cfg, weights, args),
                            sizer.resident_bytes(draft_cfg, draft_weights, args), int(kv or renderer.category_kv_cache(m)),
                            tp, load)
