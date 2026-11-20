@@ -132,7 +132,8 @@ HELP_HFID = [
 HELP_MEMORY = [
     (r"^(  --memory NGi         Memory \(e\.g\. 32Gi\))$",
      r"\1, or auto: sized from the model (vLLM llm/vlm on CPU\n"
-     "                            only; the default with --hfid for llm, falling back to the category memory)"),
+     "                            only; the default with --hfid for llm, falling back to the category memory)\n"
+     "  --kv-streams N       With memory auto: full-length requests the KV cache holds (default 16)"),
     (r"(deploy --hfid meta-llama/Llama-3\.2-1B-Instruct --cpu 8) --memory 16Gi$", r"\1   # memory sized from the model"),
 ]
 HFID_UNSIZED = (r"^--- stderr\n", "--- stderr\n[WARN ]  Memory: cannot size some-model-v2: no safetensors size on "

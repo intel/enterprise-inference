@@ -221,7 +221,7 @@ def load_allowance_gib(cfg: dict | None, weight_bytes: int, args: list[str]) -> 
 
 
 def size(cfg: dict | None, weight_bytes: int, args: list[str], tp: int,
-         draft: tuple[dict | None, int] | None = None) -> Sizing:
+         draft: tuple[dict | None, int] | None = None, streams: int = 0) -> Sizing:
     """Memory and VLLM_CPU_KVCACHE_SPACE for one pod; raises Unsupported when the model cannot be sized."""
     if not weight_bytes:
         raise Unsupported("no safetensors size on HuggingFace")
@@ -241,14 +241,22 @@ def size(cfg: dict | None, weight_bytes: int, args: list[str], tp: int,
         dtype = text_config(cfg).get("torch_dtype") or text_config(cfg).get("dtype")
     model_bytes = DTYPE_BYTES.get(dtype, 2)
     kv_bytes = 1 if arg_value(args, "--kv-cache-dtype").startswith("fp8") else model_bytes
-    per_request = bytes_per_request(
-        layers, tp, max_len, kv_bytes, model_bytes, int(arg_value(args, "--block-size") or 128),
-        human_int(arg_value(args, "--max-num-batched-tokens") or str(max_len)),
-        _enabled(args, "--enable-prefix-caching", True))
-    streams = min(CONCURRENCY, int(arg_value(args, "--max-num-seqs") or CONCURRENCY))
-    kv_gib = max(KV_MIN_GIB, math.ceil(per_request / GIB), math.ceil(per_request * streams / GIB))
+    def kv_at(t: int) -> int:
+        per_request = bytes_per_request(
+            layers, t, max_len, kv_bytes, model_bytes, int(arg_value(args, "--block-size") or 128),
+            human_int(arg_value(args, "--max-num-batched-tokens") or str(max_len)),
+            _enabled(args, "--enable-prefix-caching", True))
+        return max(KV_MIN_GIB, math.ceil(per_request / GIB), math.ceil(per_request * streams / GIB))
+
+    # kv_streams sets the full-length requests the KV holds, with no cap (the fit and NUMA pre-flight catch one that
+    # does not fit); without it, 16, or fewer when --max-num-seqs lets vLLM run fewer at once.
+    streams = streams or min(CONCURRENCY, int(arg_value(args, "--max-num-seqs") or CONCURRENCY))
+    kv_gib = kv_at(tp)
+    # KV heads split across workers, so a larger TP needs less KV per worker; the NUMA hint compares at each TP.
+    kv_by_tp = {t: kv_at(t) for t in (1, 2, 4, 8) if t == tp or not topology_error(cfg, t)}
     load = load_allowance_gib(cfg, weight_bytes, args) + (load_allowance_gib(draft[0], draft[1], args) if draft else 0)
     needed = weights / GIB + load + tp * (kv_gib + OVERHEAD_GIB)
     return Sizing(weights_gib=weights / GIB, kv_gib=kv_gib, tp=tp, max_model_len=max_len,
-                  needed_gib=needed, memory_gi=math.ceil(needed * HEADROOM), load_gib=load)
+                  needed_gib=needed, memory_gi=math.ceil(needed * HEADROOM), load_gib=load, streams=streams,
+                  kv_by_tp=kv_by_tp)
 

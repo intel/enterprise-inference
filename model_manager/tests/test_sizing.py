@@ -131,6 +131,28 @@ def test_engine_args_change_the_kv_cache(extra, kv):
     assert sizer.size(LLAMA_8B, gib(14.96), LLM_ARGS + extra, 1).kv_gib == kv
 
 
+@pytest.mark.parametrize("seqs, streams, kv", [("8", 8, 16), ("256", 16, 32)])
+def test_streams_follow_max_num_seqs(seqs, streams, kv):
+    # The KV holds min(16, --max-num-seqs) full-length requests; the deploy log reports that count.
+    s = sizer.size(LLAMA_8B, gib(14.96), [*LLM_ARGS, "--max-model-len=16384", "--max-num-seqs", seqs], 1)
+    assert (s.streams, s.kv_gib) == (streams, kv)
+
+
+@pytest.mark.parametrize("streams, seqs, kv", [(20, "256", 40), (20, "8", 40), (64, "256", 128)])
+def test_kv_streams_set_the_streams_without_a_cap(streams, seqs, kv):
+    # kv_streams wins over min(16, --max-num-seqs), with no upper limit.
+    s = sizer.size(LLAMA_8B, gib(14.96), [*LLM_ARGS, "--max-model-len=16384", "--max-num-seqs", seqs], 1,
+                   streams=streams)
+    assert (s.streams, s.kv_gib) == (streams, kv)
+    assert s.memory_gi == math.ceil((14.96 + kv + 3) * sizer.HEADROOM)
+
+
+def test_kv_by_tp_follows_the_kv_heads():
+    # Llama-8B has 8 KV heads: the per-worker KV halves with each TP doubling; tp 3 doesn't split the heads.
+    s = sizer.size(LLAMA_8B, gib(14.96), LLM_ARGS, 1, streams=256)
+    assert s.kv_by_tp == {1: 256, 2: 128, 4: 64, 8: 32}
+
+
 @pytest.mark.parametrize("value, want", [("32K", 32768), ("32k", 32000), ("25.6k", 25600), ("1M", 2 ** 20), ("4096", 4096)])
 def test_vllm_numeric_suffixes(value, want):
     assert sizer.human_int(value) == want
@@ -436,6 +458,50 @@ def test_bad_catalog_tp_rejected(hub, tmp_path, capsys):
 def test_draft_from_the_catalog_is_sized(hub, tmp_path):
     m, s, main, env = _sized("m", catalog=_catalog(tmp_path, memory="auto", draft_model_id="org/draft"))
     assert main["resources"]["limits"]["memory"] == "47Gi" and env["VLLM_CPU_KVCACHE_SPACE"] == "20"
+
+
+@pytest.mark.parametrize("argv, entry, streams, kv", [
+    (["--kv-streams", "20"], {}, 20, "40"),                                   # CLI
+    ([], {"kv_streams": 20}, 20, "40"),                                       # catalog
+    (["--kv-streams", "24"], {"kv_streams": 20}, 24, "48"),                   # CLI wins
+    ([], {}, 16, "32"),                                                        # default
+])
+def test_kv_streams_from_the_catalog_and_cli(hub, tmp_path, argv, entry, streams, kv):
+    cat = _catalog(tmp_path, memory="auto", args=["--max-model-len", "16384"], **entry)
+    m, s, main, env = _sized("m", *argv, catalog=cat)
+    assert (s.streams, env["VLLM_CPU_KVCACHE_SPACE"]) == (streams, kv)
+
+
+@pytest.mark.parametrize("argv, entry", [(["--kv-streams", "0"], {}), ([], {"kv_streams": "x"})])
+def test_bad_kv_streams_rejected(hub, tmp_path, capsys, argv, entry):
+    with pytest.raises(SystemExit):
+        _sized("m", *argv, catalog=_catalog(tmp_path, memory="auto", **entry))
+    assert "positive integer" in capsys.readouterr().err
+
+
+def test_kv_streams_warnings(hub, tmp_path, capsys):
+    _sized("m", "--kv-streams", "20", catalog=_catalog(tmp_path, memory="64Gi"))
+    assert "has no effect" in capsys.readouterr().err
+    _sized("m", "--kv-streams", "20", catalog=_catalog(tmp_path, memory="auto", args=["--max-num-seqs", "8"]))
+    assert "exceeds --max-num-seqs 8" in capsys.readouterr().err
+
+
+def test_kv_streams_joins_the_sizing_inputs_only_when_set(hub, tmp_path):
+    cat = _catalog(tmp_path, memory="auto")
+    m = config.resolve(Catalog(cat), "m", cli.parse_args(["deploy", "m"]))
+    assert _inputs(cat) == cli._sizing_inputs(m, renderer.effective_args(m, [], []), 1)  # unchanged hash by default
+    assert _inputs(cat, "--kv-streams", "20") != _inputs(cat)
+
+
+def test_numa_gate_suggests_the_tp_that_fits_many_streams(hub, tmp_path, monkeypatch, capsys):
+    # 256 streams of 8K: 256 GiB KV per worker at tp 1 overflows a 252 GiB NUMA node; at tp 2 each worker holds 128.
+    monkeypatch.setattr(policy, "_schedulable_nodes", lambda m: [_numa_node()])
+    m, s, main, env = _sized("m", "--kv-streams", "256", catalog=_catalog(tmp_path, memory="auto"))
+    with pytest.raises(SystemExit):
+        policy.memory_gate(m, s)
+    assert "Deploy with --tp 2" in capsys.readouterr().err
+    m, s, main, env = _sized("m", "--kv-streams", "256", "--tp", "2", catalog=_catalog(tmp_path, memory="auto"))
+    policy.memory_gate(m, s)
 
 
 def _live(inputs, memory="44Gi", kv="17", context="8192"):

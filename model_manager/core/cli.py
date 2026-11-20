@@ -44,6 +44,7 @@ USAGE = f"""{BOLD}model-manager{RESET} — Deploy LLM inference models on Kubern
   {GREEN}--cpu{RESET} N              CPU cores
   {GREEN}--memory{RESET} NGi         Memory (e.g. 32Gi), or auto: sized from the model (vLLM llm/vlm on CPU
                             only; the default with --hfid for llm, falling back to the category memory)
+  {GREEN}--kv-streams{RESET} N       With memory auto: full-length requests the KV cache holds (default 16)
   {GREEN}--replicas{RESET} N         Fixed replica count (default: 1); turns autoscaling off
   {GREEN}--min-replicas{RESET} N     Autoscaling (KEDA): fewest replicas (default: 1)
   {GREEN}--max-replicas{RESET} N     Autoscaling: most replicas; above --min-replicas turns it on
@@ -124,6 +125,7 @@ class Options:
     alias: str = ""
     cpu: str = ""
     memory: str = ""
+    kv_streams: str = ""
     replicas: str = ""
     min_replicas: str = ""
     max_replicas: str = ""
@@ -142,7 +144,8 @@ class Options:
 FLAGS = {"--dry-run": "dry_run", "--wait": "wait", "--catalog": "catalog_only", "--deployed": "deployed_only"}
 VALUES = {"--wait-timeout": "wait_timeout", "--hfid": "id", "--id": "id", "--name": "name", "--server": "server",
           "--runtime": "server", "--server-version": "server_version", "--as": "alias", "--cpu": "cpu",
-          "--memory": "memory", "--replicas": "replicas", "--tp": "tp", "--cpu-policy": "cpu_policy",
+          "--memory": "memory", "--kv-streams": "kv_streams", "--replicas": "replicas", "--tp": "tp",
+          "--cpu-policy": "cpu_policy",
           "--category": "category", "--routing": "routing", "--node": "node",
           "--min-replicas": "min_replicas", "--max-replicas": "max_replicas", "--scale-target": "scale_target"}
 LISTS = {"--env": "env", "--arg": "arg", "--label": "label"}
@@ -182,7 +185,7 @@ def parse_args(argv: list[str]) -> Options:
             i += 1
             value = argv[i]  # taken verbatim, so `--arg --max-model-len=4096` works
             if a in ("--wait-timeout", "--replicas", "--tp", "--min-replicas", "--max-replicas",
-                     "--scale-target") and not (is_uint(value) and int(value) > 0):
+                     "--scale-target", "--kv-streams") and not (is_uint(value) and int(value) > 0):
                 abort(f"{a} requires a positive integer, got: {value}")
             if a == "--label":
                 _check_label(value)
@@ -365,6 +368,7 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
     if m.memory_auto and kv:
         abort(f"{m.name} has memory: auto and VLLM_CPU_KVCACHE_SPACE={kv}: memory: auto sizes both. Set memory "
               "instead, or remove the KV setting.")
+    _check_kv_streams(m, args)
     inputs = _sizing_inputs(m, args, tp)
     if m.memory_auto and o.memory != "auto" and _keep_live_sizing(m, inputs):
         return None
@@ -377,7 +381,7 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
     if m.memory_auto:
         draft = (hf_config(m.draft_model_id, proxy), draft_weights) if m.draft_model_id else None
         try:
-            s = sizer.size(cfg, weights, args, tp, draft)
+            s = sizer.size(cfg, weights, args, tp, draft, int(m.kv_streams or 0))
         except (sizer.Unsupported, ValueError) as e:  # ValueError: a non-integer engine arg such as --max-num-seqs
             reason = f"Hugging Face is unreachable (proxy: {proxy or 'none'})" if hub_unreachable(proxy) else e
             if not m.memory_auto_default:
@@ -400,8 +404,21 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
     info(f"  Memory: {m.memory} (auto) | needs {s.needed_gib:.1f} GiB = weights {s.weights_gib:.1f}"
          f"{_load_text(s.load_gib)} + KV {s.tp} x {s.kv_gib} + overhead {s.tp} x {sizer.OVERHEAD_GIB}, x "
          f"{sizer.HEADROOM} headroom | KV for up to "
-         f"{sizer.CONCURRENCY} x {s.max_model_len} tokens")
+         f"{s.streams} x {s.max_model_len} tokens")
     return s
+
+
+def _check_kv_streams(m: Model, args: list[str]) -> None:
+    """kv_streams sizes the KV cache, which only memory: auto does; vLLM runs at most --max-num-seqs of them at once."""
+    if not m.kv_streams:
+        return
+    if not m.memory_auto:
+        warn(f"kv_streams {m.kv_streams} of {m.name} has no effect: it sizes the KV cache only with memory: auto.")
+        return
+    seqs = sizer.arg_value(args, "--max-num-seqs")
+    if is_uint(seqs) and int(seqs) < int(m.kv_streams):
+        warn(f"kv_streams {m.kv_streams} of {m.name} exceeds --max-num-seqs {seqs}: vLLM runs at most {seqs} requests "
+             "at once, so the KV cache sized for the rest goes unused.")
 
 
 SIZING_INPUTS = "memory-sizing.model-manager.io/inputs"
@@ -409,8 +426,10 @@ SIZED_CONTEXT = "memory-sizing.model-manager.io/max-model-len"
 
 
 def _sizing_inputs(m: Model, args: list[str], tp: int) -> str:
-    """What memory: auto sized from: the model, its draft, the image, TP and the effective engine args."""
-    key = json.dumps([m.model_id, m.draft_model_id, m.image, tp, args], separators=(",", ":"))
+    """What memory: auto sized from: the model, its draft, the image, TP, the effective engine args and kv_streams
+    (only when set, so deploys sized before it existed keep their hash)."""
+    key = json.dumps([m.model_id, m.draft_model_id, m.image, tp, args, *([m.kv_streams] if m.kv_streams else [])],
+                     separators=(",", ":"))
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 

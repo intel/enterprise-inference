@@ -55,7 +55,7 @@ The deploy prints the calculation:
 
 | Memory | `VLLM_CPU_KVCACHE_SPACE` | Result |
 |---|---|---|
-| `auto` | not set | KV for 16 streams of `max_model_len` tokens; memory sized around it; `--max-model-len` emitted |
+| `auto` | not set | KV for [`kv_streams`](#streams-kv_streams) (default 16) requests of `max_model_len` tokens; memory sized around it; `--max-model-len` emitted |
 | `auto` | set | Rejected: `memory: auto` sizes both. Set `memory` instead, or remove the KV setting. `--hfid`'s default `auto` instead gives way to the category memory |
 | set, or the category default | set, or the category `kv_cache_gb` | Used as is; the [pre-flight](#pre-flight-checks) checks that they fit |
 
@@ -81,7 +81,7 @@ The deploy prints the calculation:
 memory_gi   = ceil( (W + load + TP × kv_gib + TP × 3 GiB) × 1.15 )
 
 kv_gib      = max( 2, ceil(per_request / GiB), ceil(per_request × streams / GiB) )
-streams     = min(16, --max-num-seqs)
+streams     = kv_streams if set, else min(16, --max-num-seqs)
 per_request = KV-pool bytes one full-length request holds on one worker (below)
 ```
 
@@ -90,6 +90,7 @@ per_request = KV-pool bytes one full-length request holds on one worker (below)
 | `W` | Weight bytes: the size of the repo-root `.safetensors` files (subfolders such as `original/` and `consolidated.*` hold other formats). For quantized checkpoints the file size is the resident size; an unquantized checkpoint served with a wider `--dtype` (bf16 as float32) is scaled up. A draft model's weights are added |
 | `load` | Load-time allowances, see [below](#load-allowances): 0.4 × `W` for a quantized checkpoint, 10 GiB for vision / audio towers, 24 GiB more for video |
 | `TP` | The last `--tensor-parallel-size` of the model's `args` (category, version, model), then `--arg` / `--tp`, as vLLM receives it: one vLLM worker per rank |
+| `streams` | Full-length requests the KV cache holds at once; see [Streams](#streams-kv_streams) |
 | `kv_gib` | `VLLM_CPU_KVCACHE_SPACE`. vLLM allocates it **on every worker**, so the pod holds `TP ×` it |
 | `3 GiB` | Per-worker runtime: Python, PyTorch, oneDNN, prefill activations, sampling buffers |
 | `1.15` | Headroom for fragmentation, load-time page cache, and estimate error |
@@ -109,6 +110,58 @@ were measured on Xeon in intel/enterprise-inference#86.
 `--limit-mm-per-prompt '{"image": 0, "video": 0}'`. Serving a multimodal model as text only
 (image and video 0, plus audio 0 if it has audio) drops both multimodal allowances. The
 allowances count once per pod, and are split across the TP workers for the NUMA check.
+
+### Streams: `kv_streams`
+
+`kv_streams` is how many requests of the full `max_model_len` the KV cache holds at the
+same time. It is the sizing target for `memory: auto`, and the main knob between memory and
+concurrency: the KV cache, and so the memory, grows linearly with it.
+
+| Where | Example | Default |
+|---|---|---|
+| The model's catalog entry | `kv_streams: 32` | 16 |
+| The command line, for one deploy (wins) | `--kv-streams 32` | |
+
+- **No upper limit.** Any value is sized. A value too large for the hardware is caught by the
+  [pre-flight](#pre-flight-checks), before the download: the fit check, and the NUMA check,
+  which suggests the `--tp` that fits. The KV per worker shrinks as TP splits the KV heads, so
+  a larger TP can hold more streams.
+- **Without `kv_streams`:** 16, or fewer when `--max-num-seqs` is lower (vLLM would never run
+  more at once).
+- **Only with `memory: auto`.** With a set `memory`, the KV cache is `VLLM_CPU_KVCACHE_SPACE`
+  as given, and `kv_streams` is ignored with a warning.
+- **Changing it re-sizes a deployed model.** It is one of the [recorded sizing
+  inputs](#when-a-model-cannot-be-sized), when set.
+
+**`kv_streams` is not `--max-num-seqs`.** `--max-num-seqs` is vLLM's scheduler limit: the
+most requests it batches at once. The catalog sets it to 256, meaning "no practical limit",
+so it is not a sizing target. How many requests actually run together is the smaller of
+the two limits:
+
+```
+running at once = min( --max-num-seqs,  KV cache tokens / tokens per request )
+```
+
+Requests use KV blocks only for the tokens they have so far, so `kv_streams` is the
+guarantee for the worst case: that many users each using the whole context at once.
+Shorter requests share the same pool, and more of them run together. For example, with
+`kv_streams: 16` at 16K tokens, 20 requests of 13K tokens fit. When the pool is full, new
+requests wait and vLLM preempts running ones, so they are slower but don't fail.
+`kv_streams` above `--max-num-seqs` warns: vLLM can't use the extra KV.
+
+Example: Llama-3.1-8B, 8K context (1 GiB of KV per request at TP 1), on a host whose
+NUMA nodes have 252 GiB:
+
+| `kv_streams` | TP | KV per worker | Per worker | Memory | Pre-flight |
+|---|---|---|---|---|---|
+| 16 (default) | 1 | 16 GiB | 34 GiB | 40Gi | ✅ |
+| 32 | 1 | 32 GiB | 50 GiB | 58Gi | ✅ |
+| 256 | 1 | 256 GiB | 274 GiB | 316Gi | ❌ NUMA: `Deploy with --tp 2` |
+| 256 | 2 | 128 GiB | 138.5 GiB | 319Gi | ✅ |
+
+```bash
+./model-manager deploy llama-3-1-8b --memory auto --kv-streams 256 --tp 2
+```
 
 ### Tensor parallelism
 
@@ -239,7 +292,7 @@ These run before the weights download, for every CPU policy:
 |---|---|---|
 | Topology | TP does not split the attention / KV heads | Abort (also with `--dry-run`), with or without `memory: auto` |
 | Fit | A set `memory` is below weights + load + TP × KV + TP × 3 GiB (no headroom) | Abort with the numbers |
-| NUMA | One TP worker's share, (weights + load) ÷ TP + KV + 3 GiB, exceeds one NUMA node's memory | Abort, suggesting the smallest `--tp` that fits (up to the node's `nri.intel.com/max-tp`), or a smaller KV / context when none does. TP is never changed for you |
+| NUMA | One TP worker's share, (weights + load) ÷ TP + KV + 3 GiB, exceeds one NUMA node's memory | Abort, suggesting the smallest `--tp` that fits (up to the node's `nri.intel.com/max-tp`), or a lower `kv_streams`, KV or context when none does. TP is never changed for you |
 | Placement | No node the model can use has the pod's CPU **and** memory free (allocatable minus running pods' requests) | Abort; the pod would stay Pending. This is the CPU-policy pre-flight, which gets the sized memory |
 
 The NUMA check exists because vLLM binds each TP worker's memory to the NUMA node of its CPUs (MEMBIND), so a worker cannot spill onto another node: past one NUMA node it fails at load even when the pod's limit is larger. A NUMA node's size is the node's memory capacity ÷ its `nri.intel.com/numa-nodes` label, read per node at deploy time, so it follows each host's hardware; if any node the model can use lacks the labels (no NRI), the check is skipped, since that node may fit the worker. NUMA nodes of one host are assumed equal in size, which holds for Xeon SNC layouts but not for uneven DIMMs or CPU-less (CXL) memory nodes.
@@ -267,8 +320,8 @@ cannot size qwen3-0-6b: …; using the llm default 16Gi. Set --memory to choose 
 
 Set `memory:` (and `VLLM_CPU_KVCACHE_SPACE`) for such a model instead.
 
-A sized deploy records what it was sized from (a hash of the model, draft, image, TP and
-effective engine args) and the sized `--max-model-len` as annotations on the
+A sized deploy records what it was sized from (a hash of the model, draft, image, TP,
+effective engine args and `kv_streams` when set) and the sized `--max-model-len` as annotations on the
 `LLMInferenceService` (`memory-sizing.model-manager.io/inputs`, `…/max-model-len`). A
 re-deploy of a `memory: auto` model (catalog, or `--hfid` without `--memory`) with the same
 inputs keeps the live memory, KV cache and context, as `cpu: auto` keeps its CPU: an
@@ -292,12 +345,13 @@ size is unknown, nothing is checked. These values do not change with `--tp`.
 |---|---|
 | Less memory | `--arg --max-model-len=4096` with `memory: auto` |
 | Longer context | `--arg --max-model-len=32768`: KV grows linearly with it |
-| More concurrent long requests | Set `memory:` and `VLLM_CPU_KVCACHE_SPACE` (in `env:`) instead of `memory: auto`; sized KV stops at 16 full-length streams |
+| More concurrent long requests | `kv_streams: N` (or `--kv-streams N`) with `memory: auto`; the pre-flight says when N needs a larger `--tp` |
+| Less memory, fewer long requests | A lower `kv_streams` |
 | A known-good fixed setup | Set both `memory:` and `VLLM_CPU_KVCACHE_SPACE` in the model's `env:` |
 
 ## Limits
 
-- The constants (3 GiB overhead per worker, 1.15 headroom, 16 streams, 8192 tokens, and the
+- The constants (3 GiB overhead per worker, 1.15 headroom, 16 default streams, 8192 tokens, and the
   load allowances) are estimates. MLA follows vLLM's `MLAAttentionSpec`, but vLLM 0.28 has no
   CPU MLA backend, so it is not validated live. Calibrate them against the peak RSS of real deploys.
 - The KV pool rules are those of vLLM 0.28's CPU backend. Recheck them when the

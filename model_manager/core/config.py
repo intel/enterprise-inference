@@ -188,6 +188,8 @@ class Sizing:
     needed_gib: float                         # weights + load + tp x (kv + overhead)
     memory_gi: int                            # needed_gib with headroom: the request and limit
     load_gib: float = 0.0                     # load-time allowances: quantized repack, multimodal encoders
+    streams: int = 16                         # full-length requests the KV holds: kv_streams, else min(16, --max-num-seqs)
+    kv_by_tp: dict = field(default_factory=dict)  # sized KV per worker at each valid TP, for the NUMA hint
 
 
 @dataclass
@@ -209,6 +211,7 @@ class Model:
     memory: str = ""
     memory_auto: bool = False                 # memory: auto: sized from the model (core/sizer.py)
     memory_auto_default: bool = False         # memory_auto as --hfid's default: falls back to `memory` if unsizable
+    kv_streams: str = ""                      # memory: auto: full-length requests the KV cache holds (default 16)
     kv_cache_gb: str = ""                     # sized VLLM_CPU_KVCACHE_SPACE
     max_model_len: str = ""                   # sized --max-model-len
     sizing: dict = field(default_factory=dict)  # memory: auto's inputs + sized context, kept as CR annotations
@@ -296,6 +299,9 @@ def resolve(catalog: Catalog, target: str, o: Any) -> Model:
                                  and m.category == "llm")
     m.memory_auto = m.memory_auto or m.memory_auto_default
     m.memory = m.memory or text(pick(defaults, "memory", "16Gi"))
+    m.kv_streams = text(getattr(o, "kv_streams", "")) or m.kv_streams
+    if m.kv_streams and not (is_uint(m.kv_streams) and int(m.kv_streams) > 0):
+        abort(f"Model '{m.name}' kv_streams must be a positive integer, got: {m.kv_streams}")
     m.replicas = o.replicas or m.replicas
     m.node = o.node or m.node
     if o.routing:
@@ -322,7 +328,7 @@ def _from_catalog(catalog: Catalog, name: str, o: Any) -> Model:
               "as a block scalar.")
     m = Model(name=name, namespace=text(pick(e, "namespace", catalog.namespace)), kind=text(pick(e, "kind")),
               model_id=text(pick(e, "model_id")), draft_model_id=text(pick(e, "draft_model_id")),
-              cpu=text(pick(e, "cpu")), memory=text(pick(e, "memory")),
+              cpu=text(pick(e, "cpu")), memory=text(pick(e, "memory")), kv_streams=text(pick(e, "kv_streams")),
               replicas=text(pick(e, "replicas", catalog.replicas)), category=text(pick(e, "category")),
               image=text(pick(e, "image")), node=text(pick(e, "node")), routing=text(pick(e, "routing")),
               chat_template=text(pick(e, "chat_template")).rstrip("\n"),  # as legacy $(jq) did

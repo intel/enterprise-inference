@@ -429,12 +429,15 @@ def _numa_error(m: Model, s: Sizing) -> str:
     if numa is None or per_worker <= numa[0]:
         return ""
     size, max_tp = numa
-    fits = next((t for t in (2, 4, 8) if s.tp < t <= max_tp
-                 and (s.weights_gib + s.load_gib) / t + s.kv_gib + sizer.OVERHEAD_GIB <= size), 0)
-    hint = (f"Deploy with --tp {fits} (or --tensor-parallel-size {fits} in its args): each worker then holds 1/{fits} "
-            "of the weights on its own NUMA node." if fits else
-            "No TP the node supports fits the weights; lower VLLM_CPU_KVCACHE_SPACE or --max-model-len, or use a "
-            "smaller (e.g. quantized) model.")
+    # A sized KV shrinks with TP (kv_by_tp); a set VLLM_CPU_KVCACHE_SPACE is per worker at any TP. A TP that does not
+    # split the heads is not in kv_by_tp, so it is never suggested.
+    fits = next((t for t in (2, 4, 8) if s.tp < t <= max_tp and (t in s.kv_by_tp or not s.kv_by_tp)
+                 and (s.weights_gib + s.load_gib) / t + s.kv_by_tp.get(t, s.kv_gib) + sizer.OVERHEAD_GIB <= size), 0)
+    split = f"1/{fits} of the weights" + (f" and {s.kv_by_tp[fits]} GiB of KV" if fits in s.kv_by_tp else "")
+    hint = (f"Deploy with --tp {fits} (or --tensor-parallel-size {fits} in its args): each worker then holds {split} "
+            "on its own NUMA node." if fits else
+            "No TP the node supports fits the weights; lower kv_streams, VLLM_CPU_KVCACHE_SPACE or --max-model-len, "
+            "or use a smaller (e.g. quantized) model.")
     return (f"{m.name} needs {per_worker:.0f} GiB per TP worker at tp={s.tp} (weights {s.weights_gib / s.tp:.1f}"
             f"{f' + load {s.load_gib / s.tp:.1f}' if s.load_gib else ''} + KV {s.kv_gib} + overhead "
             f"{sizer.OVERHEAD_GIB} GiB), but a NUMA node has {size:.0f} GiB and vLLM binds "
