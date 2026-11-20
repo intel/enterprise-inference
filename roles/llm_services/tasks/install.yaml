@@ -24,6 +24,68 @@
           istio.io/dataplane-mode: "ambient"
   when: istio_enabled | default(false) | bool
 
+# On OpenShift the mesh is STRICT (a prerequisite), but the OpenShift AI gateway and
+# the user-workload Prometheus run outside it: they reach the scheduler (ext_proc
+# 9002, metrics 9090) and vLLM (8000) in plain TCP, which ztunnel would refuse. Only
+# those ports accept plain TCP, and the NetworkPolicy lets in only those two
+# namespaces. Meshed traffic arrives on HBONE (15008); 169.254.7.127 is the address
+# ztunnel gives the kubelet's probes.
+- name: "llm_services | Open the model ports to the OpenShift AI gateway and Prometheus"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ item }}"
+  loop:
+    - apiVersion: security.istio.io/v1
+      kind: PeerAuthentication
+      metadata:
+        name: llminferenceservice-scheduler
+        namespace: "{{ llm_services_namespace }}"
+      spec:
+        selector:
+          matchLabels:
+            app.kubernetes.io/component: llminferenceservice-router-scheduler
+        mtls: {mode: STRICT}
+        portLevelMtls: "{{ {'9002': {'mode': 'PERMISSIVE'}, '9090': {'mode': 'PERMISSIVE'}} }}"
+    - apiVersion: security.istio.io/v1
+      kind: PeerAuthentication
+      metadata:
+        name: llminferenceservice-workload
+        namespace: "{{ llm_services_namespace }}"
+      spec:
+        selector:
+          matchLabels:
+            app.kubernetes.io/component: llminferenceservice-workload
+        mtls: {mode: STRICT}
+        portLevelMtls: "{{ {'8000': {'mode': 'PERMISSIVE'}} }}"
+    - apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: llminferenceservice-ingress
+        namespace: "{{ llm_services_namespace }}"
+      spec:
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/part-of: llminferenceservice
+        policyTypes: [Ingress]
+        ingress:
+          - ports: [{port: 15008, protocol: TCP}]
+          - from: [{ipBlock: {cidr: 169.254.7.127/32}}]
+          - from:
+              - namespaceSelector:
+                  matchLabels:
+                    policy-group.network.openshift.io/ingress: ""
+            ports: [{port: 8000, protocol: TCP}, {port: 9002, protocol: TCP}]
+          - from:
+              - namespaceSelector:
+                  matchLabels:
+                    network.openshift.io/policy-group: monitoring
+            ports: [{port: 8000, protocol: TCP}, {port: 9090, protocol: TCP}]
+  loop_control:
+    label: "{{ item.kind }}/{{ item.metadata.name }}"
+  when:
+    - istio_enabled | default(false) | bool
+    - cluster_distribution | default('kubernetes') == 'openshift'
+
 - name: "llm_services | Label namespace — PSS"
   kubernetes.core.k8s:
     state: present
