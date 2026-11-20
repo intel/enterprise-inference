@@ -37,12 +37,12 @@ litellm_reconcile: false
 # Foreign var (canonical owner: enterprise-ai-solutions gateway component flag;
 # envoy_gateway_enabled is its alias).
 litellm_gateway_publish: "{{ gateway_enabled | default(envoy_gateway_enabled | default(true)) | bool }}"
-litellm_hostname: "litellm.{{ base_domain_name | default('inference-example.com') }}"
+litellm_hostname: "litellm.{{ base_domain_name | default('inteltoolkits.ai') }}"
 # Path mode (routing_mode: path): <base>/litellm, each public path rewritten.
 litellm_path: "/litellm"
 _litellm_path_mode: "{{ (routing_mode | default('subdomain')) == 'path' }}"
 litellm_url: >-
-  {{ 'https://' ~ (base_domain_name | default('inference-example.com')) ~ litellm_path
+  {{ 'https://' ~ (base_domain_name | default('inteltoolkits.ai')) ~ litellm_path
      if _litellm_path_mode | bool else 'https://' ~ litellm_hostname }}
 
 # Admin UI on its own host (path mode: under litellm_path, on the base host's
@@ -53,7 +53,7 @@ litellm_url: >-
 # LiteLLM's free tier stops all SSO logins once more than 5 users exist, so the
 # gateway admits only litellm_ui_groups (default: the admin group).
 litellm_ui_sso: "{{ keycloak_enabled | default(true) | bool }}"
-litellm_ui_hostname: "litellm-ui.{{ base_domain_name | default('inference-example.com') }}"
+litellm_ui_hostname: "litellm-ui.{{ base_domain_name | default('inteltoolkits.ai') }}"
 litellm_ui_url: "{{ litellm_url if _litellm_path_mode | bool else 'https://' ~ litellm_ui_hostname }}"
 litellm_ui_groups: []
 litellm_oidc_client_id: "litellm"

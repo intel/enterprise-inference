@@ -114,9 +114,9 @@ Call the model — the `model` field selects which one answers:
 curl -sk --noproxy '*' \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  --resolve "inference.solutions.ai:443:$GATEWAY_IP" \
+  --resolve "inference.inteltoolkits.ai:443:$GATEWAY_IP" \
   -d '{"model":"qwen3-0-6b","messages":[{"role":"user","content":"Hello!"}],"max_tokens":64}' \
-  https://inference.solutions.ai/v1/chat/completions
+  https://inference.inteltoolkits.ai/v1/chat/completions
 ```
 
 See what is serving:
