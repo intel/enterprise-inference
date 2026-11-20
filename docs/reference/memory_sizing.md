@@ -61,7 +61,7 @@ kv_gib    = max( 2, ceil(per_request × kv_streams / GiB) )      # per worker; d
 
 ### Why these constants
 
-A vLLM CPU pod runs three processes. Measured live (non-reclaimable memory, idle, [test environment](#test-environment)):
+A vLLM CPU pod runs three processes. Measured live (non-reclaimable memory, idle):
 
 | Pod (W, KV) | API server | EngineCore | Worker | Worker − W − KV | Pod − W − KV |
 |---|---|---|---|---|---|
@@ -272,7 +272,7 @@ declares. Each one is memory that vLLM uses at start-up or keeps resident, and t
 and KV don't account for. The deploy log names each allowance it adds, e.g.
 `load 29.0 (4.0 image encoder + 25.0 video profiling at 0.2 per 1K of 128000 tokens)`.
 
-| Allowance (log name) | When | Amount | What uses the memory | Measured (cgroup peak, [test environment](#test-environment)) |
+| Allowance (log name) | When | Amount | What uses the memory | Measured (cgroup peak) |
 |---|---|---|---|---|
 | `quantized repack` | `quantization_config` (AWQ, GPTQ) | 0.4 × weights | The checkpoint's packed int4 layout isn't the one the CPU kernel runs. At load vLLM converts each weight to the kernel's layout, and the source and repacked tensors are both resident until the source is freed | Llama-3-8B-AWQ: about 0.2 × weights. 0.4 is twice that, as only one quantized model was measured |
 | `image encoder`, `audio encoder` | `vision_config` / `audio_config`, unless every modality the model has is limited to 0 | 4 GiB | At start-up vLLM profiles the encoder: it runs the largest dummy image or audio clip `--limit-mm-per-prompt` allows, to size its activations and encoder cache. The ViT / audio-encoder activations of that pass, and the multimodal input processing, are on top of the weights | Images +2.5 GiB (Qwen2.5-VL-3B); images and audio +2.4 GiB (Gemma 4 E4B) |
@@ -304,22 +304,11 @@ peaks were measured at the slightly lower earlier sizing (51 / 26 / 22 / 41 / 37
 | Gemma 4 E4B, images + audio + video, 131K | 43Gi | 36.4 GiB (32.3) |
 | Gemma 4 E4B, text only, 131K | 38Gi | 29.9 GiB (29.5) |
 
-## Test environment
-
-| | |
-|---|---|
-| Hardware | 2 × Xeon 6960P (72 cores each, AMX), 1.5 TiB, 6 NUMA nodes (SNC) of 252 GiB |
-| Software | Ubuntu 24.04, kernel 6.8, Kubernetes 1.35, NRI balloons; pods of 8–24 CPUs |
-| vLLM (CPU image) | 0.28.0: KV accuracy, multimodal, Llama. 0.24.0: Qwen3 runtime and headroom |
-
-The KV and weight sizes don't depend on the hardware: they come from `config.json` and vLLM's
-allocator. The runtime overhead, quantized repack and encoder allowances do depend on it (CPU
-ISA, thread count, vLLM / torch version), so recheck them on other hardware or a new vLLM.
-
 ## Tuning the constants
 
-The estimated parts are measured on the [test environment](#test-environment). To recalibrate
-them for other hardware or a new vLLM, set them per runtime in `models.yaml`:
+The runtime overhead, quantized repack and encoder allowances depend on the hardware and the
+vLLM version; the KV and weight sizes don't. Recalibrate them on other hardware or a new vLLM
+if required, per runtime in `models.yaml`:
 
 ```yaml
 runtimes:
