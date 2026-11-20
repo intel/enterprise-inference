@@ -38,7 +38,8 @@ LLM_ARGS = ["--dtype", "bfloat16", "--max-num-seqs", "128", "--max-num-batched-t
 DEEPSEEK_V2_LITE = {"num_hidden_layers": 27, "num_attention_heads": 16, "num_key_value_heads": 16,
                     "kv_lora_rank": 512, "qk_rope_head_dim": 64, "hidden_size": 2048,
                     "max_position_embeddings": 163840, "torch_dtype": "bfloat16"}
-GEMMA4_E4B = {"model_type": "gemma4", "vision_config": {}, "audio_config": {}, "video_token_id": 258884,
+GEMMA4_E4B = {"model_type": "gemma4", "vision_config": {}, "audio_config": {},
+              "video_token_id": 258884,  # nosec B105 - a vocabulary token id from config.json, not a secret
               "text_config": {**GEMMA4["text_config"], "num_hidden_layers": 42, "num_kv_shared_layers": 18,
                               "layer_types": (["sliding_attention"] * 5 + ["full_attention"]) * 7}}
 MIB = 1024 ** 2
@@ -227,7 +228,7 @@ def test_shared_kv_layers_shrink_the_kv():
 
 
 AWQ = {**LLAMA_8B, "quantization_config": {"quant_method": "awq", "bits": 4}}
-VLM = {**LLAMA_8B, "vision_config": {}, "video_token_id": 151656}
+VLM = {**LLAMA_8B, "vision_config": {}, "video_token_id": 151656}  # nosec B105 - a vocabulary token id, not a secret
 
 
 @pytest.mark.parametrize("cfg, args, load", [
