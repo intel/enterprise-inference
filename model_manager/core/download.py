@@ -9,7 +9,7 @@ import time
 from . import k8s
 from .stuck import Watch
 from .config import HF_EXCLUDE, Catalog, Model, hf_download_bytes, hf_model_info, pick, text
-from .renderer import proxy_env, quote, render, template, trust_remote_code
+from .renderer import gpu_toleration, proxy_env, quote, render, template, trust_remote_code
 from .ui import YELLOW, RESET, abort, info, ok
 
 TIMEOUT = 7200
@@ -99,6 +99,18 @@ def _script(m: Model, cli_args: list[str], need_bytes: int = 0) -> str:
         "@NAME@", m.name).replace("@DIR@", f"/models/{m.name}")
 
 
+def _node_affinity(nodes: tuple) -> str:
+    """Pin the Job to these nodes, so a volume that binds on first use lands where the GPU pod can mount it.
+    One term per node: the API takes a single value in a node field selector, and terms are ORed."""
+    if not nodes:
+        return ""
+    return ("\n      affinity:\n        nodeAffinity:\n          requiredDuringSchedulingIgnoredDuringExecution:\n"
+            "            nodeSelectorTerms:" + "".join(
+                "\n              - matchFields:\n                  - key: metadata.name\n"
+                f"                    operator: In\n                    values:\n                      - {quote(n)}"
+                for n in nodes))
+
+
 def _redact(line: str) -> str:
     """A log line without credentials in URLs (a proxy can carry them)."""
     return re.sub(r"(://)[^/@\s]+@", r"\1***@", line)
@@ -120,7 +132,7 @@ def _wait_job(m: Model, job: str) -> str:
     return f"not finished after {TIMEOUT}s"
 
 
-def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
+def download_weights(m: Model, catalog: Catalog, cli_args: list[str], nodes: tuple) -> None:
     if catalog.connectivity_url and not _curl_ok(catalog.connectivity_url, catalog.https_proxy):
         abort(f"Network check failed: cannot reach {catalog.connectivity_url} (proxy: {catalog.https_proxy or 'none'}). "
               "Check network/proxy settings in models.yaml or environment.")
@@ -139,6 +151,8 @@ def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
         k8s.apply(secret.stdout, quiet=True)
 
     env = [("HOME", "/models"), ("HF_HOME", "/models/.hf-cache")]
+    if m.gpu:  # it requests no GPU, but the NVIDIA runtime shows a CUDA image (NVIDIA_VISIBLE_DEVICES=all) every GPU
+        env.append(("NVIDIA_VISIBLE_DEVICES", "void"))
     env_items = [f"            - name: {k}\n              value: {quote(v)}" for k, v in env]
     if token:
         env_items.append("            - name: HF_TOKEN\n              valueFrom:\n                secretKeyRef:\n"
@@ -148,6 +162,8 @@ def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
     # Per destination: a draft that is the model itself still downloads twice (<name>/ and <name>/draft).
     need = 0 if m.runtime == "openvino" else sum(hf_download_bytes(repos[r]) for r in (m.model_id, m.draft_model_id) if r)
     uid = m.run_as_user
+    # Tainted GPU nodes may be the only ones the Job can use (e.g. a node-local PVC), so it tolerates the taint.
+    toleration = gpu_toleration(m, 6)
     job = f"download-{m.name}"
     manifest = render(
         template("download-job.yaml"), MODEL_NAME=m.name, NAMESPACE=m.namespace, MODEL_ID=m.model_id,
@@ -156,7 +172,8 @@ def download_weights(m: Model, catalog: Catalog, cli_args: list[str]) -> None:
         DOWNLOAD_CMD="\n".join("              " + line for line in _script(m, cli_args, need).split("\n")),
         # Small requests so the job schedules; limits track the serving envelope (OVMS converts in memory).
         DL_CPU_REQUEST="500m", DL_MEM_REQUEST="2Gi", DL_CPU_LIMIT=m.cpu or "2", DL_MEM_LIMIT=m.memory or "8Gi",
-        TTL_SECONDS=os.environ.get("DOWNLOAD_JOB_TTL") or "300", TIMEOUT=str(TIMEOUT))
+        TTL_SECONDS=os.environ.get("DOWNLOAD_JOB_TTL") or "300", TIMEOUT=str(TIMEOUT),
+        TOLERATIONS="\n" + toleration if toleration else "", AFFINITY=_node_affinity(nodes))
 
     k8s.run("delete", "job", job, "-n", m.namespace, "--ignore-not-found")
     k8s.apply(manifest)

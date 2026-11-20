@@ -6,6 +6,8 @@ every mutating kubectl call with the manifest it applied. Regenerate them with
 launcher end to end against fake kubectl/curl (tests/fakebin). Intended changes
 in behaviour are declared per case as `deviations`: (regex on the legacy text,
 replacement).
+
+The gpu-* cases live in test_gpu.py, which reuses this harness.
 """
 from __future__ import annotations
 
@@ -135,6 +137,11 @@ HELP_HFID = [
     (r"\(with --id\)$", "(with --hfid)"),
     (r"deploy --id meta-llama", "deploy --hfid meta-llama"),
 ]
+# --help documents --gpus (GPU runtimes), which is new.
+HELP_GPU = [(r"^  --tp N .*\n",
+             r"  --tp N               Tensor-parallel size (splits across N NUMA nodes; on a GPU runtime, also N GPUs)\n"
+             r"  --gpus N             GPUs per pod (device: gpu runtimes, e.g. vllm-cuda); also the default --tp\n"),
+            (r"vllm \(default\) \| openvino  \(alias: --runtime\)$", "vllm (default) | openvino | vllm-cuda  (alias: --runtime)")]
 
 
 def nri_node(in_use: int) -> list:
@@ -244,9 +251,9 @@ CASES = [
     case("fx-bad-env", "deploy", "badenv", "--dry-run", env=BE, catalog=FIXTURE),
     case("fx-bad-template", "deploy", "badtpl", "--dry-run", env=BE, catalog=FIXTURE),
     # CLI surface and validation errors.
-    case("no-args", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_SCALING]),
-    case("help", "--help", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_SCALING]),
-    case("help-command", "help", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_SCALING]),
+    case("no-args", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_GPU, *HELP_SCALING]),
+    case("help", "--help", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_GPU, *HELP_SCALING]),
+    case("help-command", "help", deviations=[HELP_SVC_NS, *HELP_LIST, *HELP_HFID, *HELP_GPU, *HELP_SCALING]),
     case("version", "version"),
     case("version-flag", "-v"),
     case("unknown-option", "deploy", "qwen3-0-6b", "--bogus"),

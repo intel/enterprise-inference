@@ -110,6 +110,38 @@ def _annotations(annotations: dict, kind: str) -> str:
         f"{pad}  {k}: {quote(v) if v.isdigit() or v in ('true', 'false') else v}\n" for k, v in annotations.items())
 
 
+def _volumes(m: Model) -> tuple[str, str]:
+    """volumeMounts and volumes: the inline chat template's ConfigMap and, on GPU runtimes, a memory-backed
+    /dev/shm (NCCL needs more shared memory for tensor parallelism than the container's 64Mi)."""
+    mounts, volumes = [], []
+    if inline_chat_template(m):
+        mounts.append(f"          - name: chat-template\n            mountPath: {CHAT_TEMPLATE_DIR}\n"
+                      "            readOnly: true\n")
+        volumes.append(f"      - name: chat-template\n        configMap:\n          name: {m.name}-chat-template\n")
+    shm = text(pick(m.rt, "shm_size")) if m.gpu else ""
+    if shm:
+        mounts.append("          - name: shm\n            mountPath: /dev/shm\n")
+        volumes.append(f"      - name: shm\n        emptyDir:\n          medium: Memory\n          sizeLimit: {shm}\n")
+    if not mounts:
+        return "", ""
+    return "        volumeMounts:\n" + "".join(mounts), "    volumes:\n" + "".join(volumes)
+
+
+def gpu_toleration(m: Model, indent: int) -> str:
+    """The toleration for the taint GPU nodes carry, at a pod spec's indent; empty on CPU."""
+    key = text(pick(m.rt, "accelerator_toleration_key")) if m.gpu else ""
+    pad = " " * indent
+    return f"{pad}tolerations:\n{pad}  - key: {key}\n{pad}    operator: Exists\n{pad}    effect: NoSchedule" if key else ""
+
+
+def _gpu(m: Model, affinity: str) -> tuple[str, str]:
+    """The accelerator line appended to requests and limits, and the toleration; both empty on CPU."""
+    if not m.gpu:
+        return "", ""
+    toleration = gpu_toleration(m, 4)
+    return f'\n            {m.accel_resource}: "{m.gpus}"', ("\n" if affinity and toleration else "") + toleration
+
+
 # Standalone default; the install always sets MM_PROMETHEUS_URL from observability_namespace.
 PROMETHEUS_URL = "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
 
@@ -173,21 +205,23 @@ def manifest(m: Model, catalog: Catalog, o, annotations: dict, cpu: str, cli_arg
     common = {
         "MODEL_NAME": m.name, "NAMESPACE": m.namespace, "MODEL_URI": m.uri, "CPU": cpu, "MEMORY": m.memory,
         "REPLICAS": m.replicas, "ARGS": _list([f"        - {quote(a)}" for a in dedupe_args(args + cli_args)]),
-        "ENV": _env(m, catalog, cli_args, o.env), "NRI_ANNOTATIONS": _annotations(annotations, m.kind),
-        "AFFINITY": _affinity(m.node, catalog.require_amx),
+        "ENV": _env(m, catalog, cli_args, o.env),
+        "NRI_ANNOTATIONS": _annotations(annotations, m.kind) if annotations else "",
+        "AFFINITY": _affinity(m.node, catalog.require_amx and not m.gpu),
         "EXTRA_LABELS": "".join(f"\n    {p.split('=', 1)[0]}: {quote(p.split('=', 1)[1])}" for p in o.label),
     }
     if m.kind == "LLMInferenceService":
-        inline = inline_chat_template(m)
+        mounts, volumes = _volumes(m)
+        gpu_limit, tolerations = _gpu(m, common["AFFINITY"])
         gateway, gateway_ns = gateway_ref()
+        # GPU pods get no CPU limit, which makes them Burstable: kubelet's static CPU manager then never
+        # gives them exclusive cores (full-pcpus-only would refuse an odd count with SMTAlignmentError).
+        cpu_limit = "" if m.gpu else f'\n            cpu: "{cpu}"'
         return platform.adapt_llmisvc(render(
             template("llm-inference-service.yaml"), **common, **_engine(m), IMAGE=m.image,
             SCALING=_llmisvc_replicas(m),
-            GATEWAY_NAME=gateway, GATEWAY_NAMESPACE=gateway_ns,
-            CHAT_TEMPLATE_MOUNT=(f"        volumeMounts:\n          - name: chat-template\n"
-                                 f"            mountPath: {CHAT_TEMPLATE_DIR}\n            readOnly: true\n") if inline else "",
-            CHAT_TEMPLATE_VOLUME=(f"    volumes:\n      - name: chat-template\n        configMap:\n"
-                                  f"          name: {m.name}-chat-template\n") if inline else ""))
+            GATEWAY_NAME=gateway, GATEWAY_NAMESPACE=gateway_ns, CHAT_TEMPLATE_MOUNT=mounts,
+            CHAT_TEMPLATE_VOLUME=volumes, GPU_RESOURCE=gpu_limit, TOLERATIONS=tolerations, CPU_LIMIT=cpu_limit))
     if m.kind == "InferenceService":
         return render(template("inference-service.yaml"), **common, MODEL_ID=m.model_id, PVC_NAME=catalog.pvc,
                       MODEL_FORMAT=text(pick(m.rt, "format")) or "openvino",
