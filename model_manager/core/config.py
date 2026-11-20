@@ -1,6 +1,7 @@
 """Model catalog (models.yaml) and resolution of a catalog entry or --hfid into a Model."""
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -81,16 +82,29 @@ def load_yaml(path: Path) -> Any:
         abort(f"Cannot read {path}: {e}")
 
 
-def hf_model_info(model_id: str, proxy: str) -> dict:
-    """HuggingFace model metadata, or {} when the Hub is unreachable."""
-    cmd = ["curl", "-sf", "--max-time", "10", *(["--proxy", proxy] if proxy else []),
-           f"https://huggingface.co/api/models/{model_id}"]
-    r = subprocess.run(cmd, capture_output=True, text=True, check=False)  # nosec B603
+def hf_model_info(model_id: str, proxy: str, blobs: bool = False, token: str | None = None) -> dict:
+    """HuggingFace model metadata (with file sizes when blobs), or {} when the Hub is unreachable."""
+    # A token reaches curl on stdin (-H @-), never in its arguments; private repos need it.
+    cmd = ["curl", "-sf", "--max-time", "10", *(["--proxy", proxy] if proxy else []), *(["-H", "@-"] if token else []),
+           f"https://huggingface.co/api/models/{model_id}" + ("?blobs=true" if blobs else "")]
+    r = subprocess.run(cmd, capture_output=True, text=True, check=False,  # nosec B603
+                       input=f"Authorization: Bearer {token}\n" if token else None)
     try:
         data = json.loads(r.stdout) if r.returncode == 0 else {}
     except ValueError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+# A copy of the weights in the publisher's own format (Meta's original/): vLLM loads the safetensors.
+HF_EXCLUDE = "original/*"
+
+
+def hf_download_bytes(info: dict) -> int:
+    """Bytes `hf download --exclude HF_EXCLUDE` fetches, from hf_model_info(blobs=True); 0 when unknown."""
+    files = info.get("siblings") or []
+    return sum(int(f.get("size") or 0) for f in files
+               if isinstance(f, dict) and not fnmatch.fnmatch(str(f.get("rfilename", "")), HF_EXCLUDE))
 
 
 class Catalog:
