@@ -65,8 +65,8 @@ its threads inside the cores the NRI balloon gives the pod.
 
 > [!NOTE]
 > Known limits of the 0.1.0 images (vLLM 0.26): `whisper-small` fails its first
-> transcription (`pin_memory=True requires a CUDA or other accelerator backend`), so serve it
-> with `--server vllm --server-version 0.28.0`. Gated repos (Llama) need `HF_TOKEN`.
+> transcription (`pin_memory=True requires a CUDA or other accelerator backend`), so the
+> catalog serves it on the vLLM runtime (0.28.0). Gated repos (Llama) need `HF_TOKEN`.
 
 ## vLLM
 

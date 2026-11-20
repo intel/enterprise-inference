@@ -13,6 +13,7 @@ container:
 env:
   HF_HUB_OFFLINE: "1"           # weights are on /mnt/models; skip the launcher's Hub lookups
   INFERENCE_MODEL_ID: "${MODEL_ID}"   # picks the profile; the base image has none baked in
+  VLLM_NO_USAGE_STATS: "1"      # OpenShift runs vLLM without the launcher, which sets VLLM_DO_NOT_TRACK
 # Requests queued because the replica is saturated.
 autoscaling:
   query: 'sum(vllm:num_requests_waiting{namespace="$namespace",model="$model"})'

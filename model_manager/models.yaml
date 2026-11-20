@@ -49,15 +49,31 @@ models:
     chat_template_file: tool_chat_template_qwen3coder.jinja
     args: [ --enable-auto-tool-choice, --tool-call-parser, qwen3_xml ]
 
+  # Full tuning on vLLM 0.28: with only the overrides its MoE kernel overflows at load (ScratchPadManager).
+  # Linear attention on CPU rejects prefix caching and chunked prefill; vision tower off (AMX kernel crash).
   - name: qwen3-6-35b-a3b
     model_id: Qwen/Qwen3.6-35B-A3B
     category: llm
+    runtime: vllm
+    server_version: 0.28.0
     cpu: auto
     memory: 128Gi
-    # Linear attention on CPU rejects prefix caching and chunked prefill; vision tower off (AMX kernel crash).
-    args: [ --enable-auto-tool-choice, --tool-call-parser, qwen3_xml, --no-enable-prefix-caching,
-            --no-enable-chunked-prefill, --max-model-len, "32768", --max-num-batched-tokens, "32768",
-            --limit-mm-per-prompt.image, "0", --limit-mm-per-prompt.video, "0" ]
+    args: [ --block-size, "128", --dtype, bfloat16, --distributed_executor_backend, mp, --trust-remote-code,
+            --enforce-eager, --no-enable-prefix-caching, --no-enable-chunked-prefill, --max-model-len, "32768",
+            --max-num-batched-tokens, "32768", --limit-mm-per-prompt.image, "0", --limit-mm-per-prompt.video, "0",
+            --enable-auto-tool-choice, --tool-call-parser, qwen3_xml, --tensor-parallel-size, "1" ]
+    env:
+      VLLM_CPU_KVCACHE_SPACE: "50"
+      VLLM_RPC_TIMEOUT: "100000"
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+      VLLM_ENGINE_ITERATION_TIMEOUT_S: "120"
+      VLLM_CPU_NUM_OF_RESERVED_CPU: "0"
+      HF_HUB_DISABLE_XET: "1"
+      VLLM_CPU_SGL_KERNEL: "1"
+      TRITON_CACHE_DIR: /tmp/.triton
+      TORCHINDUCTOR_CACHE_DIR: /tmp/.torch_compile
+      XDG_CACHE_HOME: /tmp/.cache
+      USER: vllm
 
   - name: qwen2-5-coder-7b
     model_id: Qwen/Qwen2.5-Coder-7B-Instruct
@@ -121,11 +137,26 @@ models:
   - name: whisper-small                # speech-to-text (/v1/audio/transcriptions)
     model_id: openai/whisper-small
     category: llm
+    runtime: vllm
+    server_version: "0.28.0"
     cpu: auto
     memory: 24Gi
     # Encoder-decoder: prefix caching kills the engine on the first request (no cross-attention caching).
-    args: [ --dtype, float32, --enforce-eager, --no-enable-prefix-caching ]
-    env: { TORCHDYNAMO_DISABLE: "1" }
+    args: [ --dtype, float32, --enforce-eager, --no-enable-prefix-caching, --tensor-parallel-size, "1" ]
+    env:
+      VLLM_RPC_TIMEOUT: "100000"
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+      VLLM_ENGINE_ITERATION_TIMEOUT_S: "120"
+      TRITON_CACHE_DIR: "/tmp/.triton"
+      USER: "vllm"
+      VLLM_CPU_KVCACHE_SPACE: "10"
+      VLLM_CPU_NUM_OF_RESERVED_CPU: "0"
+      HF_HUB_DISABLE_XET: "1"
+      VLLM_CPU_SGL_KERNEL: "1"
+      TORCHDYNAMO_DISABLE: "1"
+      TORCH_INDUCTOR_CACHE_DIR: "/tmp/torchinductor_cache"
+      XDG_CACHE_HOME: "/tmp/.cache"
+      HF_HOME: "/tmp/huggingface"
 
   # Backs the LiteLLM guardrail, which is fail-closed: an OOM here blocks every request.
   - name: qwen3guard
@@ -134,14 +165,16 @@ models:
     cpu: 8
     memory: 24Gi
 
-  # Speculative decoding: the draft is fetched to /mnt/models/draft; enable it with --speculative-config args.
+  # Speculative decoding: the draft is fetched to /mnt/models/draft, 5 tokens drafted per step.
   - name: llama-3-1-8b-specdec
     model_id: meta-llama/Llama-3.1-8B-Instruct
     draft_model_id: meta-llama/Llama-3.2-1B-Instruct
     category: llm
     cpu: auto
     memory: 64Gi
-    args: [ --enable-auto-tool-choice, --tool-call-parser, llama3_json ]
+    args: [ --enable-auto-tool-choice, --tool-call-parser, llama3_json,
+            --speculative-config.method, draft_model, --speculative-config.model, /mnt/models/draft,
+            --speculative-config.num_speculative_tokens, '5' ]
 
   - name: qwen3-coder-30b-specdec
     model_id: Qwen/Qwen3-Coder-30B-A3B-Instruct
@@ -150,17 +183,33 @@ models:
     cpu: auto
     memory: 160Gi
     chat_template_file: tool_chat_template_qwen3coder.jinja
-    args: [ --enable-auto-tool-choice, --tool-call-parser, qwen3_xml ]
+    args: [ --enable-auto-tool-choice, --tool-call-parser, qwen3_xml,
+            --speculative-config.method, draft_model, --speculative-config.model, /mnt/models/draft,
+            --speculative-config.num_speculative_tokens, '5' ]
 
-  # Needs vllm-project/vllm#42775: the draft's vocab (151936) differs from the base (152064).
+  # Same tokenizer, different vocab padding (draft 151936, base 152064): use_heterogeneous_vocab
+  # skips vLLM's equal-size check and drafts only the shared tokens.
   - name: qwen2-5-coder-14b-specdec
     model_id: Qwen/Qwen2.5-Coder-14B-Instruct
     draft_model_id: Qwen/Qwen2.5-Coder-0.5B-Instruct
     category: llm
+    runtime: vllm
+    server_version: "0.28.0"
     cpu: auto
     memory: 96Gi
     chat_template_file: tool_chat_template_qwen3coder.jinja
-    args: [ --enable-auto-tool-choice, --tool-call-parser, qwen3_xml ]
+    args: [ --block-size, "128", --dtype, bfloat16, --distributed_executor_backend, mp, --enable_chunked_prefill, --enforce-eager, --max-num-batched-tokens, "2048", --max-num-seqs, "256", --enable-prefix-caching, --enable-auto-tool-choice, --tool-call-parser, qwen3_xml, --tensor-parallel-size, "1", --speculative-config.method, draft_model, --speculative-config.model, /mnt/models/draft, --speculative-config.num_speculative_tokens, "5", --speculative-config.use_heterogeneous_vocab, "true" ]
+    env:
+      VLLM_RPC_TIMEOUT: "100000"
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+      VLLM_ENGINE_ITERATION_TIMEOUT_S: "120"
+      TRITON_CACHE_DIR: "/tmp/.triton"
+      USER: "vllm"
+      VLLM_CPU_KVCACHE_SPACE: "40"
+      VLLM_CPU_NUM_OF_RESERVED_CPU: "0"
+      HF_HUB_DISABLE_XET: "1"
+      VLLM_CPU_SGL_KERNEL: "1"
+      TORCHDYNAMO_DISABLE: "1"
 
   # Intel Inference Microservices catalog: per-model images. Llama repos are gated (HF_TOKEN).
   - name: iim-qwen3-4b
