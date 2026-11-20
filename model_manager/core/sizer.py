@@ -210,23 +210,30 @@ def _mm_limit(args: list[str], modality: str) -> int | None:
 
 
 def load_allowance_gib(cfg: dict | None, weight_bytes: int, args: list[str], context: int = 0) -> float:
-    """Memory beyond weights, KV and the per-worker runtime that a deploy needs: the repack copy of quantized
-    weights; the encoder profiling of a multimodal model unless --limit-mm-per-prompt sets every modality it has to
-    0; a natively encoded video, which grows with the context; and per-layer embedding tables."""
+    """Memory beyond weights, KV and the per-worker runtime that a deploy needs (see load_allowances)."""
+    return sum(load_allowances(cfg, weight_bytes, args, context).values())
+
+
+def load_allowances(cfg: dict | None, weight_bytes: int, args: list[str], context: int = 0) -> dict[str, float]:
+    """The load allowances by name, in GiB: the repack copy of quantized weights; the encoder profiling of a
+    multimodal model unless --limit-mm-per-prompt sets every modality it has to 0; a natively encoded video, which
+    grows with the context; and per-layer embedding tables."""
     if not cfg:
-        return 0.0
-    extra = QUANTIZED_REPACK * weight_bytes / GIB if _quantized(cfg) else 0.0
+        return {}
+    parts = {}
+    if _quantized(cfg):
+        parts[f"quantized repack at {QUANTIZED_REPACK} x weights"] = QUANTIZED_REPACK * weight_bytes / GIB
     present = ["image", "video"] * ("vision_config" in cfg) + ["audio"] * ("audio_config" in cfg)
     if any(_mm_limit(args, k) != 0 for k in present):
-        extra += MULTIMODAL_GIB
+        parts["/".join(dict.fromkeys(k for k in present if k != "video") or ["video"]) + " encoder"] = MULTIMODAL_GIB
     native_video = (cfg.get("vision_config") or {}).get("temporal_patch_size")
     if native_video and cfg.get("video_token_id") is not None and _mm_limit(args, "video") != 0:
-        extra += VIDEO_GIB_PER_1K * context / 1024
+        parts[f"video profiling at {VIDEO_GIB_PER_1K} per 1K of {context} tokens"] = VIDEO_GIB_PER_1K * context / 1024
     t = text_config(cfg)
     if t.get("hidden_size_per_layer_input"):
         tables = (t.get("vocab_size_per_layer_input") or t.get("vocab_size") or 0) * t.get("num_hidden_layers", 0)
-        extra += tables * t["hidden_size_per_layer_input"] * PLE_BYTES / GIB
-    return extra
+        parts["per-layer embeddings in fp32"] = tables * t["hidden_size_per_layer_input"] * PLE_BYTES / GIB
+    return parts
 
 
 def size(cfg: dict | None, weight_bytes: int, args: list[str], tp: int,
@@ -268,13 +275,15 @@ def size(cfg: dict | None, weight_bytes: int, args: list[str], tp: int,
     kv_gib = kv_at(tp)
     # KV heads split across workers, so a larger TP needs less KV per worker; the NUMA hint compares at each TP.
     kv_by_tp = {t: kv_at(t) for t in (1, 2, 4, 8) if t == tp or not topology_error(cfg, t)}
-    load = (load_allowance_gib(cfg, weight_bytes, args, max_len)
-            + (load_allowance_gib(draft[0], draft[1], args, max_len) if draft else 0))
+    load_parts = load_allowances(cfg, weight_bytes, args, max_len)
+    for name, gib in (load_allowances(draft[0], draft[1], args, max_len) if draft else {}).items():
+        load_parts[name] = load_parts.get(name, 0) + gib
+    load = sum(load_parts.values())
     needed = weights / GIB + load + tp * (kv_gib + OVERHEAD_GIB)
     memory = (weights / GIB + load + tp * OVERHEAD_GIB) * HEADROOM + tp * kv_gib + MARGIN_GIB
     return Sizing(weights_gib=weights / GIB, kv_gib=kv_gib, tp=tp, max_model_len=max_len,
                   needed_gib=needed, memory_gi=math.ceil(memory), load_gib=load, streams=streams,
-                  kv_by_tp=kv_by_tp)
+                  kv_by_tp=kv_by_tp, load_parts=load_parts)
 
 
 def served_context(cfg: dict | None, args: list[str]) -> int:

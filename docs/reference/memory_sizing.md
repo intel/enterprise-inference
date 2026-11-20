@@ -29,7 +29,13 @@ Sizing sets three things in the manifest, and prints how it got there:
 | `--max-model-len` | The longest request vLLM accepts: the model's own context, unless you set one |
 
 ```
-Memory: 39Gi (auto) | (weights 15.0 + overhead 1 x 3) x 1.15 + KV 1 x 16 + 2 | KV for up to 1 x 131072 tokens
+Memory: 39Gi (auto) = weights 15.0 + overhead 3 (1 x 3) + headroom 2.7 (15%) + KV 16 (1 x 16) + margin 2 GiB | KV for up to 1 x 131072 tokens
+```
+
+With load allowances, the log names each one:
+
+```
+Memory: 52Gi (auto) = weights 7.0 + load 29.0 (4.0 image encoder + 25.0 video profiling at 0.2 per 1K of 128000 tokens) + overhead 3 (1 x 3) + headroom 5.8 (15%) + KV 5 (1 x 5) + margin 2 GiB | KV for up to 1 x 128000 tokens
 ```
 
 ## Defaults
@@ -53,23 +59,28 @@ memory_gi = ceil( (W + load + TP × 3 GiB) × 1.15  +  TP × kv_gib  +  2 GiB )
 kv_gib    = max( 2, ceil(per_request × kv_streams / GiB) )      # per worker; default: one full-context request
 ```
 
-**Why the KV gets no headroom:** vLLM allocates the KV pool once, at exactly
-`VLLM_CPU_KVCACHE_SPACE`, and requests take blocks inside it, so it never grows. Measured
-live, the memory outside weights + KV stayed the same as the KV grew 14×, and under 16
-concurrent requests:
+### Why these constants
 
-| Qwen3 (cgroup anon) | KV 5 GiB | KV 70 GiB | Under load |
-|---|---|---|---|
-| 0.6B: runtime outside W + KV | 2.4 GiB | 2.5 GiB | +0.1 |
+A vLLM CPU pod runs three processes. Measured live (non-reclaimable memory, idle, [test environment](#test-environment)):
 
-| Qwen3 (cgroup anon) | KV 36 GiB | KV 144 GiB | Under load |
-|---|---|---|---|
-| 4B: runtime outside W + KV | 3.4 GiB | 3.5 GiB | +0.2 |
+| Pod (W, KV) | API server | EngineCore | Worker | Worker − W − KV | Pod − W − KV |
+|---|---|---|---|---|---|
+| Qwen3-0.6B (1.4, 5 GiB) | 0.90 | 0.58 | 7.29 | 0.9 | 2.4 |
+| Qwen3-4B (7.5, 36 GiB) | 0.90 | 0.58 | 45.50 | 2.0 | 3.5 |
+| Llama-3.1-8B (15.0, 16 GiB) | 0.93 | 0.71 | 34.24 | 3.2 | 4.9 |
 
-The estimated parts do vary. The runtime ranged from 2.5 GiB (0.6B models) to ~5 GiB
-(Llama-8B) to 8–9 GiB (30–35B), so they keep the 15%, and the fixed 2 GiB covers small models
-where 15% is only a few hundred MiB. With many streams this saves a lot: Llama-3.1-8B × 16 is
-279Gi, not the 316Gi a 15% on the KV would give.
+- **API server** (`vllm serve`): HTTP front end, tokenizer, detokenizer. One per pod.
+- **EngineCore**: the scheduler. It holds the block tables but no KV data. One per pod.
+- **Worker** (`VLLM::Worker`): one per TP rank. It holds that rank's share of the weights,
+  the whole `VLLM_CPU_KVCACHE_SPACE` pool, and its own runtime.
+
+| Constant | Value | Why |
+|---|---|---|
+| Runtime overhead | **3 GiB per TP worker** | Each worker is a separate Python process. It carries its own torch / oneDNN libraries, kernel scratch buffers, and the activations of one forward pass of up to `--max-num-batched-tokens` tokens (hidden states, MLP intermediates, logits). It is 0.9–3.2 GiB on the models above. The front end adds about 1.5 GiB once per pod, so at TP 1 the 3 GiB covers both for small and mid-size models. At TP > 1 the front end is counted again for each worker, which errs on the safe side |
+| Headroom | **× 1.15**, on weights + load + runtime only | These parts are estimates that grow with the model. Activations scale with the hidden size and vocabulary, so the runtime outside W + KV goes from 2.4 GiB (0.6B) to 4.9 GiB (8B) to 8–9 GiB (30–35B). 15% of the weights covers that growth: for Llama-8B, 3 + 0.15 × 18 = 5.7 GiB against 4.9 measured |
+| No headroom on the KV | — | vLLM allocates the KV pool once, at exactly `VLLM_CPU_KVCACHE_SPACE`, and requests take 128-token blocks inside it, so it never grows. Measured live, the memory outside W + KV stayed the same as the KV grew 14×: Qwen3-0.6B 2.4 → 2.5 GiB (KV 5 → 70), Qwen3-4B 3.4 → 3.5 GiB (KV 36 → 144). Under 16 concurrent requests it rose only 0.1–0.2 GiB. A 15% on the KV would buy nothing and grows with `kv_streams`: Llama-3.1-8B × 16 would be 316Gi instead of 279Gi |
+| Margin | **+2 GiB per pod** | It is not tied to the KV. It covers what a percentage misses on small models: 15% of Qwen3-0.6B's 4.4 GiB is only 0.7 GiB, while the runtime differs by ±1 GiB between models and vLLM versions. It also leaves room for the page cache that reading the safetensors leaves in the cgroup (3.8 GiB on Qwen3-4B). That cache is reclaimable, but if non-reclaimable memory sits right at the limit, the kernel has to reclaim it while serving |
+| Minimum KV | **2 GiB per worker** | vLLM refuses to start if the pool cannot hold one `--max-model-len` request. A short-context model's pool would also be tiny: Llama-3-8B-AWQ (8K) needs 1 GiB for one request. 2 GiB lets it serve 2 × 8K at once. It only applies when one full-context request needs less than 2 GiB (8K-context models, Whisper) |
 
 | Term | Meaning |
 |---|---|
@@ -255,21 +266,25 @@ of these layouts (at 16 × 8K, and at 1 × 262,144 for Qwen3-4B).
 ### Load allowances
 
 Memory a deploy needs beyond its weights, KV cache and 3 GiB runtime, from what `config.json`
-declares. Measured on Xeon, vLLM 0.28, as the cgroup's peak:
+declares. Each one is memory that vLLM uses at start-up or keeps resident, and that the weights
+and KV don't account for. The deploy log names each allowance it adds, e.g.
+`load 29.0 (4.0 image encoder + 25.0 video profiling at 0.2 per 1K of 128000 tokens)`.
 
-| Allowance | When | Amount | Measured |
-|---|---|---|---|
-| Quantized repack | `quantization_config` (AWQ, GPTQ): vLLM repacks the weights for the CPU kernel, both copies briefly resident | 0.4 × weights | Llama-3-8B-AWQ: about 0.2 × weights |
-| Vision / audio towers | `vision_config` / `audio_config`, unless every modality the model has is limited to 0 | 4 GiB | Images +2.5 GiB (Qwen2.5-VL-3B), images and audio +2.4 GiB (Gemma 4 E4B) |
-| Native video | `vision_config.temporal_patch_size` (Qwen2-VL, 2.5-VL, 3-VL, 3.5) with `video_token_id`, unless video is limited to 0 | 0.2 GiB per 1K tokens of context | Qwen2.5-VL-3B: +2.3 GiB at 32K, +26.4 GiB at 128K |
-| Per-layer embeddings | `hidden_size_per_layer_input` (Gemma 3n, Gemma 4 E2B / E4B) | The tables in fp32: vocab × layers × dim × 4 B | Gemma 4 E4B: 10.5 GiB allowed, about 9 GiB used |
+| Allowance (log name) | When | Amount | What uses the memory | Measured (cgroup peak, [test environment](#test-environment)) |
+|---|---|---|---|---|
+| `quantized repack` | `quantization_config` (AWQ, GPTQ) | 0.4 × weights | The checkpoint's packed int4 layout isn't the one the CPU kernel runs. At load vLLM converts each weight to the kernel's layout, and the source and repacked tensors are both resident until the source is freed | Llama-3-8B-AWQ: about 0.2 × weights. 0.4 is twice that, as only one quantized model was measured |
+| `image encoder`, `audio encoder` | `vision_config` / `audio_config`, unless every modality the model has is limited to 0 | 4 GiB | At start-up vLLM profiles the encoder: it runs the largest dummy image or audio clip `--limit-mm-per-prompt` allows, to size its activations and encoder cache. The ViT / audio-encoder activations of that pass, and the multimodal input processing, are on top of the weights | Images +2.5 GiB (Qwen2.5-VL-3B); images and audio +2.4 GiB (Gemma 4 E4B) |
+| `video profiling` | `vision_config.temporal_patch_size` (Qwen2-VL, 2.5-VL, 3-VL, 3.5, 3.6) with `video_token_id`, unless video is limited to 0 | 0.2 GiB per 1K tokens of context | The same profiling, with a dummy video. These encoders turn time into tokens (temporal patches), so vLLM builds the longest video the context can hold. At 256K that's a 256K-token pass through the vision encoder | Qwen2.5-VL-3B: +2.3 GiB at 32K, +26.4 GiB at 128K |
+| `per-layer embeddings` | `hidden_size_per_layer_input` (Gemma 3n, Gemma 4 E2B / E4B) | The tables in fp32: vocab × layers × dim × 4 B | These models have an extra embedding table for every layer (262,144 × 42 × 256 on E4B). The allowance assumes they are resident in fp32, twice their bf16 checkpoint size: 10.5 GiB against 5.25 GiB | Gemma 4 E4B: 10.5 GiB allowed, about 9 GiB used |
 
-- **Why video depends on the context:** at start-up, vLLM profiles each modality with the
-  largest input the context allows. An encoder with temporal patches turns a long video into
-  that many tokens, so its profiling grows with `--max-model-len`. Frame-sampling encoders
-  (Gemma, LLaVA) add next to nothing for video, so only their towers count.
-- **Images don't scale like this:** the vision weights are already in `W`, and an image's
-  token count is bounded.
+- **Why video depends on the context and images don't:** an image's token count is bounded
+  by its resolution, but a video with temporal patches grows with `--max-model-len`.
+  Frame-sampling encoders (Gemma, LLaVA) take a fixed number of frames, so they add next to
+  nothing for video, and only their encoder allowance counts.
+- **The video rate is the least certain number.** It grew faster than the context: 0.07 GiB
+  per 1K at 32K, 0.21 at 128K. 0.2 fits 128K, but beyond 128K it is extrapolated, not
+  measured. Qwen3.6-35B-A3B at its 262,144-token default gets 51.2 GiB of video. If you don't
+  serve video, set `--limit-mm-per-prompt.video=0`; if you do, check the first deploy's peak.
 - **`--limit-mm-per-prompt`** is read in both forms, `.image 0` and `'{"image": 0, "video": 0}'`.
   Without video, a Qwen-VL model needs a small fraction of the memory: Qwen2.5-VL-3B goes
   from 52Gi to 24Gi.
@@ -286,6 +301,18 @@ peaks were measured at the slightly lower earlier sizing (51 / 26 / 22 / 41 / 37
 | Qwen2.5-VL-3B, images only, 128K | 24Gi | 19.3 GiB (17.4) |
 | Gemma 4 E4B, images + audio + video, 131K | 43Gi | 36.4 GiB (32.3) |
 | Gemma 4 E4B, text only, 131K | 38Gi | 29.9 GiB (29.5) |
+
+## Test environment
+
+| | |
+|---|---|
+| Hardware | 2 × Xeon 6960P (72 cores each, AMX), 1.5 TiB, 6 NUMA nodes (SNC) of 252 GiB |
+| Software | Ubuntu 24.04, kernel 6.8, Kubernetes 1.35, NRI balloons; pods of 8–24 CPUs |
+| vLLM (CPU image) | 0.28.0: KV accuracy, multimodal, Llama. 0.24.0: Qwen3 runtime and headroom |
+
+The KV and weight sizes don't depend on the hardware: they come from `config.json` and vLLM's
+allocator. The runtime overhead, quantized repack and encoder allowances do depend on it (CPU
+ISA, thread count, vLLM / torch version), so recheck them on other hardware or a new vLLM.
 
 ## Limits
 

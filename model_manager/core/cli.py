@@ -402,9 +402,14 @@ def _apply_sizing(m: Model, catalog: Catalog, o: Options, cli_args: list[str], t
     if not sizer.arg_value(args, "--max-model-len"):
         m.max_model_len = str(s.max_model_len)
     m.sizing = {SIZING_INPUTS: inputs, **({SIZED_CONTEXT: m.max_model_len} if m.max_model_len else {})}
-    info(f"  Memory: {m.memory} (auto) | (weights {s.weights_gib:.1f}{_load_text(s.load_gib)} + overhead {s.tp} x "
-         f"{sizer.OVERHEAD_GIB}) x {sizer.HEADROOM} + KV {s.tp} x {s.kv_gib} + {sizer.MARGIN_GIB} | KV for up to "
-         f"{s.streams} x {s.max_model_len} tokens")
+    overhead = s.tp * sizer.OVERHEAD_GIB
+    headroom = (s.weights_gib + s.load_gib + overhead) * (sizer.HEADROOM - 1)
+    parts = " + ".join(f"{gib:.1f} {name}" for name, gib in s.load_parts.items())
+    load = f"{_load_text(s.load_gib)} ({parts})" if parts else ""
+    info(f"  Memory: {m.memory} (auto) = weights {s.weights_gib:.1f}{load}"
+         f" + overhead {overhead} ({s.tp} x {sizer.OVERHEAD_GIB}) + headroom {headroom:.1f}"
+         f" ({round((sizer.HEADROOM - 1) * 100)}%) + KV {s.tp * s.kv_gib} ({s.tp} x {s.kv_gib})"
+         f" + margin {sizer.MARGIN_GIB} GiB | KV for up to {s.streams} x {s.max_model_len} tokens")
     return s
 
 

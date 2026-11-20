@@ -267,6 +267,16 @@ def test_load_allowances_are_sized():
     assert sizer.size(QWEN_VL, gib(14.96), [*LLM_ARGS, *K8], 1).load_gib == pytest.approx(4 + 0.2 * 8)
 
 
+def test_load_allowances_are_named_for_the_log():
+    s = sizer.size(QWEN_VL, gib(14.96), LLM_ARGS, 1)
+    assert s.load_parts == pytest.approx({"image encoder": 4,
+                                          "video profiling at 0.2 per 1K of 131072 tokens": 0.2 * 128})
+    assert sum(s.load_parts.values()) == pytest.approx(s.load_gib)
+    assert list(sizer.load_allowances(GEMMA4_E4B, gib(15), [])) == ["image/audio encoder"]
+    assert list(sizer.load_allowances(PLE, gib(15), [])) == ["per-layer embeddings in fp32"]
+    assert sizer.size(LLAMA_8B, gib(15), LLM_ARGS, 1).load_parts == {}
+
+
 def test_served_context_for_a_fixed_memory():
     assert sizer.served_context(LLAMA_8B, ["--max-model-len", "32K"]) == 32768
     assert sizer.served_context(LLAMA_8B, []) == 131072 and sizer.served_context(None, []) == 0

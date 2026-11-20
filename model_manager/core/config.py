@@ -209,6 +209,7 @@ class Sizing:
     load_gib: float = 0.0                     # load-time allowances: quantized repack, multimodal encoders
     streams: int = 1                          # full-context requests the KV holds: kv_streams (default 1)
     kv_by_tp: dict = field(default_factory=dict)  # sized KV per worker at each valid TP, for the NUMA hint
+    load_parts: dict = field(default_factory=dict)  # load_gib by allowance name, for the deploy log
 
 
 @dataclass
